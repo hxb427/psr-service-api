@@ -51,10 +51,25 @@ jobs:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE_SHA: ${{ github.sha }}
         run: |
-          docker build -f deploy/Dockerfile \
-            -t "$ECR_REGISTRY/$ECR_REPO:$IMAGE_SHA" \
-            -t "$ECR_REGISTRY/$ECR_REPO:latest" \
-            .
+          # MCR (mcr.microsoft.com) intermittently returns 403 on base-image
+          # manifest HEAD requests from CI runners. It's transient — retry the build.
+          build() {
+            docker build -f deploy/Dockerfile \
+              -t "$ECR_REGISTRY/$ECR_REPO:$IMAGE_SHA" \
+              -t "$ECR_REGISTRY/$ECR_REPO:latest" \
+              .
+          }
+          attempt=1
+          max=4
+          until build; do
+            if [ "$attempt" -ge "$max" ]; then
+              echo "::error::docker build failed after $max attempts"
+              exit 1
+            fi
+            echo "docker build failed (attempt $attempt/$max) — likely transient MCR 403, retrying in 20s..."
+            attempt=$((attempt + 1))
+            sleep 20
+          done
           docker push "$ECR_REGISTRY/$ECR_REPO:$IMAGE_SHA"
           docker push "$ECR_REGISTRY/$ECR_REPO:latest"
 

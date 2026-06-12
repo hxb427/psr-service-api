@@ -5,7 +5,7 @@
       "Sid": "AllowGitHubActionsFromApiRepo",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::REPLACE_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::423693203837:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
