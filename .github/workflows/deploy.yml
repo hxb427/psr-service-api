@@ -86,9 +86,19 @@ jobs:
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/psr/service-api/docker-compose.yml"
 
       - name: Pull + restart on EC2
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
+          # The EC2 box must authenticate its Docker daemon to ECR before pulling.
+          # Its instance role (psr-ec2-ecr-read) supplies the credentials for
+          # `aws ecr get-login-password`; the token it returns is good for 12h.
           ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
-            "cd /opt/psr/service-api && docker compose pull && docker compose up -d --remove-orphans && docker image prune -f"
+            "aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+               | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+             && cd /opt/psr/service-api \
+             && docker compose pull \
+             && docker compose up -d --remove-orphans \
+             && docker image prune -f"
 
       - name: Smoke test /health
         run: |
