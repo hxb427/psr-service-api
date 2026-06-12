@@ -1,0 +1,85 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPO: psr-service-api
+
+permissions:
+  id-token: write     # required for AWS OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore + test
+        run: |
+          dotnet restore
+          dotnet test --no-restore -c Release --logger "console;verbosity=normal"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build + push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_SHA: ${{ github.sha }}
+        run: |
+          docker build -f deploy/Dockerfile \
+            -t "$ECR_REGISTRY/$ECR_REPO:$IMAGE_SHA" \
+            -t "$ECR_REGISTRY/$ECR_REPO:latest" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_REPO:$IMAGE_SHA"
+          docker push "$ECR_REGISTRY/$ECR_REPO:latest"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload docker-compose.yml to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa deploy/docker-compose.yml \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/psr/service-api/docker-compose.yml"
+
+      - name: Pull + restart on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "cd /opt/psr/service-api && docker compose pull && docker compose up -d --remove-orphans && docker image prune -f"
+
+      - name: Smoke test /health
+        run: |
+          # Retry while Kestrel finishes binding inside the new container.
+          # --retry-connrefused is essential — without it the first refused TCP fails fast.
+          curl -fk --retry 10 --retry-connrefused --retry-delay 5 --max-time 10 \
+            "https://${{ secrets.EC2_HOST }}/health"
+          echo ""
+          echo "Deploy OK — commit ${{ github.sha }}"

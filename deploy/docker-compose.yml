@@ -1,0 +1,32 @@
+# Production docker-compose for the PSR Service API.
+# Lives on EC2 at /opt/psr/service-api/docker-compose.yml.
+# CI uploads this file each deploy (we don't keep a git checkout on the box).
+#
+# Local dev does NOT use this file — use `dotnet run --project src/PSR.Service.Api`.
+# If you want to test the Docker image locally, build it directly:
+#   docker build -f deploy/Dockerfile -t psr-service-api:dev .
+#   API_IMAGE=psr-service-api:dev docker compose -f deploy/docker-compose.yml up
+
+services:
+  api:
+    image: ${API_IMAGE:?Set API_IMAGE in .env to the ECR image URI}
+    container_name: psr-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "443:8443"
+    volumes:
+      - ./certs:/certs:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fk", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

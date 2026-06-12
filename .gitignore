@@ -1,0 +1,58 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+*.binlog
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# Test results
+[Tt]est[Rr]esult*/
+*.coverage
+*.coveragexml
+
+# User-specific
+*.rsuser
+
+# Local config & secrets
+**/appsettings.Local.json
+**/secrets.json
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Certs (self-signed, generated locally or on EC2)
+deploy/certs/*
+!deploy/certs/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# EF Core
+# (Migrations ARE committed — don't ignore them)
+
+# Misc
+*.log
+*.tmp
+*.bak
