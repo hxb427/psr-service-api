@@ -1,8 +1,10 @@
 using Serilog;
+using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
+using PSR.Service.Api.Users;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,6 +12,7 @@ builder.AddSerilogLogging();
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddAuth(builder.Configuration);
 builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
@@ -23,6 +26,9 @@ app.UseAuthorization();
 
 app.MapHealthEndpoints();
 app.MapAuthEndpoints();
+app.MapUserEndpoints();
+app.MapRoleEndpoints();
+app.MapAuditEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

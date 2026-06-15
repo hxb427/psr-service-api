@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Auth;
 
@@ -31,10 +33,14 @@ public static class ServiceCollectionExtensions
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Signing)),
                     ClockSkew = TimeSpan.FromSeconds(30),
                     NameClaimType = "unique_name",
+                    RoleClaimType = ClaimTypes.Role,
                 };
             });
 
-        services.AddAuthorization();
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy("Admin", p => p.RequireRole(RoleNames.Admin));
+        });
         return services;
     }
 }
