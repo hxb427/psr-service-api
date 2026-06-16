@@ -1,6 +1,6 @@
 namespace PSR.Service.Api.Data.Entities;
 
-public class User
+public class User : ITimestamps
 {
     public long Id { get; set; }
     public string Username { get; set; } = string.Empty;

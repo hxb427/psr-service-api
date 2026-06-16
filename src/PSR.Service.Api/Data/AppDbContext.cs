@@ -11,6 +11,10 @@ public class AppDbContext : DbContext
     public DbSet<Role> Roles => Set<Role>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
     public DbSet<AuditLog> AuditLog => Set<AuditLog>();
+    public DbSet<Part> Parts => Set<Part>();
+    public DbSet<ServiceCharge> ServiceCharges => Set<ServiceCharge>();
+    public DbSet<Dealer> Dealers => Set<Dealer>();
+    public DbSet<Customer> Customers => Set<Customer>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,7 +36,7 @@ public class AppDbContext : DbContext
     private void StampTimestamps()
     {
         var now = DateTime.UtcNow;
-        foreach (var entry in ChangeTracker.Entries<User>())
+        foreach (var entry in ChangeTracker.Entries<ITimestamps>())
         {
             if (entry.State == EntityState.Added)
             {

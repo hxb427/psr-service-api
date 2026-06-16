@@ -4,6 +4,7 @@ using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
+using PSR.Service.Api.Reference;
 using PSR.Service.Api.Users;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,6 +30,9 @@ app.MapAuthEndpoints();
 app.MapUserEndpoints();
 app.MapRoleEndpoints();
 app.MapAuditEndpoints();
+app.MapPartEndpoints();
+app.MapServiceChargeEndpoints();
+app.MapDealerEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();
