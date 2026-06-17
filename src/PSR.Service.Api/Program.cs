@@ -5,6 +5,7 @@ using PSR.Service.Api.Data;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
 using PSR.Service.Api.Reference;
+using PSR.Service.Api.Stock;
 using PSR.Service.Api.Users;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,6 +15,8 @@ builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddAuth(builder.Configuration);
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IAuditService, AuditService>();
+builder.Services.AddScoped<NumberSequenceService>();
+builder.Services.AddScoped<StockLedgerService>();
 builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
@@ -33,6 +36,9 @@ app.MapAuditEndpoints();
 app.MapPartEndpoints();
 app.MapServiceChargeEndpoints();
 app.MapDealerEndpoints();
+app.MapStockEndpoints();
+app.MapStockRequestEndpoints();
+app.MapStockReturnEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

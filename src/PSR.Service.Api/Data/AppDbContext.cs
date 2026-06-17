@@ -15,6 +15,11 @@ public class AppDbContext : DbContext
     public DbSet<ServiceCharge> ServiceCharges => Set<ServiceCharge>();
     public DbSet<Dealer> Dealers => Set<Dealer>();
     public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<StockMovement> StockMovements => Set<StockMovement>();
+    public DbSet<StockBalance> StockBalances => Set<StockBalance>();
+    public DbSet<StockRequest> StockRequests => Set<StockRequest>();
+    public DbSet<StockReturn> StockReturns => Set<StockReturn>();
+    public DbSet<NumberSequence> NumberSequences => Set<NumberSequence>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
