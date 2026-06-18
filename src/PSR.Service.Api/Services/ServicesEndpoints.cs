@@ -23,6 +23,7 @@ public static class ServicesEndpoints
         group.MapGet("/technicians", TechniciansAsync).RequireAuthorization("ServiceAssign");
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/", CreateAsync).RequireAuthorization("InwardManage");
+        group.MapPost("/inward-batch", InwardBatchAsync).RequireAuthorization("InwardManage");
         group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync).RequireAuthorization("InwardManage");
         group.MapPost("/{id:long}/assign", AssignAsync).RequireAuthorization("ServiceAssign");
         group.MapPost("/{id:long}/lines", AddLineAsync);
@@ -73,7 +74,7 @@ public static class ServicesEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var items = rows.Select(x => new ServiceListItemDto(
-            x.s.Id, x.s.ServiceNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.ModelName,
+            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.ModelName,
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived)).ToList();
@@ -128,13 +129,16 @@ public static class ServicesEndpoints
         ServiceJob job;
         try
         {
-            var customerId = await ResolveCustomerAsync(db, req, ct);
+            var customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
+                req.OrganizationName, req.Phone, req.Email, req.Address, ct);
             if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
 
             var no = await seq.NextAsync(SequenceKeys.Service, ct);
             job = new ServiceJob
             {
                 ServiceNo = no,
+                ChallanNo = req.ChallanNo?.Trim(),
+                CustomerType = req.CustomerType?.Trim(),
                 CustomerId = customerId.Value,
                 DealerId = req.DealerId,
                 SerialNo = req.SerialNo.Trim(),
@@ -166,19 +170,87 @@ public static class ServicesEndpoints
         return TypedResults.Created($"/services/{job.Id}", await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static async Task<long?> ResolveCustomerAsync(AppDbContext db, CreateServiceRequest req, CancellationToken ct)
+    private static async Task<Results<Created<InwardBatchResult>, BadRequest<string>>> InwardBatchAsync(
+        [FromBody] InwardBatchRequest req, ClaimsPrincipal user, AppDbContext db,
+        NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
     {
-        if (req.CustomerId is { } cid)
-            return await db.Customers.AnyAsync(c => c.Id == cid, ct) ? cid : null;
+        if (req.Items is null || req.Items.Count == 0)
+            return TypedResults.BadRequest("Add at least one item.");
+        if (req.CustomerId is null && string.IsNullOrWhiteSpace(req.CustomerName))
+            return TypedResults.BadRequest("Provide an existing customerId or a customerName to create.");
+        if (req.Items.Any(i => string.IsNullOrWhiteSpace(i.SerialNo)))
+            return TypedResults.BadRequest("Every item needs a serial number.");
+        if (req.DealerId is { } did && !await db.Dealers.AnyAsync(d => d.Id == did, ct))
+            return TypedResults.BadRequest("Dealer not found.");
 
-        var name = req.CustomerName!.Trim();
+        var priority = Priority.Normal;
+        if (!string.IsNullOrWhiteSpace(req.Priority)) Enum.TryParse(req.Priority, true, out priority);
+        var received = req.DateReceived ?? DateTime.UtcNow;
+        user.TryGetUserId(out var uid);
+
+        var created = new List<ServiceJob>();
+        string? customerName;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            var customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
+                req.OrganizationName, req.Phone, null, req.Address, ct);
+            if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
+            customerName = await db.Customers.Where(c => c.Id == customerId).Select(c => c.Name).FirstAsync(ct);
+
+            foreach (var item in req.Items)
+            {
+                Enum.TryParse<WarrantyStatus>(item.WarrantyStatus, true, out var warranty);
+                var no = await seq.NextAsync(SequenceKeys.Service, ct);
+                var job = new ServiceJob
+                {
+                    ServiceNo = no, ChallanNo = req.ChallanNo?.Trim(), CustomerType = req.CustomerType?.Trim(),
+                    CustomerId = customerId.Value, DealerId = req.DealerId, SerialNo = item.SerialNo.Trim(),
+                    ModelName = item.ModelName?.Trim(), Description = item.Description?.Trim(),
+                    ReportedProblem = item.ReportedProblem?.Trim(), WarrantyStatus = warranty,
+                    InwardDcNo = req.InwardDcNo?.Trim(), DateReceived = received, Priority = priority,
+                    ServiceStatus = ServiceStatus.Inward, AckStatus = AckStatus.Pending, CreatedByUserId = uid,
+                };
+                db.Services.Add(job);
+                created.Add(job);
+            }
+            await db.SaveChangesAsync(ct);   // assign Ids
+
+            foreach (var job in created)
+                db.ServiceStatusHistory.Add(new ServiceStatusHistory
+                {
+                    ServiceId = job.Id, FromStatus = null, ToStatus = ServiceStatus.Inward.ToString(),
+                    ChangedByUserId = uid, Note = "Inward created (batch)",
+                });
+            audit.Log(uid, "service.inward-batch", "service", null,
+                details: $"{created.Count} item(s), challan {req.ChallanNo}", ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
+
+        var jobs = created.Select(j => new ServiceListItemDto(
+            j.Id, j.ServiceNo, j.ChallanNo, j.CustomerId, customerName, j.SerialNo, j.ModelName,
+            j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
+            j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived)).ToList();
+        return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
+    }
+
+    private static async Task<long?> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
+        string? org, string? phone, string? email, string? address, CancellationToken ct)
+    {
+        if (customerId is { } cid)
+            return await db.Customers.AnyAsync(c => c.Id == cid, ct) ? cid : null;
+        if (string.IsNullOrWhiteSpace(customerName)) return null;
+
+        var name = customerName.Trim();
         var existing = await db.Customers.FirstOrDefaultAsync(c => c.Name == name && c.IsActive, ct);
         if (existing is not null) return existing.Id;
 
         var created = new Customer
         {
-            Name = name, OrganizationName = req.OrganizationName?.Trim(),
-            Phone = req.Phone?.Trim(), Email = req.Email?.Trim(), Address = req.Address?.Trim(),
+            Name = name, OrganizationName = org?.Trim(),
+            Phone = phone?.Trim(), Email = email?.Trim(), Address = address?.Trim(),
         };
         db.Customers.Add(created);
         await db.SaveChangesAsync(ct);
@@ -481,7 +553,7 @@ public static class ServicesEndpoints
             .ToListAsync(ct);
 
         return new ServiceDetailDto(
-            job.Id, job.ServiceNo, job.CustomerId, customer?.Name, customer?.Phone,
+            job.Id, job.ServiceNo, job.ChallanNo, job.CustomerType, job.CustomerId, customer?.Name, customer?.Phone,
             job.DealerId, dealerName, job.SerialNo, job.ModelName, job.Description,
             job.ReportedProblem, job.WarrantyStatus.ToString(), job.InwardDcNo, job.OutwardDcNo, job.DcDate,
             job.DateReceived, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),

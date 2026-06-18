@@ -5,7 +5,9 @@ namespace PSR.Service.Api.Data.Entities;
 public class ServiceJob : ITimestamps
 {
     public long Id { get; set; }
-    public string ServiceNo { get; set; } = string.Empty;   // challan, unique
+    public string ServiceNo { get; set; } = string.Empty;   // auto per-job id (SVCnnnnn), unique
+    public string? ChallanNo { get; set; }                  // user-entered service challan, shared across a multi-item inward batch
+    public string? CustomerType { get; set; }               // e.g. Dealer / Direct (legacy customer-type toggle)
 
     public long CustomerId { get; set; }
     public long? DealerId { get; set; }

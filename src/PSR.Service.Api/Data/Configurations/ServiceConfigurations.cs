@@ -13,6 +13,9 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.Id).HasColumnName("id");
         b.Property(x => x.ServiceNo).HasColumnName("service_no").HasMaxLength(40).IsRequired();
         b.HasIndex(x => x.ServiceNo).IsUnique();
+        b.Property(x => x.ChallanNo).HasColumnName("challan_no").HasMaxLength(50);
+        b.HasIndex(x => x.ChallanNo);
+        b.Property(x => x.CustomerType).HasColumnName("customer_type").HasMaxLength(30);
 
         b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.DealerId).HasColumnName("dealer_id");

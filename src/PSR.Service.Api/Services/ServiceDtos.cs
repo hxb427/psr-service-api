@@ -28,8 +28,34 @@ public record CreateServiceRequest(
     long? DealerId,
     string? WarrantyStatus,
     [StringLength(50)] string? InwardDcNo,
+    [StringLength(50)] string? ChallanNo,
+    [StringLength(30)] string? CustomerType,
     string? Priority,
     DateTime? DateReceived);
+
+// Multi-item inward: a shared header + one row per unit (each becomes its own service job).
+public record InwardBatchRequest(
+    long? CustomerId,
+    [StringLength(200)] string? CustomerName,
+    [StringLength(200)] string? OrganizationName,
+    [StringLength(50)] string? Phone,
+    [StringLength(500)] string? Address,
+    [StringLength(30)] string? CustomerType,
+    long? DealerId,
+    [StringLength(50)] string? ChallanNo,
+    [StringLength(50)] string? InwardDcNo,
+    DateTime? DateReceived,
+    string? Priority,
+    List<InwardItem> Items);
+
+public record InwardItem(
+    [Required, StringLength(100)] string SerialNo,
+    [StringLength(100)] string? ModelName,
+    [StringLength(500)] string? Description,
+    [StringLength(1000)] string? ReportedProblem,
+    string? WarrantyStatus);
+
+public record InwardBatchResult(string? ChallanNo, int Created, List<ServiceListItemDto> Jobs);
 
 public record TechnicianOptionDto(long Id, string Username, string? FullName);
 
@@ -54,7 +80,7 @@ public record PaymentRequest([Required] string Status);
 
 // ----- read -----
 public record ServiceListItemDto(
-    long Id, string ServiceNo, long CustomerId, string? CustomerName, string SerialNo, string? ModelName,
+    long Id, string ServiceNo, string? ChallanNo, long CustomerId, string? CustomerName, string SerialNo, string? ModelName,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
     long? TechnicianId, string? TechnicianName, DateTime DateReceived);
 
@@ -70,7 +96,7 @@ public record ServiceHistoryDto(
 
 // Total is null for non-pricing roles.
 public record ServiceDetailDto(
-    long Id, string ServiceNo, long CustomerId, string? CustomerName, string? CustomerPhone,
+    long Id, string ServiceNo, string? ChallanNo, string? CustomerType, long CustomerId, string? CustomerName, string? CustomerPhone,
     long? DealerId, string? DealerName, string SerialNo, string? ModelName, string? Description,
     string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, DateTime? DcDate,
     DateTime DateReceived, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
