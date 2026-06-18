@@ -1,0 +1,45 @@
+namespace PSR.Service.Api.Data.Entities;
+
+/// <summary>A service job (legacy service_table), normalized. Line items live in service_lines;
+/// status changes are recorded in service_status_history. PI/Invoice/DC numbering is Phase 5.</summary>
+public class ServiceJob : ITimestamps
+{
+    public long Id { get; set; }
+    public string ServiceNo { get; set; } = string.Empty;   // challan, unique
+
+    public long CustomerId { get; set; }
+    public long? DealerId { get; set; }
+
+    public string SerialNo { get; set; } = string.Empty;
+    public string? ModelName { get; set; }
+    public string? Description { get; set; }
+    public string? ReportedProblem { get; set; }
+    public WarrantyStatus WarrantyStatus { get; set; } = WarrantyStatus.Unknown;
+
+    public string? InwardDcNo { get; set; }
+    public string? OutwardDcNo { get; set; }
+    public DateTime? DcDate { get; set; }
+    public DateTime DateReceived { get; set; } = DateTime.UtcNow;
+
+    public long? TechnicianId { get; set; }
+    public Priority Priority { get; set; } = Priority.Normal;
+    public AckStatus AckStatus { get; set; } = AckStatus.Pending;
+    public ServiceStatus ServiceStatus { get; set; } = ServiceStatus.Inward;
+    public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
+    public string? TechnicianRemarks { get; set; }
+
+    // Whole-unit replacement (set when ServiceStatus == Replaced). The incoming/defective unit's serial
+    // is SerialNo above; ReplacementSerialNo is the new unit handed to the customer. ReplacementPartId
+    // is the catalog part the replacement was drawn from (nullable — only set when it is a stocked part,
+    // in which case the warehouse is decremented via a Replacement stock movement).
+    public string? ReplacementSerialNo { get; set; }
+    public long? ReplacementPartId { get; set; }
+
+    public long CreatedByUserId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public uint RowVersion { get; set; }   // optimistic concurrency (bumped on update)
+
+    public List<ServiceLine> Lines { get; set; } = new();
+}

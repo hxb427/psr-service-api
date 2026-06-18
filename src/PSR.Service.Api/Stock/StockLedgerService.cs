@@ -61,6 +61,33 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
+    /// <summary>Consume a part from a technician's on-hand stock (parts fitted while servicing).
+    /// Called per part-bearing line when a service is completed.</summary>
+    public async Task ConsumeAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        if (!await GuardedDecrementAsync(partId, technicianId, qty, ct))
+            throw new StockException("Technician does not hold enough of this part to consume.");
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.Consumption, Quantity = qty, TechnicianId = technicianId,
+            PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
+    /// <summary>Ship a whole replacement unit out of the warehouse (service resolved by full replacement).
+    /// Records the replacement unit's serial on the movement.</summary>
+    public async Task ReplacementOutAsync(long partId, int qty, long byUser, long serviceId, string? serialNo, string? remarks, CancellationToken ct)
+    {
+        if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
+            throw new StockException("Insufficient warehouse stock for the replacement unit.");
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.Replacement, Quantity = qty,
+            PerformedByUserId = byUser, ReferenceType = "SERVICE", ReferenceId = serviceId,
+            SerialNo = serialNo, Remarks = remarks,
+        });
+    }
+
     private Task IncrementAsync(long partId, long technicianId, int delta, CancellationToken ct) =>
         db.Database.ExecuteSqlInterpolatedAsync($@"
 INSERT INTO `stock_balances` (`part_id`, `technician_id`, `on_hand`, `created_at`, `updated_at`)

@@ -5,6 +5,7 @@ using PSR.Service.Api.Data;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
 using PSR.Service.Api.Reference;
+using PSR.Service.Api.Services;
 using PSR.Service.Api.Stock;
 using PSR.Service.Api.Users;
 
@@ -39,6 +40,8 @@ app.MapDealerEndpoints();
 app.MapStockEndpoints();
 app.MapStockRequestEndpoints();
 app.MapStockReturnEndpoints();
+app.MapCustomerEndpoints();
+app.MapServiceEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

@@ -20,6 +20,9 @@ public class AppDbContext : DbContext
     public DbSet<StockRequest> StockRequests => Set<StockRequest>();
     public DbSet<StockReturn> StockReturns => Set<StockReturn>();
     public DbSet<NumberSequence> NumberSequences => Set<NumberSequence>();
+    public DbSet<ServiceJob> Services => Set<ServiceJob>();
+    public DbSet<ServiceLine> ServiceLines => Set<ServiceLine>();
+    public DbSet<ServiceStatusHistory> ServiceStatusHistory => Set<ServiceStatusHistory>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

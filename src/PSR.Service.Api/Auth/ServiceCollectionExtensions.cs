@@ -46,6 +46,18 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.StoreManager));
             options.AddPolicy("ReturnAck", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+
+            // Phase 4 — service workflow
+            options.AddPolicy("InwardManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.InwardManager, RoleNames.Supervisor));
+            options.AddPolicy("ServiceAssign", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager));
+            options.AddPolicy("ServiceManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            options.AddPolicy("DispatchManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.DispatchManager, RoleNames.Supervisor));
+            options.AddPolicy("PaymentManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Accounts));
         });
         return services;
     }

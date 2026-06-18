@@ -12,4 +12,5 @@ public static class SequenceKeys
 {
     public const string StockRequest = "STOCK_REQUEST";
     public const string StockReturn = "STOCK_RETURN";
+    public const string Service = "SERVICE";
 }

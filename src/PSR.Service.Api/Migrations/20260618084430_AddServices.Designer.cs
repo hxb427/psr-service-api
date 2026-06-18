@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PSR.Service.Api.Data;
 
@@ -11,9 +12,11 @@ using PSR.Service.Api.Data;
 namespace PSR.Service.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260618084430_AddServices")]
+    partial class AddServices
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -511,15 +514,6 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(20)")
                         .HasColumnName("priority");
 
-                    b.Property<long?>("ReplacementPartId")
-                        .HasColumnType("bigint")
-                        .HasColumnName("replacement_part_id");
-
-                    b.Property<string>("ReplacementSerialNo")
-                        .HasMaxLength(100)
-                        .HasColumnType("varchar(100)")
-                        .HasColumnName("replacement_serial_no");
-
                     b.Property<string>("ReportedProblem")
                         .HasMaxLength(1000)
                         .HasColumnType("varchar(1000)")
@@ -572,8 +566,6 @@ namespace PSR.Service.Api.Migrations
                     b.HasIndex("CustomerId");
 
                     b.HasIndex("DealerId");
-
-                    b.HasIndex("ReplacementPartId");
 
                     b.HasIndex("SerialNo");
 
@@ -1050,11 +1042,6 @@ namespace PSR.Service.Api.Migrations
                     b.HasOne("PSR.Service.Api.Data.Entities.Dealer", null)
                         .WithMany()
                         .HasForeignKey("DealerId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("PSR.Service.Api.Data.Entities.Part", null)
-                        .WithMany()
-                        .HasForeignKey("ReplacementPartId")
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 

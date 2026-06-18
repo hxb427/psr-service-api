@@ -113,6 +113,7 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
 
         b.HasData(
             new NumberSequence { Key = SequenceKeys.StockRequest, Prefix = "REQ", NextValue = 1 },
-            new NumberSequence { Key = SequenceKeys.StockReturn, Prefix = "RET", NextValue = 1 });
+            new NumberSequence { Key = SequenceKeys.StockReturn, Prefix = "RET", NextValue = 1 },
+            new NumberSequence { Key = SequenceKeys.Service, Prefix = "SVC", NextValue = 1 });
     }
 }
