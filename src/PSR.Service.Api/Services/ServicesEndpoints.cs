@@ -50,9 +50,12 @@ public static class ServicesEndpoints
         var q = from s in db.Services.AsNoTracking()
                 join c in db.Customers on s.CustomerId equals c.Id into cg
                 from c in cg.DefaultIfEmpty()
+                join d in db.Dealers on s.DealerId equals d.Id into dg
+                from d in dg.DefaultIfEmpty()
                 join u in db.Users on s.TechnicianId equals u.Id into ug
                 from u in ug.DefaultIfEmpty()
-                select new { s, CustomerName = c != null ? c.Name : null, TechName = u != null ? u.Username : null };
+                // Party is the direct customer, or the dealer when it's a dealer-type job.
+                select new { s, CustomerName = c != null ? c.Name : (d != null ? d.Name : null), TechName = u != null ? u.Username : null };
 
         // Technicians (without a supervisory role) see only jobs assigned to them.
         if (!ServiceRoles.CanManage(user) && ServiceRoles.IsTechnician(user) && user.TryGetUserId(out var myId))
@@ -74,7 +77,7 @@ public static class ServicesEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var items = rows.Select(x => new ServiceListItemDto(
-            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.ModelName,
+            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName,
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived)).ToList();
@@ -142,6 +145,7 @@ public static class ServicesEndpoints
                 CustomerId = customerId.Value,
                 DealerId = req.DealerId,
                 SerialNo = req.SerialNo.Trim(),
+                PsCode = req.PsCode?.Trim(),
                 ModelName = req.ModelName?.Trim(),
                 Description = req.Description?.Trim(),
                 ReportedProblem = req.ReportedProblem?.Trim(),
@@ -176,12 +180,18 @@ public static class ServicesEndpoints
     {
         if (req.Items is null || req.Items.Count == 0)
             return TypedResults.BadRequest("Add at least one item.");
-        if (req.CustomerId is null && string.IsNullOrWhiteSpace(req.CustomerName))
-            return TypedResults.BadRequest("Provide an existing customerId or a customerName to create.");
         if (req.Items.Any(i => string.IsNullOrWhiteSpace(i.SerialNo)))
             return TypedResults.BadRequest("Every item needs a serial number.");
-        if (req.DealerId is { } did && !await db.Dealers.AnyAsync(d => d.Id == did, ct))
-            return TypedResults.BadRequest("Dealer not found.");
+
+        // Party is a dealer (from the dealers list) or a direct customer, per the customer-type toggle.
+        var dealerMode = string.Equals(req.CustomerType?.Trim(), "Dealer", StringComparison.OrdinalIgnoreCase);
+        if (dealerMode)
+        {
+            if (req.DealerId is not { } did || !await db.Dealers.AnyAsync(d => d.Id == did, ct))
+                return TypedResults.BadRequest("Select a dealer from the list.");
+        }
+        else if (req.CustomerId is null && string.IsNullOrWhiteSpace(req.CustomerName))
+            return TypedResults.BadRequest("Enter the customer details.");
 
         var priority = Priority.Normal;
         if (!string.IsNullOrWhiteSpace(req.Priority)) Enum.TryParse(req.Priority, true, out priority);
@@ -193,10 +203,20 @@ public static class ServicesEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            var customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
-                req.OrganizationName, req.Phone, null, req.Address, ct);
-            if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
-            customerName = await db.Customers.Where(c => c.Id == customerId).Select(c => c.Name).FirstAsync(ct);
+            long? customerId = null;
+            long? dealerId = null;
+            if (dealerMode)
+            {
+                dealerId = req.DealerId;
+                customerName = await db.Dealers.Where(d => d.Id == dealerId).Select(d => d.Name).FirstAsync(ct);
+            }
+            else
+            {
+                customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
+                    req.OrganizationName, req.Phone, null, req.Address, ct);
+                if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
+                customerName = await db.Customers.Where(c => c.Id == customerId).Select(c => c.Name).FirstAsync(ct);
+            }
 
             foreach (var item in req.Items)
             {
@@ -205,8 +225,8 @@ public static class ServicesEndpoints
                 var job = new ServiceJob
                 {
                     ServiceNo = no, ChallanNo = req.ChallanNo?.Trim(), CustomerType = req.CustomerType?.Trim(),
-                    CustomerId = customerId.Value, DealerId = req.DealerId, SerialNo = item.SerialNo.Trim(),
-                    ModelName = item.ModelName?.Trim(), Description = item.Description?.Trim(),
+                    CustomerId = customerId, DealerId = dealerId, SerialNo = item.SerialNo.Trim(),
+                    PsCode = item.PsCode?.Trim(), ModelName = item.ModelName?.Trim(), Description = item.Description?.Trim(),
                     ReportedProblem = item.ReportedProblem?.Trim(), WarrantyStatus = warranty,
                     InwardDcNo = req.InwardDcNo?.Trim(), DateReceived = received, Priority = priority,
                     ServiceStatus = ServiceStatus.Inward, AckStatus = AckStatus.Pending, CreatedByUserId = uid,
@@ -230,7 +250,7 @@ public static class ServicesEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var jobs = created.Select(j => new ServiceListItemDto(
-            j.Id, j.ServiceNo, j.ChallanNo, j.CustomerId, customerName, j.SerialNo, j.ModelName,
+            j.Id, j.ServiceNo, j.ChallanNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName,
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
             j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived)).ToList();
         return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
@@ -554,7 +574,7 @@ public static class ServicesEndpoints
 
         return new ServiceDetailDto(
             job.Id, job.ServiceNo, job.ChallanNo, job.CustomerType, job.CustomerId, customer?.Name, customer?.Phone,
-            job.DealerId, dealerName, job.SerialNo, job.ModelName, job.Description,
+            job.DealerId, dealerName, job.SerialNo, job.PsCode, job.ModelName, job.Description,
             job.ReportedProblem, job.WarrantyStatus.ToString(), job.InwardDcNo, job.OutwardDcNo, job.DcDate,
             job.DateReceived, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
             job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks,

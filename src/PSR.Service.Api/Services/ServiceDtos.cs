@@ -22,6 +22,7 @@ public record CreateServiceRequest(
     [StringLength(200)] string? Email,
     [StringLength(500)] string? Address,
     [Required, StringLength(100)] string SerialNo,
+    [StringLength(50)] string? PsCode,
     [StringLength(100)] string? ModelName,
     [StringLength(500)] string? Description,
     [StringLength(1000)] string? ReportedProblem,
@@ -50,6 +51,7 @@ public record InwardBatchRequest(
 
 public record InwardItem(
     [Required, StringLength(100)] string SerialNo,
+    [StringLength(50)] string? PsCode,
     [StringLength(100)] string? ModelName,
     [StringLength(500)] string? Description,
     [StringLength(1000)] string? ReportedProblem,
@@ -80,7 +82,7 @@ public record PaymentRequest([Required] string Status);
 
 // ----- read -----
 public record ServiceListItemDto(
-    long Id, string ServiceNo, string? ChallanNo, long CustomerId, string? CustomerName, string SerialNo, string? ModelName,
+    long Id, string ServiceNo, string? ChallanNo, long? CustomerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
     long? TechnicianId, string? TechnicianName, DateTime DateReceived);
 
@@ -96,8 +98,8 @@ public record ServiceHistoryDto(
 
 // Total is null for non-pricing roles.
 public record ServiceDetailDto(
-    long Id, string ServiceNo, string? ChallanNo, string? CustomerType, long CustomerId, string? CustomerName, string? CustomerPhone,
-    long? DealerId, string? DealerName, string SerialNo, string? ModelName, string? Description,
+    long Id, string ServiceNo, string? ChallanNo, string? CustomerType, long? CustomerId, string? CustomerName, string? CustomerPhone,
+    long? DealerId, string? DealerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, DateTime? DcDate,
     DateTime DateReceived, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
     string ServiceStatus, string PaymentStatus, string? TechnicianRemarks,

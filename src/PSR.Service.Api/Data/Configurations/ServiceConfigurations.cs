@@ -20,6 +20,7 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.DealerId).HasColumnName("dealer_id");
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(100);
+        b.Property(x => x.PsCode).HasColumnName("ps_code").HasMaxLength(50);
         b.Property(x => x.ModelName).HasColumnName("model_name").HasMaxLength(100);
         b.Property(x => x.Description).HasColumnName("description").HasMaxLength(500);
         b.Property(x => x.ReportedProblem).HasColumnName("reported_problem").HasMaxLength(1000);

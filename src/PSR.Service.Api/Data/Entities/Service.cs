@@ -7,12 +7,14 @@ public class ServiceJob : ITimestamps
     public long Id { get; set; }
     public string ServiceNo { get; set; } = string.Empty;   // auto per-job id (SVCnnnnn), unique
     public string? ChallanNo { get; set; }                  // user-entered service challan, shared across a multi-item inward batch
-    public string? CustomerType { get; set; }               // e.g. Dealer / Direct (legacy customer-type toggle)
+    public string? CustomerType { get; set; }               // Dealer / Direct toggle (drives which party is set)
 
-    public long CustomerId { get; set; }
+    // Party is EITHER a dealer (CustomerType=Dealer) OR a direct customer (CustomerType=Direct).
+    public long? CustomerId { get; set; }
     public long? DealerId { get; set; }
 
     public string SerialNo { get; set; } = string.Empty;
+    public string? PsCode { get; set; }                     // item / part code of the serviced unit
     public string? ModelName { get; set; }
     public string? Description { get; set; }
     public string? ReportedProblem { get; set; }
