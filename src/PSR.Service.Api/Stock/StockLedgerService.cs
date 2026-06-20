@@ -12,13 +12,14 @@ namespace PSR.Service.Api.Stock;
 /// </summary>
 public class StockLedgerService(AppDbContext db)
 {
-    public async Task ReceiptAsync(long partId, int qty, long byUser, string? remarks, CancellationToken ct)
+    public async Task ReceiptAsync(long partId, int qty, long byUser, string? remarks, string? invoiceNo, string? source, CancellationToken ct)
     {
         await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.Receipt, Quantity = qty,
             PerformedByUserId = byUser, ReferenceType = "MANUAL", Remarks = remarks,
+            InvoiceNo = invoiceNo, Source = source,
         });
     }
 

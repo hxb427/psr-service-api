@@ -17,6 +17,8 @@ public class StockMovementConfiguration : IEntityTypeConfiguration<StockMovement
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.ReferenceType).HasColumnName("reference_type").HasMaxLength(30);
         b.Property(x => x.ReferenceId).HasColumnName("reference_id");
+        b.Property(x => x.InvoiceNo).HasColumnName("invoice_no").HasMaxLength(50);
+        b.Property(x => x.Source).HasColumnName("source").HasMaxLength(100);
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(100);
         b.Property(x => x.PerformedByUserId).HasColumnName("performed_by_user_id");
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
@@ -66,6 +68,8 @@ public class StockRequestConfiguration : IEntityTypeConfiguration<StockRequest>
         b.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.IssuedByUserId).HasColumnName("issued_by_user_id");
         b.Property(x => x.IssuedDate).HasColumnName("issued_date");
+        b.Property(x => x.Courier).HasColumnName("courier").HasMaxLength(80);
+        b.Property(x => x.TrackingNo).HasColumnName("tracking_no").HasMaxLength(80);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");

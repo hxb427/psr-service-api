@@ -26,6 +26,7 @@ public class ServiceJob : ITimestamps
     public DateTime DateReceived { get; set; } = DateTime.UtcNow;
 
     public long? TechnicianId { get; set; }
+    public DateTime? PromisedDate { get; set; }             // legacy "priority date" — target turnaround date
     public Priority Priority { get; set; } = Priority.Normal;
     public AckStatus AckStatus { get; set; } = AckStatus.Pending;
     public ServiceStatus ServiceStatus { get; set; } = ServiceStatus.Inward;

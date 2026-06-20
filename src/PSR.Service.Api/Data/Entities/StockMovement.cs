@@ -14,6 +14,8 @@ public class StockMovement
     public long? TechnicianId { get; set; }     // set for Issue/Return/Consumption
     public string? ReferenceType { get; set; }   // STOCK_REQUEST / STOCK_RETURN / SERVICE / MANUAL
     public long? ReferenceId { get; set; }
+    public string? InvoiceNo { get; set; }       // supplier invoice no (receipts)
+    public string? Source { get; set; }          // supplier / source (receipts)
     public string? SerialNo { get; set; }        // reserved for serial tracking (deferred)
     public long PerformedByUserId { get; set; }
     public string? Remarks { get; set; }

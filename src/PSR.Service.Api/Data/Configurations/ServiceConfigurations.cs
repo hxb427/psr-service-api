@@ -32,6 +32,7 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.DateReceived).HasColumnName("date_received");
 
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
+        b.Property(x => x.PromisedDate).HasColumnName("promised_date");
         b.Property(x => x.Priority).HasColumnName("priority").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.AckStatus).HasColumnName("ack_status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.ServiceStatus).HasColumnName("service_status").HasConversion<string>().HasMaxLength(40);

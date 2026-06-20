@@ -54,22 +54,30 @@ public static class StockEndpoints
     }
 
     private static async Task<Ok<PagedResult<StockMovementDto>>> MovementsAsync(
-        AppDbContext db, long? partId, int? page, int? pageSize, CancellationToken ct)
+        AppDbContext db, long? partId, string? movementType, long? technicianId,
+        DateTime? fromDate, DateTime? toDate, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
 
-        var baseQ = from m in db.StockMovements.AsNoTracking()
-                    join p in db.Parts on m.PartId equals p.Id
-                    where partId == null || m.PartId == partId
-                    orderby m.CreatedAt descending
-                    select new { m, p.ItemCode };
+        var q = from m in db.StockMovements.AsNoTracking()
+                join p in db.Parts on m.PartId equals p.Id
+                select new { m, p.ItemCode };
 
-        var total = await baseQ.CountAsync(ct);
-        var raw = await baseQ.Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
+        if (partId is { } pid) q = q.Where(x => x.m.PartId == pid);
+        if (technicianId is { } tid) q = q.Where(x => x.m.TechnicianId == tid);
+        if (!string.IsNullOrWhiteSpace(movementType) && Enum.TryParse<MovementType>(movementType, true, out var mt))
+            q = q.Where(x => x.m.MovementType == mt);
+        if (fromDate is { } fd) q = q.Where(x => x.m.CreatedAt >= fd);
+        if (toDate is { } td) q = q.Where(x => x.m.CreatedAt < td.AddDays(1));
+
+        q = q.OrderByDescending(x => x.m.CreatedAt);
+        var total = await q.CountAsync(ct);
+        var raw = await q.Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
         var items = raw.Select(x => new StockMovementDto(
             x.m.Id, x.m.PartId, x.ItemCode, x.m.MovementType.ToString(), x.m.Quantity,
-            x.m.TechnicianId, x.m.ReferenceType, x.m.ReferenceId, x.m.Remarks, x.m.CreatedAt)).ToList();
+            x.m.TechnicianId, x.m.ReferenceType, x.m.ReferenceId, x.m.InvoiceNo, x.m.Source,
+            x.m.Remarks, x.m.CreatedAt)).ToList();
 
         return TypedResults.Ok(new PagedResult<StockMovementDto>(items, pageNum, size, total));
     }
@@ -85,7 +93,7 @@ public static class StockEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            await ledger.ReceiptAsync(req.PartId, req.Qty, uid, req.Remarks, ct);
+            await ledger.ReceiptAsync(req.PartId, req.Qty, uid, req.Remarks, req.InvoiceNo, req.Source, ct);
             audit.Log(uid, "stock.receipt", "part", req.PartId, details: $"+{req.Qty}", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);

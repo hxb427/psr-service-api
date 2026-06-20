@@ -19,6 +19,7 @@ public static class StockRequestsEndpoints
         group.MapPost("/", CreateAsync);
         group.MapPost("/{id:long}/issue", IssueAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/cancel", CancelAsync);
+        group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("StockManage");
         group.MapGet("/inventory/me", MyInventoryAsync);
         group.MapGet("/inventory/{technicianId:long}", TechInventoryAsync).RequireAuthorization("StockManage");
 
@@ -45,7 +46,7 @@ public static class StockRequestsEndpoints
         var items = rows.Select(x => new StockRequestDto(
             x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
             x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued,
-            x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks)).ToList();
+            x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks, x.r.Courier, x.r.TrackingNo)).ToList();
         return TypedResults.Ok(items);
     }
 
@@ -75,7 +76,7 @@ public static class StockRequestsEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var dto = new StockRequestDto(reqEntity.Id, reqEntity.RequestNo, uid, null, reqEntity.RequestDate,
-            part.Id, part.ItemCode, part.Name, reqEntity.QtyRequested, 0, reqEntity.Status.ToString(), null, reqEntity.Remarks);
+            part.Id, part.ItemCode, part.Name, reqEntity.QtyRequested, 0, reqEntity.Status.ToString(), null, reqEntity.Remarks, null, null);
         return TypedResults.Created($"/stock-requests/{reqEntity.Id}", dto);
     }
 
@@ -101,6 +102,8 @@ public static class StockRequestsEndpoints
             r.Status = r.QtyIssued >= r.QtyRequested ? StockRequestStatus.Issued : StockRequestStatus.Partial;
             r.IssuedByUserId = uid;
             r.IssuedDate = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(req.Courier)) r.Courier = req.Courier.Trim();
+            if (!string.IsNullOrWhiteSpace(req.TrackingNo)) r.TrackingNo = req.TrackingNo.Trim();
             audit.Log(uid, "stock-request.issue", "stock_request", r.Id, details: $"+{issueQty}", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -157,6 +160,21 @@ public static class StockRequestsEndpoints
                        select new { r, p.ItemCode, p.Name, Username = u != null ? u.Username : null })
             .FirstAsync(ct);
         return new StockRequestDto(x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
-            x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued, x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks);
+            x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued, x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks,
+            x.r.Courier, x.r.TrackingNo);
+    }
+
+    private static async Task<Results<NoContent, NotFound, BadRequest<string>, ForbidHttpResult>> DeleteAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var r = await db.StockRequests.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (r is null) return TypedResults.NotFound();
+        if (r.QtyIssued > 0) return TypedResults.BadRequest("Cannot delete — part of this request was already issued.");
+
+        user.TryGetUserId(out var uid);
+        db.StockRequests.Remove(r);
+        audit.Log(uid, "stock-request.delete", "stock_request", r.Id, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        return TypedResults.NoContent();
     }
 }

@@ -45,7 +45,8 @@ public static class ServicesEndpoints
 
     private static async Task<Ok<PagedResult<ServiceListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
-        string? status, long? technicianId, string? search, int? page, int? pageSize, CancellationToken ct)
+        string? status, long? technicianId, string? search, DateTime? fromDate, DateTime? toDate,
+        int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -68,12 +69,18 @@ public static class ServicesEndpoints
 
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<ServiceStatus>(status, true, out var st))
             q = q.Where(x => x.s.ServiceStatus == st);
-        if (technicianId is { } tid)
+        if (technicianId is { } tid and > 0)
             q = q.Where(x => x.s.TechnicianId == tid);
+        if (technicianId is 0)   // explicit "unassigned" filter
+            q = q.Where(x => x.s.TechnicianId == null);
+        if (fromDate is { } fd) q = q.Where(x => x.s.DateReceived >= fd);
+        if (toDate is { } td) q = q.Where(x => x.s.DateReceived < td.AddDays(1));
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim();
             q = q.Where(x => x.s.SerialNo.Contains(term) || x.s.ServiceNo.Contains(term)
+                          || (x.s.ChallanNo != null && x.s.ChallanNo.Contains(term))
+                          || (x.s.PsCode != null && x.s.PsCode.Contains(term))
                           || (x.CustomerName != null && x.CustomerName.Contains(term)));
         }
 
@@ -85,7 +92,7 @@ public static class ServicesEndpoints
             x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName,
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
-            x.s.TechnicianId, x.TechName, x.s.DateReceived)).ToList();
+            x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate)).ToList();
 
         return TypedResults.Ok(new PagedResult<ServiceListItemDto>(items, pageNum, size, total));
     }
@@ -257,7 +264,7 @@ public static class ServicesEndpoints
         var jobs = created.Select(j => new ServiceListItemDto(
             j.Id, j.ServiceNo, j.ChallanNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName,
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
-            j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived)).ToList();
+            j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived, j.PromisedDate)).ToList();
         return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
     }
 
@@ -310,6 +317,7 @@ public static class ServicesEndpoints
         job.TechnicianId = req.TechnicianId;
         if (!string.IsNullOrWhiteSpace(req.Priority) && Enum.TryParse<Priority>(req.Priority, true, out var pr))
             job.Priority = pr;
+        if (req.PromisedDate is { } pd) job.PromisedDate = pd;
         WriteTransition(db, job, ServiceStatus.Assigned, uid, $"{(reassign ? "Re-assigned" : "Assigned")} to {tech.Username}");
         audit.Log(uid, reassign ? "service.reassign" : "service.assign", "service", job.Id, details: tech.Username, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
@@ -658,7 +666,7 @@ public static class ServicesEndpoints
             job.Id, job.ServiceNo, job.ChallanNo, job.CustomerType, job.CustomerId, customer?.Name, customer?.Phone,
             job.DealerId, dealerName, job.SerialNo, job.PsCode, job.ModelName, job.Description,
             job.ReportedProblem, job.WarrantyStatus.ToString(), job.InwardDcNo, job.OutwardDcNo, job.DcDate,
-            job.DateReceived, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
+            job.DateReceived, job.PromisedDate, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
             job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks, job.IsTotalLoss,
             job.ReplacementSerialNo, job.ReplacementPartId, replPartName,
             total, job.RowVersion, lineDtos, history);
