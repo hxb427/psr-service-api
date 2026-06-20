@@ -24,16 +24,19 @@ public static class ServicesEndpoints
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/", CreateAsync).RequireAuthorization("InwardManage");
         group.MapPost("/inward-batch", InwardBatchAsync).RequireAuthorization("InwardManage");
-        group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync).RequireAuthorization("InwardManage");
         group.MapPost("/{id:long}/assign", AssignAsync).RequireAuthorization("ServiceAssign");
+        group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync);   // assigned technician (or a manage role)
         group.MapPost("/{id:long}/lines", AddLineAsync);
         group.MapDelete("/{id:long}/lines/{lineId:long}", DeleteLineAsync);
+        group.MapPost("/{id:long}/total-loss", MarkTotalLossAsync);
         group.MapPost("/{id:long}/complete", CompleteAsync);
-        group.MapPost("/{id:long}/ready", ReadyAsync).RequireAuthorization("ServiceManage");
+        group.MapPost("/{id:long}/revert", RevertAsync).RequireAuthorization("ServiceManage");
         group.MapPost("/{id:long}/dispatch", DispatchAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/stock", StockJobAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("ServiceManage");
+        group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("ServiceManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
+        group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
         return app;
     }
@@ -56,6 +59,8 @@ public static class ServicesEndpoints
                 from u in ug.DefaultIfEmpty()
                 // Party is the direct customer, or the dealer when it's a dealer-type job.
                 select new { s, CustomerName = c != null ? c.Name : (d != null ? d.Name : null), TechName = u != null ? u.Username : null };
+
+        q = q.Where(x => !x.s.IsDeleted);
 
         // Technicians (without a supervisory role) see only jobs assigned to them.
         if (!ServiceRoles.CanManage(user) && ServiceRoles.IsTechnician(user) && user.TryGetUserId(out var myId))
@@ -277,20 +282,23 @@ public static class ServicesEndpoints
         return created.Id;
     }
 
-    // ---------------------------------------------------------------- simple transitions
+    // ---------------------------------------------------------------- assignment + acknowledgement
 
-    private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> AcknowledgeAsync(
-        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.Inward], ServiceStatus.Acknowledged, "service.acknowledge",
-            job => job.AckStatus = AckStatus.Acknowledged, req?.Note, user, db, audit, http, ct);
+    // Statuses from "completed" onward — payment / documents only apply here.
+    private static readonly ServiceStatus[] CompletedOrLater =
+    {
+        ServiceStatus.Completed, ServiceStatus.ReplacementApprovalPending,
+        ServiceStatus.Dispatched, ServiceStatus.Stocked, ServiceStatus.Replaced, ServiceStatus.TotalLoss,
+    };
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> AssignAsync(
         long id, [FromBody] AssignRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (job.ServiceStatus is not (ServiceStatus.Acknowledged or ServiceStatus.InService))
-            return TypedResults.BadRequest($"Cannot assign a technician while the job is {job.ServiceStatus}.");
+        // Assign at inward; re-assign is allowed only while still Assigned (before the technician acknowledges).
+        if (job.ServiceStatus is not (ServiceStatus.Inward or ServiceStatus.Assigned))
+            return TypedResults.BadRequest($"A technician can only be (re)assigned before acknowledgement (currently {job.ServiceStatus}).");
 
         var tech = await db.Users.FirstOrDefaultAsync(u => u.Id == req.TechnicianId, ct);
         if (tech is null || !tech.IsActive) return TypedResults.BadRequest("Technician not found or inactive.");
@@ -298,20 +306,71 @@ public static class ServicesEndpoints
             return TypedResults.BadRequest("Selected user is not a technician.");
 
         user.TryGetUserId(out var uid);
+        var reassign = job.ServiceStatus == ServiceStatus.Assigned;
         job.TechnicianId = req.TechnicianId;
         if (!string.IsNullOrWhiteSpace(req.Priority) && Enum.TryParse<Priority>(req.Priority, true, out var pr))
             job.Priority = pr;
-        WriteTransition(db, job, ServiceStatus.InService, uid, $"Assigned to {tech.Username}");
-        audit.Log(uid, "service.assign", "service", job.Id, details: tech.Username, ip: http.GetIp());
+        WriteTransition(db, job, ServiceStatus.Assigned, uid, $"{(reassign ? "Re-assigned" : "Assigned")} to {tech.Username}");
+        audit.Log(uid, reassign ? "service.reassign" : "service.assign", "service", job.Id, details: tech.Username, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> ReadyAsync(
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> AcknowledgeAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.Completed], ServiceStatus.PendingDispatch, "service.ready",
-            null, req?.Note, user, db, audit, http, ct);
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();   // assigned technician (or a manage role)
+        if (job.ServiceStatus is not ServiceStatus.Assigned)
+            return TypedResults.BadRequest($"Only an assigned job can be acknowledged (currently {job.ServiceStatus}).");
+
+        user.TryGetUserId(out var uid);
+        job.AckStatus = AckStatus.Acknowledged;
+        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Acknowledged by technician");
+        audit.Log(uid, "service.acknowledge", "service", job.Id, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> MarkTotalLossAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();
+        if (job.ServiceStatus is not ServiceStatus.InService)
+            return TypedResults.BadRequest($"Total loss can only be set while the job is in service (currently {job.ServiceStatus}).");
+
+        user.TryGetUserId(out var uid);
+        job.IsTotalLoss = !job.IsTotalLoss;   // toggle
+        job.RowVersion++;
+        audit.Log(uid, "service.total-loss", "service", job.Id, details: job.IsTotalLoss ? "marked" : "cleared", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> RevertAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (job.ServiceStatus is not (ServiceStatus.Completed or ServiceStatus.ReplacementApprovalPending))
+            return TypedResults.BadRequest($"Only a completed job can be reverted (currently {job.ServiceStatus}).");
+        if (job.PaymentStatus != PaymentStatus.Pending)
+            return TypedResults.BadRequest("Cannot revert — a payment has already been recorded.");
+        // Phase 5: also block once a PI / Invoice / DC has been generated.
+
+        user.TryGetUserId(out var uid);
+        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service reverted to in-service");
+        audit.Log(uid, "service.revert", "service", job.Id, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> DispatchAsync(
         long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
@@ -319,8 +378,8 @@ public static class ServicesEndpoints
         if (string.IsNullOrWhiteSpace(req.OutwardDcNo)) return TypedResults.BadRequest("Outward DC number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (job.ServiceStatus is not ServiceStatus.PendingDispatch)
-            return TypedResults.BadRequest($"Only a pending-dispatch job can be dispatched (currently {job.ServiceStatus}).");
+        if (job.ServiceStatus is not ServiceStatus.Completed)
+            return TypedResults.BadRequest($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
 
         user.TryGetUserId(out var uid);
         job.OutwardDcNo = req.OutwardDcNo.Trim();
@@ -334,8 +393,13 @@ public static class ServicesEndpoints
 
     private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> StockJobAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.PendingDispatch], ServiceStatus.Stocked, "service.stock",
+        => SimpleTransitionAsync(id, [ServiceStatus.Completed], ServiceStatus.Stocked, "service.stock",
             null, req?.Note, user, db, audit, http, ct);
+
+    private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> LeaveTotalLossAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        => SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss, "service.total-loss-close",
+            null, req?.Note ?? "Closed as total loss (no dispatch)", user, db, audit, http, ct);
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> PaymentAsync(
         long id, [FromBody] PaymentRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
@@ -344,6 +408,8 @@ public static class ServicesEndpoints
             return TypedResults.BadRequest($"Unknown payment status '{req.Status}'.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
+        if (!CompletedOrLater.Contains(job.ServiceStatus))
+            return TypedResults.BadRequest("Payment can only be set once the service is completed.");
 
         user.TryGetUserId(out var uid);
         job.PaymentStatus = ps;
@@ -352,6 +418,20 @@ public static class ServicesEndpoints
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    private static async Task<Results<NoContent, NotFound>> SoftDeleteAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+
+        user.TryGetUserId(out var uid);
+        job.IsDeleted = true;
+        job.RowVersion++;
+        audit.Log(uid, "service.delete", "service", job.Id, details: job.ServiceNo, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        return TypedResults.NoContent();
     }
 
     // ---------------------------------------------------------------- lines
@@ -443,8 +523,10 @@ public static class ServicesEndpoints
                 await ledger.ConsumeAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
 
             if (req?.TechnicianRemarks is { } remarks) job.TechnicianRemarks = remarks.Trim();
-            WriteTransition(db, job, ServiceStatus.Completed, uid, "Service completed");
-            audit.Log(uid, "service.complete", "service", job.Id, ip: http.GetIp());
+            // A total-loss job routes to replacement-approval instead of plain pending-dispatch.
+            var to = job.IsTotalLoss ? ServiceStatus.ReplacementApprovalPending : ServiceStatus.Completed;
+            WriteTransition(db, job, to, uid, job.IsTotalLoss ? "Completed — total loss, replacement pending" : "Service completed");
+            audit.Log(uid, "service.complete", "service", job.Id, details: job.IsTotalLoss ? "total-loss" : null, ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -463,8 +545,8 @@ public static class ServicesEndpoints
             return TypedResults.BadRequest("Replacement serial number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (job.ServiceStatus is not (ServiceStatus.InService or ServiceStatus.Completed or ServiceStatus.PendingDispatch))
-            return TypedResults.BadRequest($"A job can only be replaced from in-service / completed / pending-dispatch (currently {job.ServiceStatus}).");
+        if (job.ServiceStatus is not (ServiceStatus.Completed or ServiceStatus.ReplacementApprovalPending))
+            return TypedResults.BadRequest($"A replacement can only be issued for a completed or replacement-pending job (currently {job.ServiceStatus}).");
 
         var qty = req.Qty < 1 ? 1 : req.Qty;
         Part? part = null;
@@ -577,7 +659,7 @@ public static class ServicesEndpoints
             job.DealerId, dealerName, job.SerialNo, job.PsCode, job.ModelName, job.Description,
             job.ReportedProblem, job.WarrantyStatus.ToString(), job.InwardDcNo, job.OutwardDcNo, job.DcDate,
             job.DateReceived, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
-            job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks,
+            job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks, job.IsTotalLoss,
             job.ReplacementSerialNo, job.ReplacementPartId, replPartName,
             total, job.RowVersion, lineDtos, history);
     }

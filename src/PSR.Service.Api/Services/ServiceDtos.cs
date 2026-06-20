@@ -102,6 +102,6 @@ public record ServiceDetailDto(
     long? DealerId, string? DealerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, DateTime? DcDate,
     DateTime DateReceived, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
-    string ServiceStatus, string PaymentStatus, string? TechnicianRemarks,
+    string ServiceStatus, string PaymentStatus, string? TechnicianRemarks, bool IsTotalLoss,
     string? ReplacementSerialNo, long? ReplacementPartId, string? ReplacementPartName,
     decimal? Total, uint RowVersion, List<ServiceLineDto> Lines, List<ServiceHistoryDto> History);

@@ -32,6 +32,9 @@ public class ServiceJob : ITimestamps
     public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
     public string? TechnicianRemarks { get; set; }
 
+    public bool IsTotalLoss { get; set; }                   // marked during in-service; routes complete → ReplacementApprovalPending
+    public bool IsDeleted { get; set; }                     // soft delete — hidden from lists, never hard-deleted
+
     // Whole-unit replacement (set when ServiceStatus == Replaced). The incoming/defective unit's serial
     // is SerialNo above; ReplacementSerialNo is the new unit handed to the customer. ReplacementPartId
     // is the catalog part the replacement was drawn from (nullable — only set when it is a stocked part,

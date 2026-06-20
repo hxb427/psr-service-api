@@ -51,9 +51,11 @@ public static class ServiceCollectionExtensions
             options.AddPolicy("InwardManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.InwardManager, RoleNames.Supervisor));
             options.AddPolicy("ServiceAssign", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.InwardManager));
             options.AddPolicy("ServiceManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            options.AddPolicy("ServiceDelete", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager));
             options.AddPolicy("DispatchManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.DispatchManager, RoleNames.Supervisor));
             options.AddPolicy("PaymentManage", p => p.RequireRole(

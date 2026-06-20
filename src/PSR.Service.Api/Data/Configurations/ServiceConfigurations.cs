@@ -34,9 +34,12 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.Priority).HasColumnName("priority").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.AckStatus).HasColumnName("ack_status").HasConversion<string>().HasMaxLength(20);
-        b.Property(x => x.ServiceStatus).HasColumnName("service_status").HasConversion<string>().HasMaxLength(20);
+        b.Property(x => x.ServiceStatus).HasColumnName("service_status").HasConversion<string>().HasMaxLength(40);
         b.Property(x => x.PaymentStatus).HasColumnName("payment_status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.TechnicianRemarks).HasColumnName("technician_remarks").HasMaxLength(1000);
+        b.Property(x => x.IsTotalLoss).HasColumnName("is_total_loss").HasDefaultValue(false);
+        b.Property(x => x.IsDeleted).HasColumnName("is_deleted").HasDefaultValue(false);
+        b.HasIndex(x => x.IsDeleted);
 
         b.Property(x => x.ReplacementSerialNo).HasColumnName("replacement_serial_no").HasMaxLength(100);
         b.Property(x => x.ReplacementPartId).HasColumnName("replacement_part_id");
@@ -90,8 +93,8 @@ public class ServiceStatusHistoryConfiguration : IEntityTypeConfiguration<Servic
         b.HasKey(x => x.Id);
         b.Property(x => x.Id).HasColumnName("id");
         b.Property(x => x.ServiceId).HasColumnName("service_id");
-        b.Property(x => x.FromStatus).HasColumnName("from_status").HasMaxLength(20);
-        b.Property(x => x.ToStatus).HasColumnName("to_status").HasMaxLength(20).IsRequired();
+        b.Property(x => x.FromStatus).HasColumnName("from_status").HasMaxLength(40);
+        b.Property(x => x.ToStatus).HasColumnName("to_status").HasMaxLength(40).IsRequired();
         b.Property(x => x.ChangedByUserId).HasColumnName("changed_by_user_id");
         b.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
         b.Property(x => x.ChangedAt).HasColumnName("changed_at");

@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PSR.Service.Api.Data;
 
@@ -11,9 +12,11 @@ using PSR.Service.Api.Data;
 namespace PSR.Service.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260619133356_AddWorkflowTotalLossSoftDelete")]
+    partial class AddWorkflowTotalLossSoftDelete
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -571,8 +574,8 @@ namespace PSR.Service.Api.Migrations
 
                     b.Property<string>("ServiceStatus")
                         .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("varchar(40)")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
                         .HasColumnName("service_status");
 
                     b.Property<long?>("TechnicianId")
@@ -702,8 +705,8 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnName("changed_by_user_id");
 
                     b.Property<string>("FromStatus")
-                        .HasMaxLength(40)
-                        .HasColumnType("varchar(40)")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
                         .HasColumnName("from_status");
 
                     b.Property<string>("Note")
@@ -717,8 +720,8 @@ namespace PSR.Service.Api.Migrations
 
                     b.Property<string>("ToStatus")
                         .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("varchar(40)")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
                         .HasColumnName("to_status");
 
                     b.HasKey("Id");
