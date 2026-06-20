@@ -25,7 +25,8 @@ public static class ServicesEndpoints
         group.MapPost("/", CreateAsync).RequireAuthorization("InwardManage");
         group.MapPost("/inward-batch", InwardBatchAsync).RequireAuthorization("InwardManage");
         group.MapPost("/{id:long}/assign", AssignAsync).RequireAuthorization("ServiceAssign");
-        group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync);   // assigned technician (or a manage role)
+        group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync);   // assigned technician only
+        group.MapPost("/{id:long}/start", StartAsync);               // assigned technician only
         group.MapPost("/{id:long}/lines", AddLineAsync);
         group.MapDelete("/{id:long}/lines/{lineId:long}", DeleteLineAsync);
         group.MapPost("/{id:long}/total-loss", MarkTotalLossAsync);
@@ -45,7 +46,7 @@ public static class ServicesEndpoints
 
     private static async Task<Ok<PagedResult<ServiceListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
-        string? status, long? technicianId, string? search, DateTime? fromDate, DateTime? toDate,
+        string? status, string? section, long? technicianId, string? search, DateTime? fromDate, DateTime? toDate,
         int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
@@ -69,6 +70,26 @@ public static class ServicesEndpoints
 
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<ServiceStatus>(status, true, out var st))
             q = q.Where(x => x.s.ServiceStatus == st);
+        // Section = a named group of statuses (explicit ORs to avoid the EF Contains funcletizer bug).
+        if (!string.IsNullOrWhiteSpace(section))
+            q = section.ToLowerInvariant() switch
+            {
+                "inward" => q.Where(x => x.s.ServiceStatus == ServiceStatus.Inward
+                    || x.s.ServiceStatus == ServiceStatus.Assigned || x.s.ServiceStatus == ServiceStatus.Acknowledged),
+                "assigned" => q.Where(x => x.s.ServiceStatus == ServiceStatus.Assigned
+                    || x.s.ServiceStatus == ServiceStatus.Acknowledged),
+                "inservice" => q.Where(x => x.s.ServiceStatus == ServiceStatus.InService),
+                "completed" => q.Where(x => x.s.ServiceStatus == ServiceStatus.Completed
+                    || x.s.ServiceStatus == ServiceStatus.ReplacementApprovalPending),
+                "closed" => q.Where(x => x.s.ServiceStatus == ServiceStatus.Dispatched
+                    || x.s.ServiceStatus == ServiceStatus.Stocked || x.s.ServiceStatus == ServiceStatus.Replaced
+                    || x.s.ServiceStatus == ServiceStatus.TotalLoss),
+                "techdone" => q.Where(x => x.s.ServiceStatus == ServiceStatus.Completed
+                    || x.s.ServiceStatus == ServiceStatus.ReplacementApprovalPending
+                    || x.s.ServiceStatus == ServiceStatus.Dispatched || x.s.ServiceStatus == ServiceStatus.Stocked
+                    || x.s.ServiceStatus == ServiceStatus.Replaced || x.s.ServiceStatus == ServiceStatus.TotalLoss),
+                _ => q,
+            };
         if (technicianId is { } tid and > 0)
             q = q.Where(x => x.s.TechnicianId == tid);
         if (technicianId is 0)   // explicit "unassigned" filter
@@ -330,14 +351,32 @@ public static class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();   // assigned technician (or a manage role)
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();   // only the assigned technician
         if (job.ServiceStatus is not ServiceStatus.Assigned)
             return TypedResults.BadRequest($"Only an assigned job can be acknowledged (currently {job.ServiceStatus}).");
 
+        // Acknowledge = the technician confirms receipt; it does NOT start the work (that's /start).
         user.TryGetUserId(out var uid);
         job.AckStatus = AckStatus.Acknowledged;
-        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Acknowledged by technician");
+        WriteTransition(db, job, ServiceStatus.Acknowledged, uid, req?.Note ?? "Received by technician");
         audit.Log(uid, "service.acknowledge", "service", job.Id, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> StartAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
+        if (job.ServiceStatus is not ServiceStatus.Acknowledged)
+            return TypedResults.BadRequest($"Acknowledge the job before starting service (currently {job.ServiceStatus}).");
+
+        user.TryGetUserId(out var uid);
+        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service started by technician");
+        audit.Log(uid, "service.start", "service", job.Id, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
@@ -348,7 +387,7 @@ public static class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
         if (job.ServiceStatus is not ServiceStatus.InService)
             return TypedResults.BadRequest($"Total loss can only be set while the job is in service (currently {job.ServiceStatus}).");
 
@@ -449,7 +488,7 @@ public static class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
         if (job.ServiceStatus is not ServiceStatus.InService)
             return TypedResults.BadRequest($"Lines can only be added while the job is in service (currently {job.ServiceStatus}).");
         if (!Enum.TryParse<ServiceLineType>(req.LineType, true, out var lineType))
@@ -492,7 +531,7 @@ public static class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
         if (job.ServiceStatus is not ServiceStatus.InService)
             return TypedResults.BadRequest($"Lines can only be removed while the job is in service (currently {job.ServiceStatus}).");
 
@@ -515,7 +554,7 @@ public static class ServicesEndpoints
     {
         var job = await db.Services.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.CanProcess(user, job)) return TypedResults.Forbid();
+        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
         if (job.ServiceStatus is not ServiceStatus.InService)
             return TypedResults.BadRequest($"Only an in-service job can be completed (currently {job.ServiceStatus}).");
         if (job.TechnicianId is not { } techId)

@@ -1,17 +1,17 @@
 namespace PSR.Service.Api.Data.Entities;
 
-// Service job state machine (mirrors the legacy flag-derived flow):
-//   Inward → Assigned (technician + priority set, awaiting ack) → InService (technician acknowledged)
-//   → Completed (= pending dispatch) → Dispatched | Stocked
+// Service job state machine:
+//   Inward → Assigned (technician + priority set) → Acknowledged (technician received it)
+//   → InService (technician started work) → Completed (= pending dispatch) → Dispatched | Stocked
 // Total-loss branch: InService → (complete with IsTotalLoss) → ReplacementApprovalPending
 //   → Replaced (replacement issued) | TotalLoss (left as total loss, no dispatch).
-// Acknowledged / PendingDispatch are LEGACY values kept so pre-refactor rows still materialize; the
-// current flow does not produce them (acknowledgement is the AckStatus flag + the InService status;
-// "pending dispatch" is just the Completed/ReplacementApprovalPending bucket).
+// Acknowledge and Start are TWO separate technician steps. PendingDispatch is LEGACY (kept so
+// pre-refactor rows still materialize); the Completed/ReplacementApprovalPending bucket is "pending dispatch".
 public enum ServiceStatus
 {
     Inward,
     Assigned,
+    Acknowledged,
     InService,
     Completed,
     ReplacementApprovalPending,
@@ -19,7 +19,6 @@ public enum ServiceStatus
     Stocked,
     Replaced,
     TotalLoss,
-    Acknowledged,      // legacy
     PendingDispatch,   // legacy
 }
 

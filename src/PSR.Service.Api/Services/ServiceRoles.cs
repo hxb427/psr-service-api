@@ -18,10 +18,15 @@ internal static class ServiceRoles
     public static bool CanManage(ClaimsPrincipal u) => Manage.Any(u.IsInRole);
     public static bool IsTechnician(ClaimsPrincipal u) => u.IsInRole(RoleNames.Technician);
 
-    /// <summary>The assigned technician, or any supervisory role, may work a job (add lines / complete).</summary>
+    /// <summary>Who may VIEW a job in detail: the assigned technician or any supervisory role.</summary>
     public static bool CanProcess(ClaimsPrincipal u, ServiceJob job)
     {
         if (CanManage(u)) return true;
         return u.TryGetUserId(out var uid) && job.TechnicianId == uid;
     }
+
+    /// <summary>Who may WORK a job (acknowledge / start / add lines / total-loss / complete):
+    /// ONLY the assigned technician — never a manager.</summary>
+    public static bool IsAssignedTechnician(ClaimsPrincipal u, ServiceJob job)
+        => u.TryGetUserId(out var uid) && job.TechnicianId == uid;
 }
