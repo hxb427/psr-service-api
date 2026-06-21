@@ -36,6 +36,7 @@ public static class ServicesEndpoints
         group.MapPost("/{id:long}/stock", StockJobAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("DispatchManage");
+        group.MapPost("/{id:long}/replacement-reject", RejectReplacementAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
         group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
@@ -47,7 +48,7 @@ public static class ServicesEndpoints
     private static async Task<Ok<PagedResult<ServiceListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
         string? status, string? section, long? technicianId, string? search, DateTime? fromDate, DateTime? toDate,
-        int? page, int? pageSize, CancellationToken ct)
+        string? warranty, string? payment, string? sort, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -96,19 +97,32 @@ public static class ServicesEndpoints
             q = q.Where(x => x.s.TechnicianId == null);
         if (fromDate is { } fd) q = q.Where(x => x.s.DateReceived >= fd);
         if (toDate is { } td) q = q.Where(x => x.s.DateReceived < td.AddDays(1));
+        if (!string.IsNullOrWhiteSpace(warranty) && Enum.TryParse<WarrantyStatus>(warranty, true, out var ws))
+            q = q.Where(x => x.s.WarrantyStatus == ws);
+        if (!string.IsNullOrWhiteSpace(payment) && Enum.TryParse<PaymentStatus>(payment, true, out var ps))
+            q = q.Where(x => x.s.PaymentStatus == ps);
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim();
             q = q.Where(x => x.s.SerialNo.Contains(term) || x.s.ServiceNo.Contains(term)
                           || (x.s.ChallanNo != null && x.s.ChallanNo.Contains(term))
+                          || (x.s.InwardDcNo != null && x.s.InwardDcNo.Contains(term))
+                          || (x.s.OutwardDcNo != null && x.s.OutwardDcNo.Contains(term))
                           || (x.s.PsCode != null && x.s.PsCode.Contains(term))
                           || (x.s.Description != null && x.s.Description.Contains(term))
                           || (x.CustomerName != null && x.CustomerName.Contains(term)));
         }
 
+        var ordered = sort switch
+        {
+            "arrived_asc" => q.OrderBy(x => x.s.DateReceived),
+            "arrived_desc" => q.OrderByDescending(x => x.s.DateReceived),
+            "assigned_asc" => q.OrderBy(x => x.s.PromisedDate),
+            "assigned_desc" => q.OrderByDescending(x => x.s.PromisedDate),
+            _ => q.OrderByDescending(x => x.s.Id),
+        };
         var total = await q.CountAsync(ct);
-        var rows = await q.OrderByDescending(x => x.s.Id)
-            .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
+        var rows = await ordered.Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var items = rows.Select(x => new ServiceListItemDto(
             x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.InwardDcNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName, x.s.Description,
@@ -457,6 +471,23 @@ public static class ServicesEndpoints
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
         => SimpleTransitionAsync(id, [ServiceStatus.Completed], ServiceStatus.Stocked, "service.stock",
             null, req?.Note, user, db, audit, http, ct);
+
+    // Dispatch role overrides a total-loss call: send the job back to normal Completed (dispatchable).
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> RejectReplacementAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (job.ServiceStatus is not ServiceStatus.ReplacementApprovalPending)
+            return TypedResults.BadRequest($"Only a replacement-pending job can be sent back to dispatch (currently {job.ServiceStatus}).");
+
+        user.TryGetUserId(out var uid);
+        job.IsTotalLoss = false;   // overridden — treat as a normal completed job
+        WriteTransition(db, job, ServiceStatus.Completed, uid, req?.Note ?? "Replacement rejected — dispatch normally");
+        audit.Log(uid, "service.replacement-reject", "service", job.Id, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
 
     private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> LeaveTotalLossAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
