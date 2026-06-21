@@ -82,7 +82,7 @@ public record PaymentRequest([Required] string Status);
 
 // ----- read -----
 public record ServiceListItemDto(
-    long Id, string ServiceNo, string? ChallanNo, long? CustomerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName,
+    long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
     long? TechnicianId, string? TechnicianName, DateTime DateReceived, DateTime? PromisedDate);
 

@@ -110,7 +110,7 @@ public static class ServicesEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var items = rows.Select(x => new ServiceListItemDto(
-            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName,
+            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.InwardDcNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName,
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate)).ToList();
@@ -283,7 +283,7 @@ public static class ServicesEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var jobs = created.Select(j => new ServiceListItemDto(
-            j.Id, j.ServiceNo, j.ChallanNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName,
+            j.Id, j.ServiceNo, j.ChallanNo, j.InwardDcNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName,
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
             j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived, j.PromisedDate)).ToList();
         return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
@@ -491,6 +491,8 @@ public static class ServicesEndpoints
         if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
         if (job.ServiceStatus is not ServiceStatus.InService)
             return TypedResults.BadRequest($"Lines can only be added while the job is in service (currently {job.ServiceStatus}).");
+        if (job.IsTotalLoss)
+            return TypedResults.BadRequest("This job is marked total loss — components/charges cannot be added.");
         if (!Enum.TryParse<ServiceLineType>(req.LineType, true, out var lineType))
             return TypedResults.BadRequest($"Unknown line type '{req.LineType}'.");
         var qty = req.Qty < 1 ? 1 : req.Qty;
@@ -592,8 +594,8 @@ public static class ServicesEndpoints
             return TypedResults.BadRequest("Replacement serial number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (job.ServiceStatus is not (ServiceStatus.Completed or ServiceStatus.ReplacementApprovalPending))
-            return TypedResults.BadRequest($"A replacement can only be issued for a completed or replacement-pending job (currently {job.ServiceStatus}).");
+        if (job.ServiceStatus is not ServiceStatus.ReplacementApprovalPending)
+            return TypedResults.BadRequest($"A replacement can only be issued for a total-loss job awaiting replacement (currently {job.ServiceStatus}).");
 
         var qty = req.Qty < 1 ? 1 : req.Qty;
         Part? part = null;
