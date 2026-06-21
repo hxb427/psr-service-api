@@ -75,6 +75,18 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
+    /// <summary>Return parts to a technician that were consumed at completion (service reverted).
+    /// Mirror of ConsumeAsync — increments the technician balance and logs a reversal movement.</summary>
+    public async Task ReverseConsumptionAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        await IncrementAsync(partId, technicianId, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.ConsumptionReversal, Quantity = qty, TechnicianId = technicianId,
+            PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
     /// <summary>Ship a whole replacement unit out of the warehouse (service resolved by full replacement).
     /// Records the replacement unit's serial on the movement.</summary>
     public async Task ReplacementOutAsync(long partId, int qty, long byUser, long serviceId, string? serialNo, string? remarks, CancellationToken ct)

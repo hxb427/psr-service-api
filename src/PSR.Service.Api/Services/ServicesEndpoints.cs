@@ -34,8 +34,8 @@ public static class ServicesEndpoints
         group.MapPost("/{id:long}/revert", RevertAsync).RequireAuthorization("ServiceManage");
         group.MapPost("/{id:long}/dispatch", DispatchAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/stock", StockJobAsync).RequireAuthorization("DispatchManage");
-        group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("ServiceManage");
-        group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("ServiceManage");
+        group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("DispatchManage");
+        group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
         group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
@@ -102,6 +102,7 @@ public static class ServicesEndpoints
             q = q.Where(x => x.s.SerialNo.Contains(term) || x.s.ServiceNo.Contains(term)
                           || (x.s.ChallanNo != null && x.s.ChallanNo.Contains(term))
                           || (x.s.PsCode != null && x.s.PsCode.Contains(term))
+                          || (x.s.Description != null && x.s.Description.Contains(term))
                           || (x.CustomerName != null && x.CustomerName.Contains(term)));
         }
 
@@ -110,7 +111,7 @@ public static class ServicesEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var items = rows.Select(x => new ServiceListItemDto(
-            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.InwardDcNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName,
+            x.s.Id, x.s.ServiceNo, x.s.ChallanNo, x.s.InwardDcNo, x.s.CustomerId, x.CustomerName, x.s.SerialNo, x.s.PsCode, x.s.ModelName, x.s.Description,
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate)).ToList();
@@ -283,7 +284,7 @@ public static class ServicesEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var jobs = created.Select(j => new ServiceListItemDto(
-            j.Id, j.ServiceNo, j.ChallanNo, j.InwardDcNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName,
+            j.Id, j.ServiceNo, j.ChallanNo, j.InwardDcNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName, j.Description,
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
             j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived, j.PromisedDate)).ToList();
         return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
@@ -401,9 +402,10 @@ public static class ServicesEndpoints
     }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> RevertAsync(
-        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db,
+        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
     {
-        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        var job = await db.Services.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
         if (job.ServiceStatus is not (ServiceStatus.Completed or ServiceStatus.ReplacementApprovalPending))
             return TypedResults.BadRequest($"Only a completed job can be reverted (currently {job.ServiceStatus}).");
@@ -412,9 +414,22 @@ public static class ServicesEndpoints
         // Phase 5: also block once a PI / Invoice / DC has been generated.
 
         user.TryGetUserId(out var uid);
-        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service reverted to in-service");
-        audit.Log(uid, "service.revert", "service", job.Id, ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            // Completion consumed the technician's parts — reverting returns them, so a re-complete
+            // consumes once (not twice).
+            if (job.TechnicianId is { } techId)
+                foreach (var line in job.Lines.Where(l => l.PartId.HasValue
+                    && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
+                    await ledger.ReverseConsumptionAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
+
+            WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service reverted to in-service");
+            audit.Log(uid, "service.revert", "service", job.Id, ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
@@ -445,8 +460,8 @@ public static class ServicesEndpoints
 
     private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> LeaveTotalLossAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss, "service.total-loss-close",
-            null, req?.Note ?? "Closed as total loss (no dispatch)", user, db, audit, http, ct);
+        => SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss, "service.discard",
+            null, req?.Note ?? "Discarded — total loss, no replacement", user, db, audit, http, ct);
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> PaymentAsync(
         long id, [FromBody] PaymentRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
