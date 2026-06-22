@@ -21,6 +21,7 @@ public static class ServicesEndpoints
 
         group.MapGet("/", ListAsync);
         group.MapGet("/technicians", TechniciansAsync).RequireAuthorization("ServiceAssign");
+        group.MapGet("/summary", SummaryAsync);
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/", CreateAsync).RequireAuthorization("InwardManage");
         group.MapPost("/inward-batch", InwardBatchAsync).RequireAuthorization("InwardManage");
@@ -131,6 +132,44 @@ public static class ServicesEndpoints
             x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate)).ToList();
 
         return TypedResults.Ok(new PagedResult<ServiceListItemDto>(items, pageNum, size, total));
+    }
+
+    private static async Task<Ok<ServiceSummaryDto>> SummaryAsync(AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
+    {
+        // Technicians see only their own jobs / completions; everyone else sees all.
+        var ownOnly = !ServiceRoles.CanManage(user) && ServiceRoles.IsTechnician(user);
+        user.TryGetUserId(out var uid);
+
+        var q = db.Services.AsNoTracking().Where(s => !s.IsDeleted);
+        if (ownOnly) q = q.Where(s => s.TechnicianId == uid);
+
+        // Explicit equality counts (reliable — no GroupBy translation risk).
+        var inward = await q.CountAsync(s => s.ServiceStatus == ServiceStatus.Inward
+            || s.ServiceStatus == ServiceStatus.Assigned || s.ServiceStatus == ServiceStatus.Acknowledged, ct);
+        var inService = await q.CountAsync(s => s.ServiceStatus == ServiceStatus.InService, ct);
+        var replPending = await q.CountAsync(s => s.ServiceStatus == ServiceStatus.ReplacementApprovalPending, ct);
+        var pendingDispatch = await q.CountAsync(s => s.ServiceStatus == ServiceStatus.Completed, ct);
+        var closed = await q.CountAsync(s => s.ServiceStatus == ServiceStatus.Dispatched
+            || s.ServiceStatus == ServiceStatus.Stocked || s.ServiceStatus == ServiceStatus.Replaced
+            || s.ServiceStatus == ServiceStatus.TotalLoss, ct);
+
+        // "Serviced" = distinct jobs whose status reached Completed in the period (status-history is written
+        // on every transition, so this is reliably stored). Timestamps are UTC.
+        var now = DateTime.UtcNow;
+        var dayStart = now.Date;
+        var weekStart = now.Date.AddDays(-(int)now.DayOfWeek);
+        var monthStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var hist = db.ServiceStatusHistory.AsNoTracking().Where(h => h.ToStatus == "Completed");
+        if (ownOnly) hist = hist.Where(h => h.ChangedByUserId == uid);
+        var today = await hist.Where(h => h.ChangedAt >= dayStart).Select(h => h.ServiceId).Distinct().CountAsync(ct);
+        var week = await hist.Where(h => h.ChangedAt >= weekStart).Select(h => h.ServiceId).Distinct().CountAsync(ct);
+        var month = await hist.Where(h => h.ChangedAt >= monthStart).Select(h => h.ServiceId).Distinct().CountAsync(ct);
+
+        var pendingReq = await db.StockRequests.AsNoTracking()
+            .CountAsync(r => r.Status == StockRequestStatus.Pending || r.Status == StockRequestStatus.Partial, ct);
+
+        return TypedResults.Ok(new ServiceSummaryDto(
+            inward, inService, replPending, pendingDispatch, closed, today, week, month, pendingReq));
     }
 
     private static async Task<Ok<List<TechnicianOptionDto>>> TechniciansAsync(AppDbContext db, CancellationToken ct)

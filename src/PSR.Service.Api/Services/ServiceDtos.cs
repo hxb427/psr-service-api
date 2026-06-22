@@ -61,6 +61,11 @@ public record InwardBatchResult(string? ChallanNo, int Created, List<ServiceList
 
 public record TechnicianOptionDto(long Id, string Username, string? FullName);
 
+// Home dashboard counts (role-scoped: a technician sees only their own jobs / completions).
+public record ServiceSummaryDto(
+    int Inward, int InService, int ReplacementPending, int PendingDispatch, int Closed,
+    int ServicedToday, int ServicedThisWeek, int ServicedThisMonth, int PendingStockRequests);
+
 // ----- transitions -----
 public record NoteRequest([StringLength(500)] string? Note);
 public record AssignRequest([Required] long TechnicianId, string? Priority, DateTime? PromisedDate);
