@@ -66,6 +66,12 @@ public record ServiceSummaryDto(
     int Inward, int InService, int ReplacementPending, int PendingDispatch, int Closed,
     int ServicedToday, int ServicedThisWeek, int ServicedThisMonth, int PendingStockRequests);
 
+// Dashboard overview: this-month vs last-month serviced (jobs reaching a terminal stage) + avg turnaround
+// (days from DateReceived to that terminal stage). Role-scoped — a technician sees only their own jobs.
+public record ServiceOverviewDto(
+    string ThisMonthLabel, int ThisMonthServiced, double ThisMonthAvgTatDays,
+    string LastMonthLabel, int LastMonthServiced, double LastMonthAvgTatDays);
+
 // ----- transitions -----
 public record NoteRequest([StringLength(500)] string? Note);
 public record AssignRequest([Required] long TechnicianId, string? Priority, DateTime? PromisedDate);

@@ -22,6 +22,7 @@ public static class ServicesEndpoints
         group.MapGet("/", ListAsync);
         group.MapGet("/technicians", TechniciansAsync).RequireAuthorization("ServiceAssign");
         group.MapGet("/summary", SummaryAsync);
+        group.MapGet("/overview", OverviewAsync);
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/", CreateAsync).RequireAuthorization("InwardManage");
         group.MapPost("/inward-batch", InwardBatchAsync).RequireAuthorization("InwardManage");
@@ -170,6 +171,44 @@ public static class ServicesEndpoints
 
         return TypedResults.Ok(new ServiceSummaryDto(
             inward, inService, replPending, pendingDispatch, closed, today, week, month, pendingReq));
+    }
+
+    private static async Task<Ok<ServiceOverviewDto>> OverviewAsync(AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
+    {
+        var ownOnly = !ServiceRoles.CanManage(user) && ServiceRoles.IsTechnician(user);
+        user.TryGetUserId(out var uid);
+
+        var now = DateTime.UtcNow;
+        var thisStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var nextStart = thisStart.AddMonths(1);
+        var lastStart = thisStart.AddMonths(-1);
+
+        // Serviced = a job reached a terminal stage (Dispatched/Stocked/Replaced/TotalLoss) in the window.
+        // TAT = days from the job's DateReceived to that terminal timestamp. All from stored data.
+        async Task<(int count, double avgTat)> StatsAsync(DateTime start, DateTime end)
+        {
+            var rows = await (from h in db.ServiceStatusHistory.AsNoTracking()
+                              join s in db.Services on h.ServiceId equals s.Id
+                              where (h.ToStatus == "Dispatched" || h.ToStatus == "Stocked"
+                                     || h.ToStatus == "Replaced" || h.ToStatus == "TotalLoss")
+                                    && h.ChangedAt >= start && h.ChangedAt < end
+                                    && (!ownOnly || s.TechnicianId == uid)
+                              select new { h.ServiceId, h.ChangedAt, s.DateReceived }).ToListAsync(ct);
+
+            // First terminal event per job; TAT clamped at >= 0.
+            var perJob = rows.GroupBy(r => r.ServiceId)
+                .Select(g => g.OrderBy(x => x.ChangedAt).First())
+                .Select(x => Math.Max(0, (x.ChangedAt - x.DateReceived).TotalDays))
+                .ToList();
+            return (perJob.Count, perJob.Count > 0 ? Math.Round(perJob.Average(), 1) : 0.0);
+        }
+
+        var (tc, tt) = await StatsAsync(thisStart, nextStart);
+        var (lc, lt) = await StatsAsync(lastStart, thisStart);
+
+        return TypedResults.Ok(new ServiceOverviewDto(
+            thisStart.ToString("MMM yyyy"), tc, tt,
+            lastStart.ToString("MMM yyyy"), lc, lt));
     }
 
     private static async Task<Ok<List<TechnicianOptionDto>>> TechniciansAsync(AppDbContext db, CancellationToken ct)
