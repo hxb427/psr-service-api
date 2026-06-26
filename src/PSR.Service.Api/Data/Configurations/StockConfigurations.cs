@@ -114,10 +114,15 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
         b.Property(x => x.Key).HasColumnName("key").HasMaxLength(40);
         b.Property(x => x.Prefix).HasColumnName("prefix").HasMaxLength(10);
         b.Property(x => x.NextValue).HasColumnName("next_value");
+        b.Property(x => x.Year).HasColumnName("year");
 
         b.HasData(
             new NumberSequence { Key = SequenceKeys.StockRequest, Prefix = "REQ", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.StockReturn, Prefix = "RET", NextValue = 1 },
-            new NumberSequence { Key = SequenceKeys.Service, Prefix = "SVC", NextValue = 1 });
+            new NumberSequence { Key = SequenceKeys.Service, Prefix = "SVC", NextValue = 1 },
+            // Year-scoped document sequences (clean sequential, reset annually). Year is bumped on first use.
+            new NumberSequence { Key = SequenceKeys.ProformaInvoice, Prefix = "PI", NextValue = 1, Year = 2026 },
+            new NumberSequence { Key = SequenceKeys.Invoice, Prefix = "INV", NextValue = 1, Year = 2026 },
+            new NumberSequence { Key = SequenceKeys.DeliveryChallan, Prefix = "DC", NextValue = 1, Year = 2026 });
     }
 }

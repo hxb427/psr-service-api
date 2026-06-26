@@ -2,12 +2,16 @@ using Serilog;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
+using PSR.Service.Api.Documents;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
 using PSR.Service.Api.Reference;
 using PSR.Service.Api.Services;
 using PSR.Service.Api.Stock;
 using PSR.Service.Api.Users;
+
+// QuestPDF Community licence (free for orgs under $1M revenue — applies here).
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +22,9 @@ builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<NumberSequenceService>();
 builder.Services.AddScoped<StockLedgerService>();
+builder.Services.AddScoped<BillingService>();
+builder.Services.AddSingleton(
+    builder.Configuration.GetSection(CompanyInfo.SectionName).Get<CompanyInfo>() ?? new CompanyInfo());
 builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
@@ -42,6 +49,7 @@ app.MapStockRequestEndpoints();
 app.MapStockReturnEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
+app.MapDocumentEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

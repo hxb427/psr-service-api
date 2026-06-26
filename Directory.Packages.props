@@ -3,32 +3,27 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
-
   <ItemGroup>
     <!-- ASP.NET Core 10 -->
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
-
     <!-- EF Core 9 (Pomelo doesn't ship a 10.x build yet; EF Core 9 runs fine on .NET 10) -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.0" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.0" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.0" />
     <PackageVersion Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
     <PackageVersion Include="MySqlConnector" Version="2.4.0" />
-
     <!-- Auth & Security -->
     <PackageVersion Include="BCrypt.Net-Next" Version="4.0.3" />
-
     <!-- Pinned transitively via FluentAssertions; current versions still carry GHSA-37gx-xxp4-5rgx +
          GHSA-w3x6-4m5h-cxqf. Used only by test runner — NU1903 suppressed in tests csproj. -->
+    <PackageVersion Include="QuestPDF" Version="2026.6.1" />
     <PackageVersion Include="System.Security.Cryptography.Xml" Version="9.0.6" />
-
     <!-- Logging -->
     <PackageVersion Include="Serilog.AspNetCore" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
     <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageVersion Include="Serilog.Formatting.Compact" Version="3.0.0" />
-
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />

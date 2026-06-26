@@ -23,6 +23,8 @@ public class AppDbContext : DbContext
     public DbSet<ServiceJob> Services => Set<ServiceJob>();
     public DbSet<ServiceLine> ServiceLines => Set<ServiceLine>();
     public DbSet<ServiceStatusHistory> ServiceStatusHistory => Set<ServiceStatusHistory>();
+    public DbSet<ServiceDocument> ServiceDocuments => Set<ServiceDocument>();
+    public DbSet<ServiceDocumentLine> ServiceDocumentLines => Set<ServiceDocumentLine>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

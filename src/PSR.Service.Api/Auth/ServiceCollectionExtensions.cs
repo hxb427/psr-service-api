@@ -60,6 +60,12 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.DispatchManager, RoleNames.Supervisor));
             options.AddPolicy("PaymentManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Accounts));
+
+            // Phase 5 — documents (PI / Invoice / DC). Generating is a billing action; viewing is wider.
+            options.AddPolicy("DocumentManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Accounts));
+            options.AddPolicy("DocumentView", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts));
         });
         return services;
     }

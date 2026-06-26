@@ -16,6 +16,17 @@ public class NumberSequenceService(AppDbContext db)
             .FirstOrDefaultAsync(ct)
             ?? throw new StockException($"Number sequence '{key}' is not configured.");
 
+        // Year-scoped sequences (PI / Invoice / DC) format as PREFIX-YYYY-NNNN and reset every January.
+        if (row.Year is not null)
+        {
+            var year = DateTime.UtcNow.Year;
+            if (row.Year != year) { row.Year = year; row.NextValue = 1; }
+            var v = row.NextValue;
+            row.NextValue = v + 1;
+            await db.SaveChangesAsync(ct);
+            return $"{row.Prefix}-{row.Year}-{v:D4}";
+        }
+
         var value = row.NextValue;
         row.NextValue = value + 1;
         await db.SaveChangesAsync(ct);
