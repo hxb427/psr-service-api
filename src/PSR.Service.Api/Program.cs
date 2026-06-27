@@ -7,6 +7,7 @@ using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
 using PSR.Service.Api.Reference;
 using PSR.Service.Api.Services;
+using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 using PSR.Service.Api.Users;
 
@@ -23,6 +24,7 @@ builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<NumberSequenceService>();
 builder.Services.AddScoped<StockLedgerService>();
 builder.Services.AddScoped<BillingService>();
+builder.Services.AddScoped<AppSettingsService>();
 builder.Services.AddSingleton(
     builder.Configuration.GetSection(CompanyInfo.SectionName).Get<CompanyInfo>() ?? new CompanyInfo());
 builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
@@ -50,6 +52,7 @@ app.MapStockReturnEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
 app.MapDocumentEndpoints();
+app.MapSettingsEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

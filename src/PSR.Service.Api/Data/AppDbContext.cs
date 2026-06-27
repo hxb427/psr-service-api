@@ -25,6 +25,7 @@ public class AppDbContext : DbContext
     public DbSet<ServiceStatusHistory> ServiceStatusHistory => Set<ServiceStatusHistory>();
     public DbSet<ServiceDocument> ServiceDocuments => Set<ServiceDocument>();
     public DbSet<ServiceDocumentLine> ServiceDocumentLines => Set<ServiceDocumentLine>();
+    public DbSet<AppSetting> AppSettings => Set<AppSetting>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -57,14 +57,23 @@ public record UpdateServiceChargeRequest(
     [Range(0, 100)] decimal TaxPercent,
     [StringLength(500)] string? Remarks);
 
-public record DealerDto(long Id, string Name, int WarrantyMonths, string? Remarks, bool IsActive);
+public record DealerDto(long Id, string Name, int WarrantyMonths,
+    string? Address, string? Gstin, string? State, string? StateCode, string? Remarks, bool IsActive);
 
 public record CreateDealerRequest(
     [Required, StringLength(200, MinimumLength = 1)] string Name,
     [Range(0, 600)] int WarrantyMonths,
+    [StringLength(500)] string? Address,
+    [StringLength(20)] string? Gstin,
+    [StringLength(60)] string? State,
+    [StringLength(10)] string? StateCode,
     [StringLength(500)] string? Remarks);
 
 public record UpdateDealerRequest(
     [Required, StringLength(200, MinimumLength = 1)] string Name,
     [Range(0, 600)] int WarrantyMonths,
+    [StringLength(500)] string? Address,
+    [StringLength(20)] string? Gstin,
+    [StringLength(60)] string? State,
+    [StringLength(10)] string? StateCode,
     [StringLength(500)] string? Remarks);

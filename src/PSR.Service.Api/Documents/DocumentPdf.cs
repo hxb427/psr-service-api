@@ -14,9 +14,9 @@ public static class DocumentPdf
     {
         var title = doc.DocType switch
         {
-            DocumentType.PI => "PROFORMA INVOICE",
-            DocumentType.Invoice => "TAX INVOICE",
-            _ => "DELIVERY CHALLAN",
+            DocumentType.PI => "Proforma Invoice",
+            DocumentType.Invoice => "Tax Invoice",
+            _ => "Delivery Challan",
         };
         var showMoney = doc.DocType != DocumentType.DC;   // a delivery challan lists units without pricing
 
@@ -68,10 +68,11 @@ public static class DocumentPdf
                         {
                             c.ConstantColumn(24);    // sr
                             c.RelativeColumn(3);     // description
-                            c.ConstantColumn(64);    // warranty
-                            c.ConstantColumn(70);    // service challan
+                            c.ConstantColumn(58);    // warranty
+                            c.ConstantColumn(64);    // service challan
                             c.ConstantColumn(28);    // qty
-                            if (showMoney) { c.ConstantColumn(66); c.ConstantColumn(70); }   // rate, amount
+                            c.RelativeColumn(1.4f);  // remarks
+                            if (showMoney) { c.ConstantColumn(60); c.ConstantColumn(66); }   // rate, amount
                         });
 
                         table.Header(h =>
@@ -86,6 +87,7 @@ public static class DocumentPdf
                             Head("Warranty");
                             Head("Service Challan");
                             Head("Qty", true);
+                            Head("Remarks");
                             if (showMoney) { Head("Rate", true); Head("Amount", true); }
                         });
 
@@ -98,6 +100,7 @@ public static class DocumentPdf
                             table.Cell().Element(Body).Text(l.Warranty ?? "-").FontSize(8);
                             table.Cell().Element(Body).Text(l.ServiceChallan ?? "-").FontSize(8);
                             table.Cell().Element(Body).AlignRight().Text(l.Qty.ToString());
+                            table.Cell().Element(Body).Text(l.Remarks ?? "").FontSize(8);
                             if (showMoney)
                             {
                                 table.Cell().Element(Body).AlignRight().Text(Money(l.UnitRate));
@@ -126,16 +129,21 @@ public static class DocumentPdf
                         col.Item().PaddingTop(6).Text($"Courier: {doc.CourierMode}").FontSize(8);
                     if (!string.IsNullOrWhiteSpace(doc.Remarks))
                         col.Item().PaddingTop(4).Text($"Remarks: {doc.Remarks}").FontSize(8);
+
+                    // Authorized signature block (matches the legacy document layout).
+                    col.Item().PaddingTop(34).AlignRight().Width(220).Column(c =>
+                    {
+                        c.Item().Text($"for {company.Name}").FontSize(9);
+                        c.Item().PaddingTop(28).LineHorizontal(0.75f).LineColor(Colors.Grey.Medium);
+                        c.Item().AlignCenter().Text("Authorized Signature").FontSize(8).FontColor(Colors.Grey.Darken1);
+                    });
                 });
 
                 page.Footer().Column(col =>
                 {
                     col.Item().LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten1);
-                    col.Item().PaddingTop(4).Row(row =>
-                    {
-                        row.RelativeItem().Text("This is a computer-generated document.").FontSize(7).FontColor(Colors.Grey.Darken1);
-                        row.ConstantItem(180).AlignRight().Text($"for {company.Name}").FontSize(8);
-                    });
+                    col.Item().PaddingTop(4).AlignCenter()
+                        .Text("This is a computer-generated document.").FontSize(7).FontColor(Colors.Grey.Darken1).Italic();
                 });
             });
         }).GeneratePdf();

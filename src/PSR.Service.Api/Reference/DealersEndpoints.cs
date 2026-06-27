@@ -49,7 +49,13 @@ public static class DealersEndpoints
         if (await db.Dealers.AnyAsync(d => d.Name == name, ct))
             return TypedResults.Conflict($"Dealer '{name}' already exists.");
 
-        var d = new Dealer { Name = name, WarrantyMonths = req.WarrantyMonths, Remarks = req.Remarks?.Trim() };
+        var d = new Dealer
+        {
+            Name = name, WarrantyMonths = req.WarrantyMonths,
+            Address = req.Address?.Trim(), Gstin = req.Gstin?.Trim(),
+            State = req.State?.Trim(), StateCode = req.StateCode?.Trim(),
+            Remarks = req.Remarks?.Trim(),
+        };
         db.Dealers.Add(d);
         user.TryGetUserId(out var actor);
         audit.Log(actor, "dealer.create", "dealer", null, details: name, ip: http.GetIp());
@@ -65,6 +71,10 @@ public static class DealersEndpoints
         if (d is null) return TypedResults.NotFound();
         d.Name = req.Name.Trim();
         d.WarrantyMonths = req.WarrantyMonths;
+        d.Address = req.Address?.Trim();
+        d.Gstin = req.Gstin?.Trim();
+        d.State = req.State?.Trim();
+        d.StateCode = req.StateCode?.Trim();
         d.Remarks = req.Remarks?.Trim();
         user.TryGetUserId(out var actor);
         audit.Log(actor, "dealer.update", "dealer", id, ip: http.GetIp());
@@ -84,5 +94,6 @@ public static class DealersEndpoints
         return TypedResults.NoContent();
     }
 
-    private static DealerDto ToDto(Dealer x) => new(x.Id, x.Name, x.WarrantyMonths, x.Remarks, x.IsActive);
+    private static DealerDto ToDto(Dealer x) =>
+        new(x.Id, x.Name, x.WarrantyMonths, x.Address, x.Gstin, x.State, x.StateCode, x.Remarks, x.IsActive);
 }

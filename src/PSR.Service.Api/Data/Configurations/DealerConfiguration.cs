@@ -16,6 +16,10 @@ public class DealerConfiguration : IEntityTypeConfiguration<Dealer>
         b.HasIndex(x => x.Name).IsUnique();
 
         b.Property(x => x.WarrantyMonths).HasColumnName("warranty_months").HasDefaultValue(0);
+        b.Property(x => x.Address).HasColumnName("address").HasMaxLength(500);
+        b.Property(x => x.Gstin).HasColumnName("gstin").HasMaxLength(20);
+        b.Property(x => x.State).HasColumnName("state").HasMaxLength(60);
+        b.Property(x => x.StateCode).HasColumnName("state_code").HasMaxLength(10);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.IsActive).HasColumnName("is_active").HasDefaultValue(true);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");

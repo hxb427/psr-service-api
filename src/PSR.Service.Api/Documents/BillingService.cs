@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 
 namespace PSR.Service.Api.Documents;
@@ -9,12 +10,16 @@ namespace PSR.Service.Api.Documents;
 /// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter),
 /// allocates an atomic document number, and stamps that number onto every covered job. Enforces the gated
 /// chain (PI needs no PI/DC; Invoice needs PI + payment; DC needs in-warranty) that the old buttons enforced.</summary>
-public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company)
+public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company, AppSettingsService settings)
 {
     public async Task<long> GenerateAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
     {
         if (!Enum.TryParse<DocumentType>(req.DocType, true, out var docType))
             throw new BillingException($"Unknown document type '{req.DocType}'. Use PI, Invoice or DC.");
+
+        // Admin kill-switch for invoice generation (enforced server-side, not just greyed out in the UI).
+        if (docType == DocumentType.Invoice && !await settings.InvoiceGenerationEnabledAsync(ct))
+            throw new BillingException("Invoice generation is currently disabled by an administrator.");
 
         var ids = req.ServiceIds.Distinct().ToList();
         if (ids.Count == 0) throw new BillingException("Select at least one completed job.");
@@ -63,25 +68,34 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
                 break;
         }
 
-        // Party snapshot — request fields win, else fall back to the jobs' party master.
+        // Party snapshot — request fields win, else fall back to the jobs' party master (dealer carries full
+        // billing details: address/GSTIN/state; a direct customer carries name+address).
         var first = jobs[0];
         var partyName = req.PartyName?.Trim();
         var partyAddress = req.PartyAddress?.Trim();
-        if (string.IsNullOrWhiteSpace(partyName))
+        var partyGstin = req.PartyGstin?.Trim();
+        var partyState = req.PartyState?.Trim();
+        var partyStateCode = req.PartyStateCode?.Trim();
+        if (first.DealerId is { } did)
         {
-            if (first.DealerId is { } did)
-                partyName = await db.Dealers.Where(d => d.Id == did).Select(d => d.Name).FirstOrDefaultAsync(ct);
-            else if (first.CustomerId is { } cid)
-            {
-                var c = await db.Customers.Where(x => x.Id == cid).Select(x => new { x.Name, x.Address }).FirstOrDefaultAsync(ct);
-                partyName = c?.Name;
-                partyAddress ??= c?.Address;
-            }
+            var dealer = await db.Dealers.Where(x => x.Id == did)
+                .Select(x => new { x.Name, x.Address, x.Gstin, x.State, x.StateCode }).FirstOrDefaultAsync(ct);
+            if (string.IsNullOrWhiteSpace(partyName)) partyName = dealer?.Name;
+            partyAddress ??= dealer?.Address;
+            partyGstin ??= dealer?.Gstin;
+            partyState ??= dealer?.State;
+            partyStateCode ??= dealer?.StateCode;
+        }
+        else if (first.CustomerId is { } cid)
+        {
+            var c = await db.Customers.Where(x => x.Id == cid).Select(x => new { x.Name, x.Address }).FirstOrDefaultAsync(ct);
+            if (string.IsNullOrWhiteSpace(partyName)) partyName = c?.Name;
+            partyAddress ??= c?.Address;
         }
         if (string.IsNullOrWhiteSpace(partyName)) throw new BillingException("Party name is required.");
 
-        var interState = !string.IsNullOrWhiteSpace(req.PartyStateCode)
-            && !string.Equals(req.PartyStateCode.Trim(), company.StateCode, StringComparison.OrdinalIgnoreCase);
+        var interState = !string.IsNullOrWhiteSpace(partyStateCode)
+            && !string.Equals(partyStateCode, company.StateCode, StringComparison.OrdinalIgnoreCase);
 
         var overrides = (req.Lines ?? new()).GroupBy(l => l.ServiceId).ToDictionary(g => g.Key, g => g.Last());
 
@@ -91,9 +105,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             DocDate = req.DocDate ?? DateTime.UtcNow,
             PartyName = partyName,
             PartyAddress = partyAddress,
-            PartyGstin = req.PartyGstin?.Trim(),
-            PartyState = req.PartyState?.Trim(),
-            PartyStateCode = req.PartyStateCode?.Trim(),
+            PartyGstin = partyGstin,
+            PartyState = partyState,
+            PartyStateCode = partyStateCode,
             IsInterState = interState,
             CourierMode = req.CourierMode?.Trim(),
             CourierCharges = req.CourierCharges ?? 0m,
