@@ -22,6 +22,7 @@ public class ServiceJob : ITimestamps
 
     public string? InwardDcNo { get; set; }
     public string? OutwardDcNo { get; set; }                // delivery-challan (DC document) number — stamped by DC generation / dispatch
+    public string? OutwardReferenceNo { get; set; }         // mandatory dispatch reference (courier/AWB/gate-pass etc.)
     public DateTime? DcDate { get; set; }
     public DateTime DateReceived { get; set; } = DateTime.UtcNow;
 

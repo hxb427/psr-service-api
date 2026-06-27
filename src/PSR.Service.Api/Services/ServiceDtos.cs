@@ -83,7 +83,11 @@ public record AddLineRequest(
     [Range(1, 1_000_000)] int Qty = 1,
     [StringLength(100)] string? ReplacementSerialNo = null);
 public record CompleteRequest([StringLength(1000)] string? TechnicianRemarks);
-public record DispatchRequest([Required, StringLength(50)] string OutwardDcNo, DateTime? DcDate);
+// Reference number is mandatory at dispatch; the outward DC number is optional.
+public record DispatchRequest(
+    [Required, StringLength(80)] string ReferenceNo,
+    [StringLength(50)] string? OutwardDcNo,
+    DateTime? DcDate);
 public record ReplaceRequest(
     [Required, StringLength(100)] string ReplacementSerialNo,
     long? ReplacementPartId,
@@ -113,7 +117,7 @@ public record ServiceHistoryDto(
 public record ServiceDetailDto(
     long Id, string ServiceNo, string? ChallanNo, string? CustomerType, long? CustomerId, string? CustomerName, string? CustomerPhone,
     long? DealerId, string? DealerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
-    string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, DateTime? DcDate,
+    string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, string? OutwardReferenceNo, DateTime? DcDate,
     string? PiNo, string? InvNo,
     DateTime DateReceived, DateTime? PromisedDate, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
     string ServiceStatus, string PaymentStatus, string? TechnicianRemarks, bool IsTotalLoss,

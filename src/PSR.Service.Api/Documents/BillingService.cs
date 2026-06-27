@@ -6,13 +6,17 @@ using PSR.Service.Api.Stock;
 
 namespace PSR.Service.Api.Documents;
 
+/// <summary>A computed-but-unsaved document plus the jobs it covers (used by the preview path).</summary>
+public sealed record BuiltDocument(ServiceDocument Doc, List<ServiceJob> Jobs);
+
 /// <summary>Builds a PI / Invoice / DC over one or more completed jobs of a single customer (old-app workflow):
-/// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter),
-/// allocates an atomic document number, and stamps that number onto every covered job. Enforces the gated
-/// chain (PI needs no PI/DC; Invoice needs PI + payment; DC needs in-warranty) that the old buttons enforced.</summary>
+/// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter).
+/// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
+/// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
 public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company, AppSettingsService settings)
 {
-    public async Task<long> GenerateAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
+    /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
+    public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
     {
         if (!Enum.TryParse<DocumentType>(req.DocType, true, out var docType))
             throw new BillingException($"Unknown document type '{req.DocType}'. Use PI, Invoice or DC.");
@@ -24,10 +28,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         var ids = req.ServiceIds.Distinct().ToList();
         if (ids.Count == 0) throw new BillingException("Select at least one completed job.");
 
-        // Load the jobs (avoid List.Contains in EF — funcletizer bug — by loading candidates per id set is fine here
-        // since the set is small; materialize then validate in memory).
-        var jobs = await db.Services.Where(s => !s.IsDeleted).ToListAsync(ct);
-        jobs = jobs.Where(j => ids.Contains(j.Id)).ToList();
+        // Load the jobs (avoid List.Contains in EF — funcletizer bug — materialize then filter in memory).
+        var all = await db.Services.Where(s => !s.IsDeleted).ToListAsync(ct);
+        var jobs = all.Where(j => ids.Contains(j.Id)).ToList();
         if (jobs.Count != ids.Count) throw new BillingException("One or more selected jobs were not found.");
 
         // Single-customer rule (old app: PI/Invoice/DC only across the same customer/dealer).
@@ -170,8 +173,17 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         else { doc.CgstAmount = Math.Round(tax / 2m, 2); doc.SgstAmount = tax - doc.CgstAmount; }
         doc.TotalAmount = taxable + tax + doc.CourierCharges;
 
+        return new BuiltDocument(doc, jobs);
+    }
+
+    /// <summary>Persist a computed document: allocate the atomic number, stamp every covered job, and log the
+    /// event to each job's status history. Returns the new document id.</summary>
+    public async Task<long> GenerateAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
+    {
+        var (doc, jobs) = await BuildAsync(req, userId, ct);
+
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var key = docType switch
+        var key = doc.DocType switch
         {
             DocumentType.PI => SequenceKeys.ProformaInvoice,
             DocumentType.Invoice => SequenceKeys.Invoice,
@@ -180,16 +192,26 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         doc.DocNo = await seq.NextAsync(key, ct);
         db.ServiceDocuments.Add(doc);
 
-        // Stamp the document number onto every covered job (the gated chain reads these back).
         foreach (var job in jobs)
         {
-            switch (docType)
+            // Stamp the document number onto the job (the gated chain reads these back).
+            switch (doc.DocType)
             {
                 case DocumentType.PI: job.PiNo = doc.DocNo; job.PiDate = doc.DocDate; break;
                 case DocumentType.Invoice: job.InvNo = doc.DocNo; job.InvDate = doc.DocDate; break;
                 case DocumentType.DC: job.OutwardDcNo = doc.DocNo; job.DcDate = doc.DocDate; break;
             }
             job.RowVersion++;
+
+            // Log the generation to the job's item history (shows in the detail pane).
+            db.ServiceStatusHistory.Add(new ServiceStatusHistory
+            {
+                ServiceId = job.Id,
+                FromStatus = job.ServiceStatus.ToString(),
+                ToStatus = doc.DocType.ToString(),          // "PI" / "Invoice" / "DC" — not a workflow status, ignored by metrics
+                ChangedByUserId = userId,
+                Note = $"{doc.DocNo} generated",
+            });
         }
 
         await db.SaveChangesAsync(ct);

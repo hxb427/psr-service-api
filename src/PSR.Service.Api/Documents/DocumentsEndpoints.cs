@@ -17,7 +17,8 @@ public static class DocumentsEndpoints
     public static IEndpointRouteBuilder MapDocumentEndpoints(this IEndpointRouteBuilder app)
     {
         var docs = app.MapGroup("/documents").WithTags("documents").RequireAuthorization("DocumentView");
-        docs.MapPost("/", GenerateAsync).RequireAuthorization("DocumentManage");   // multi-job generate
+        docs.MapPost("/preview", PreviewAsync).RequireAuthorization("DocumentManage");   // watermarked, NOT saved
+        docs.MapPost("/", GenerateAsync).RequireAuthorization("DocumentManage");          // multi-job generate (saves)
         docs.MapGet("/", ListAsync);
         docs.MapGet("/{id:long}", GetAsync);
         docs.MapGet("/{id:long}/pdf", PdfAsync);
@@ -27,6 +28,21 @@ public static class DocumentsEndpoints
             .WithTags("documents").RequireAuthorization("DocumentView");
 
         return app;
+    }
+
+    private static async Task<Results<FileContentHttpResult, BadRequest<string>>> PreviewAsync(
+        [FromBody] GenerateDocumentRequest req, ClaimsPrincipal user,
+        BillingService billing, CompanyInfo company, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        try
+        {
+            // Compute only — nothing is saved and no document number is allocated for a preview.
+            var built = await billing.BuildAsync(req, uid, ct);
+            var bytes = DocumentPdf.Render(built.Doc, company, "PREVIEW — NOT SAVED");
+            return TypedResults.File(bytes, "application/pdf", "document-preview.pdf");
+        }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
     }
 
     private static async Task<Results<Created<DocumentDto>, BadRequest<string>>> GenerateAsync(

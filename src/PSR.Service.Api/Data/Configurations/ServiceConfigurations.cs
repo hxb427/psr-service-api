@@ -28,6 +28,7 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
 
         b.Property(x => x.InwardDcNo).HasColumnName("inward_dc_no").HasMaxLength(50);
         b.Property(x => x.OutwardDcNo).HasColumnName("outward_dc_no").HasMaxLength(50);
+        b.Property(x => x.OutwardReferenceNo).HasColumnName("outward_reference_no").HasMaxLength(80);
         b.Property(x => x.DcDate).HasColumnName("dc_date");
         b.Property(x => x.DateReceived).HasColumnName("date_received");
 

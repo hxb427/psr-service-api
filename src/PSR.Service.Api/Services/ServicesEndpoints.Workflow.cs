@@ -140,17 +140,20 @@ public static partial class ServicesEndpoints
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> DispatchAsync(
         long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(req.OutwardDcNo)) return TypedResults.BadRequest("Outward DC number is required.");
+        // Reference number is mandatory; the outward DC number is optional.
+        if (string.IsNullOrWhiteSpace(req.ReferenceNo)) return TypedResults.BadRequest("Reference number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
         if (job.ServiceStatus is not ServiceStatus.Completed)
             return TypedResults.BadRequest($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
 
         user.TryGetUserId(out var uid);
-        job.OutwardDcNo = req.OutwardDcNo.Trim();
+        job.OutwardReferenceNo = req.ReferenceNo.Trim();
+        job.OutwardDcNo = string.IsNullOrWhiteSpace(req.OutwardDcNo) ? null : req.OutwardDcNo.Trim();
         job.DcDate = req.DcDate ?? DateTime.UtcNow;
-        WriteTransition(db, job, ServiceStatus.Dispatched, uid, $"Dispatched DC {job.OutwardDcNo}");
-        audit.Log(uid, "service.dispatch", "service", job.Id, details: job.OutwardDcNo, ip: http.GetIp());
+        var note = $"Dispatched (ref {job.OutwardReferenceNo}" + (job.OutwardDcNo is null ? ")" : $", DC {job.OutwardDcNo})");
+        WriteTransition(db, job, ServiceStatus.Dispatched, uid, note);
+        audit.Log(uid, "service.dispatch", "service", job.Id, details: job.OutwardReferenceNo, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));

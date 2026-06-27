@@ -10,7 +10,7 @@ namespace PSR.Service.Api.Documents;
 /// (a row per unit: Sr / Description / Warranty / Service Challan / Qty / Rate / Amount).</summary>
 public static class DocumentPdf
 {
-    public static byte[] Render(ServiceDocument doc, CompanyInfo company)
+    public static byte[] Render(ServiceDocument doc, CompanyInfo company, string? watermark = null)
     {
         var title = doc.DocType switch
         {
@@ -27,6 +27,11 @@ public static class DocumentPdf
                 page.Size(PageSizes.A4);
                 page.Margin(28);
                 page.DefaultTextStyle(t => t.FontSize(9).FontColor(Colors.Black));
+
+                // Preview watermark — drawn diagonally across the whole page; absent on the saved/clean copy.
+                if (!string.IsNullOrWhiteSpace(watermark))
+                    page.Foreground().AlignCenter().AlignMiddle().Rotate(-45)
+                        .Text(watermark).FontSize(52).Bold().FontColor(Colors.Red.Lighten3);
 
                 page.Header().Column(col =>
                 {
