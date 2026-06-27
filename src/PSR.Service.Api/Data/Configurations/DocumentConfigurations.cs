@@ -53,7 +53,10 @@ public class ServiceDocumentLineConfiguration : IEntityTypeConfiguration<Service
         b.HasKey(x => x.Id);
         b.Property(x => x.Id).HasColumnName("id");
         b.Property(x => x.DocumentId).HasColumnName("document_id");
+        b.Property(x => x.ServiceJobId).HasColumnName("service_job_id");
         b.Property(x => x.Description).HasColumnName("description").HasMaxLength(300).IsRequired();
+        b.Property(x => x.Warranty).HasColumnName("warranty").HasMaxLength(30);
+        b.Property(x => x.ServiceChallan).HasColumnName("service_challan").HasMaxLength(50);
         b.Property(x => x.HsnCode).HasColumnName("hsn_code").HasMaxLength(20);
         b.Property(x => x.Qty).HasColumnName("qty");
         b.Property(x => x.UnitRate).HasColumnName("unit_rate").HasPrecision(14, 2);
@@ -61,7 +64,9 @@ public class ServiceDocumentLineConfiguration : IEntityTypeConfiguration<Service
         b.Property(x => x.GstPercent).HasColumnName("gst_percent").HasPrecision(5, 2);
         b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(14, 2);
         b.Property(x => x.LineTotal).HasColumnName("line_total").HasPrecision(14, 2);
+        b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(300);
 
         b.HasIndex(x => x.DocumentId);
+        b.HasIndex(x => x.ServiceJobId);
     }
 }

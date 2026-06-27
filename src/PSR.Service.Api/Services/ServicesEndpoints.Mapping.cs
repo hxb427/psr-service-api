@@ -90,6 +90,7 @@ public static partial class ServicesEndpoints
             job.Id, job.ServiceNo, job.ChallanNo, job.CustomerType, job.CustomerId, customer?.Name, customer?.Phone,
             job.DealerId, dealerName, job.SerialNo, job.PsCode, job.ModelName, job.Description,
             job.ReportedProblem, job.WarrantyStatus.ToString(), job.InwardDcNo, job.OutwardDcNo, job.DcDate,
+            job.PiNo, job.InvNo,
             job.DateReceived, job.PromisedDate, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
             job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks, job.IsTotalLoss,
             job.ReplacementSerialNo, job.ReplacementPartId, replPartName,

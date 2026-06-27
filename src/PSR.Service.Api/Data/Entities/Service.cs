@@ -21,9 +21,17 @@ public class ServiceJob : ITimestamps
     public WarrantyStatus WarrantyStatus { get; set; } = WarrantyStatus.Unknown;
 
     public string? InwardDcNo { get; set; }
-    public string? OutwardDcNo { get; set; }
+    public string? OutwardDcNo { get; set; }                // delivery-challan (DC document) number — stamped by DC generation / dispatch
     public DateTime? DcDate { get; set; }
     public DateTime DateReceived { get; set; } = DateTime.UtcNow;
+
+    // Document references stamped when a PI / Invoice is generated for this job (old app: PI, PI_DATE, INV_NO).
+    // A PI/Invoice can cover several jobs of one customer, so the same number lands on each covered job.
+    // The DC document reuses OutwardDcNo above. These drive the gated PI → Invoice → DC → dispatch chain.
+    public string? PiNo { get; set; }
+    public DateTime? PiDate { get; set; }
+    public string? InvNo { get; set; }
+    public DateTime? InvDate { get; set; }
 
     public long? TechnicianId { get; set; }
     public DateTime? PromisedDate { get; set; }             // legacy "priority date" — target turnaround date

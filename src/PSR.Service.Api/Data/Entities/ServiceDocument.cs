@@ -18,7 +18,9 @@ public class ServiceDocument
     public string DocNo { get; set; } = string.Empty;   // unique per type (PI-2026-0001, INV-2026-0001, DC-2026-0001)
     public DateTime DocDate { get; set; } = DateTime.UtcNow;
 
-    public long? ServiceId { get; set; }                 // the service job billed
+    // A document covers one OR MORE service jobs of a single customer (old app: one PI lists many units).
+    // The covered jobs are the distinct ServiceJobId values across Lines; ServiceId stays null for multi-job docs.
+    public long? ServiceId { get; set; }                 // legacy single-job link (kept nullable; unused for multi-job)
     public long? SpareSaleId { get; set; }               // reserved for spare-sale documents (Phase 5.2)
 
     // ----- party snapshot (frozen at generation; entered on the generate form, like the old app) -----
@@ -45,19 +47,24 @@ public class ServiceDocument
     public List<ServiceDocumentLine> Lines { get; set; } = new();
 }
 
-/// <summary>A single billed line on a <see cref="ServiceDocument"/> (snapshot — not a live FK to service_lines).</summary>
+/// <summary>One line on a <see cref="ServiceDocument"/> = one serviced unit (service job), matching the old app's
+/// PI/Invoice table (a row per unit). Snapshot — not a live FK chain. The covered job is <see cref="ServiceJobId"/>.</summary>
 public class ServiceDocumentLine
 {
     public long Id { get; set; }
     public long DocumentId { get; set; }
+    public long? ServiceJobId { get; set; }              // the serviced unit this line bills (null only for ad-hoc lines)
     public string Description { get; set; } = string.Empty;
+    public string? Warranty { get; set; }                // snapshot of the unit's warranty status (Active units bill at 0)
+    public string? ServiceChallan { get; set; }          // the unit's inward challan no
     public string? HsnCode { get; set; }
     public int Qty { get; set; } = 1;
-    public decimal UnitRate { get; set; }
+    public decimal UnitRate { get; set; }                // tax-inclusive rate for the unit (manager-editable)
     public decimal TaxableAmount { get; set; }
     public decimal GstPercent { get; set; }
     public decimal TaxAmount { get; set; }
     public decimal LineTotal { get; set; }               // taxable + tax
+    public string? Remarks { get; set; }
 
     public ServiceDocument Document { get; set; } = null!;
 }

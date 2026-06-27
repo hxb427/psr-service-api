@@ -113,7 +113,7 @@ public static partial class ServicesEndpoints
         if (job.PaymentStatus != PaymentStatus.Pending)
             return TypedResults.BadRequest("Cannot revert — a payment has already been recorded.");
         // A generated PI / Invoice / DC freezes the billed figures — reverting would let the lines change underneath it.
-        if (await db.ServiceDocuments.AnyAsync(d => d.ServiceId == id, ct))
+        if (await db.ServiceDocumentLines.AnyAsync(l => l.ServiceJobId == id, ct))
             return TypedResults.BadRequest("Cannot revert — a PI, invoice or delivery challan has already been generated for this job.");
 
         user.TryGetUserId(out var uid);

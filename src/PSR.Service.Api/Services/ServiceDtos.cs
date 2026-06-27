@@ -95,7 +95,9 @@ public record PaymentRequest([Required] string Status);
 public record ServiceListItemDto(
     long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
-    long? TechnicianId, string? TechnicianName, DateTime DateReceived, DateTime? PromisedDate);
+    long? TechnicianId, string? TechnicianName, DateTime DateReceived, DateTime? PromisedDate,
+    // Document refs drive the gated PI → Invoice → DC chain on the dispatch screen.
+    string? PiNo, string? InvNo, string? OutwardDcNo);
 
 // UnitPrice/Amount are null for non-pricing roles (technician/store/etc).
 public record ServiceLineDto(
@@ -112,6 +114,7 @@ public record ServiceDetailDto(
     long Id, string ServiceNo, string? ChallanNo, string? CustomerType, long? CustomerId, string? CustomerName, string? CustomerPhone,
     long? DealerId, string? DealerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string? ReportedProblem, string WarrantyStatus, string? InwardDcNo, string? OutwardDcNo, DateTime? DcDate,
+    string? PiNo, string? InvNo,
     DateTime DateReceived, DateTime? PromisedDate, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
     string ServiceStatus, string PaymentStatus, string? TechnicianRemarks, bool IsTotalLoss,
     string? ReplacementSerialNo, long? ReplacementPartId, string? ReplacementPartName,
