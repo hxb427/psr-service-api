@@ -195,7 +195,6 @@ public static partial class ServicesEndpoints
         var job = await db.Services.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
         if (!ServiceRoles.CanProcess(user, job) && !ServiceRoles.CanSeePricing(user)
-            && !user.IsInRole(RoleNames.InwardManager) && !user.IsInRole(RoleNames.DispatchManager)
             && !user.IsInRole(RoleNames.StoreManager) && !user.IsInRole(RoleNames.Accounts))
             return TypedResults.Forbid();
 

@@ -25,7 +25,8 @@ public class ServiceDocument
 
     // ----- party snapshot (frozen at generation; entered on the generate form, like the old app) -----
     public string PartyName { get; set; } = string.Empty;
-    public string? PartyAddress { get; set; }
+    public string? PartyAddress { get; set; }              // billing address
+    public string? ConsigneeAddress { get; set; }          // delivery / consignee address (old app: separate block)
     public string? PartyGstin { get; set; }
     public string? PartyState { get; set; }
     public string? PartyStateCode { get; set; }

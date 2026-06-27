@@ -21,12 +21,7 @@ public class RoleConfiguration : IEntityTypeConfiguration<Role>
 
         b.Property(x => x.Description).HasColumnName("description").HasMaxLength(500);
 
-        var seedId = 1;
-        b.HasData(RoleNames.All.Select(name => new Role
-        {
-            Id = seedId++,
-            Name = name,
-            Description = null
-        }).ToArray());
+        // Fixed ids (gaps at 5 = inward_manager and 7 = dispatch_manager, both removed).
+        b.HasData(RoleNames.Seed.Select(r => new Role { Id = r.Id, Name = r.Name, Description = null }).ToArray());
     }
 }

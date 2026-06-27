@@ -10,7 +10,7 @@ namespace PSR.Service.Api.Documents;
 /// (a row per unit: Sr / Description / Warranty / Service Challan / Qty / Rate / Amount).</summary>
 public static class DocumentPdf
 {
-    public static byte[] Render(ServiceDocument doc, CompanyInfo company, string? watermark = null)
+    public static byte[] Render(ServiceDocument doc, CompanyInfo company, string? watermark = null, string? sourcePiNo = null)
     {
         var title = doc.DocType switch
         {
@@ -43,10 +43,13 @@ public static class DocumentPdf
                             c.Item().Text(company.Address).FontSize(8);
                             c.Item().Text($"GSTIN: {company.Gstin}   State: {company.State} ({company.StateCode})").FontSize(8);
                         });
-                        row.ConstantItem(180).Column(c =>
+                        row.ConstantItem(190).Column(c =>
                         {
                             c.Item().AlignRight().Text(title).FontSize(14).Bold();
                             c.Item().AlignRight().Text($"No: {doc.DocNo}").FontSize(9).Bold();
+                            // A tax invoice references the source proforma (PI No), like the old app.
+                            if (doc.DocType == DocumentType.Invoice && !string.IsNullOrWhiteSpace(sourcePiNo))
+                                c.Item().AlignRight().Text($"PI No: {sourcePiNo}").FontSize(9);
                             c.Item().AlignRight().Text($"Date: {doc.DocDate:dd-MMM-yyyy}").FontSize(9);
                         });
                     });
@@ -55,15 +58,25 @@ public static class DocumentPdf
 
                 page.Content().PaddingVertical(8).Column(col =>
                 {
-                    // ---- party ----
-                    col.Item().Column(c =>
+                    // ---- party: Bill To (billing) + Consignee (delivery), like the old app ----
+                    col.Item().Row(row =>
                     {
-                        c.Item().Text("Bill To").FontSize(8).FontColor(Colors.Grey.Darken1);
-                        c.Item().Text(doc.PartyName).Bold();
-                        if (!string.IsNullOrWhiteSpace(doc.PartyAddress)) c.Item().Text(doc.PartyAddress).FontSize(8);
-                        if (!string.IsNullOrWhiteSpace(doc.PartyGstin)) c.Item().Text($"GSTIN: {doc.PartyGstin}").FontSize(8);
-                        if (!string.IsNullOrWhiteSpace(doc.PartyState))
-                            c.Item().Text($"State: {doc.PartyState} ({doc.PartyStateCode})").FontSize(8);
+                        row.RelativeItem().Column(c =>
+                        {
+                            c.Item().Text("Bill To").FontSize(8).FontColor(Colors.Grey.Darken1);
+                            c.Item().Text(doc.PartyName).Bold();
+                            if (!string.IsNullOrWhiteSpace(doc.PartyAddress)) c.Item().Text(doc.PartyAddress).FontSize(8);
+                            if (!string.IsNullOrWhiteSpace(doc.PartyGstin)) c.Item().Text($"GSTIN: {doc.PartyGstin}").FontSize(8);
+                            if (!string.IsNullOrWhiteSpace(doc.PartyState))
+                                c.Item().Text($"State: {doc.PartyState}  Code: {doc.PartyStateCode}").FontSize(8);
+                        });
+                        row.ConstantItem(16);
+                        row.RelativeItem().Column(c =>
+                        {
+                            c.Item().Text("Consignee / Delivery").FontSize(8).FontColor(Colors.Grey.Darken1);
+                            c.Item().Text(doc.PartyName).Bold();
+                            c.Item().Text(string.IsNullOrWhiteSpace(doc.ConsigneeAddress) ? doc.PartyAddress : doc.ConsigneeAddress).FontSize(8);
+                        });
                     });
 
                     // ---- unit table ----
@@ -118,14 +131,14 @@ public static class DocumentPdf
                     if (showMoney)
                         col.Item().PaddingTop(8).AlignRight().Width(230).Column(c =>
                         {
-                            TotalRow(c, "Taxable", doc.TaxableAmount);
+                            TotalRow(c, "Taxable Value", doc.TaxableAmount);
                             if (doc.IsInterState) TotalRow(c, "IGST", doc.IgstAmount);
                             else { TotalRow(c, "CGST", doc.CgstAmount); TotalRow(c, "SGST", doc.SgstAmount); }
                             if (doc.CourierCharges > 0) TotalRow(c, "Courier", doc.CourierCharges);
                             c.Item().PaddingTop(2).BorderTop(1).BorderColor(Colors.Grey.Medium);
                             c.Item().Row(r =>
                             {
-                                r.RelativeItem().Text("Grand Total").Bold();
+                                r.RelativeItem().Text("Total Amount").Bold();
                                 r.ConstantItem(110).AlignRight().Text(Money(doc.TotalAmount)).Bold();
                             });
                         });

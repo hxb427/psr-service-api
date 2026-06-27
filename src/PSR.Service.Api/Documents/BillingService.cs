@@ -108,6 +108,8 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             DocDate = req.DocDate ?? DateTime.UtcNow,
             PartyName = partyName,
             PartyAddress = partyAddress,
+            // Consignee/delivery address — defaults to the billing address when not given separately.
+            ConsigneeAddress = string.IsNullOrWhiteSpace(req.ConsigneeAddress) ? partyAddress : req.ConsigneeAddress.Trim(),
             PartyGstin = partyGstin,
             PartyState = partyState,
             PartyStateCode = partyStateCode,

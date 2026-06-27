@@ -39,7 +39,9 @@ public static class DocumentsEndpoints
         {
             // Compute only — nothing is saved and no document number is allocated for a preview.
             var built = await billing.BuildAsync(req, uid, ct);
-            var bytes = DocumentPdf.Render(built.Doc, company, "PREVIEW — NOT SAVED");
+            var sourcePi = built.Doc.DocType == DocumentType.Invoice
+                ? built.Jobs.Select(j => j.PiNo).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p)) : null;
+            var bytes = DocumentPdf.Render(built.Doc, company, "PREVIEW — NOT SAVED", sourcePi);
             return TypedResults.File(bytes, "application/pdf", "document-preview.pdf");
         }
         catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
@@ -112,7 +114,15 @@ public static class DocumentsEndpoints
     {
         var doc = await db.ServiceDocuments.AsNoTracking().Include(d => d.Lines).FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return TypedResults.NotFound();
-        var bytes = DocumentPdf.Render(doc, company);
+        // A tax invoice prints the source PI number (taken from any covered job).
+        string? sourcePi = doc.DocType == DocumentType.Invoice
+            ? await (from l in db.ServiceDocumentLines.AsNoTracking()
+                     where l.DocumentId == id && l.ServiceJobId != null
+                     join s in db.Services on l.ServiceJobId equals s.Id
+                     where s.PiNo != null
+                     select s.PiNo).FirstOrDefaultAsync(ct)
+            : null;
+        var bytes = DocumentPdf.Render(doc, company, sourcePiNo: sourcePi);
         return TypedResults.File(bytes, "application/pdf", $"{doc.DocNo}.pdf");
     }
 

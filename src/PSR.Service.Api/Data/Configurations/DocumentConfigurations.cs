@@ -19,6 +19,7 @@ public class ServiceDocumentConfiguration : IEntityTypeConfiguration<ServiceDocu
 
         b.Property(x => x.PartyName).HasColumnName("party_name").HasMaxLength(200).IsRequired();
         b.Property(x => x.PartyAddress).HasColumnName("party_address").HasMaxLength(500);
+        b.Property(x => x.ConsigneeAddress).HasColumnName("consignee_address").HasMaxLength(500);
         b.Property(x => x.PartyGstin).HasColumnName("party_gstin").HasMaxLength(20);
         b.Property(x => x.PartyState).HasColumnName("party_state").HasMaxLength(60);
         b.Property(x => x.PartyStateCode).HasColumnName("party_state_code").HasMaxLength(10);

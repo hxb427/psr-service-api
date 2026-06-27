@@ -47,17 +47,17 @@ public static class ServiceCollectionExtensions
             options.AddPolicy("ReturnAck", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
 
-            // Phase 4 — service workflow
+            // Phase 4 — service workflow (inward_manager / dispatch_manager roles removed → folded into manager/supervisor)
             options.AddPolicy("InwardManage", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.InwardManager, RoleNames.Supervisor));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("ServiceAssign", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.InwardManager));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("ServiceManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("ServiceDelete", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("DispatchManage", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.DispatchManager, RoleNames.Supervisor));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("PaymentManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Accounts));
 

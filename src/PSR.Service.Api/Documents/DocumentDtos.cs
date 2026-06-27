@@ -11,6 +11,7 @@ public record GenerateDocumentRequest(
     DateTime? DocDate,
     [StringLength(200)] string? PartyName,
     [StringLength(500)] string? PartyAddress,
+    [StringLength(500)] string? ConsigneeAddress,
     [StringLength(20)] string? PartyGstin,
     [StringLength(60)] string? PartyState,
     [StringLength(10)] string? PartyStateCode,
