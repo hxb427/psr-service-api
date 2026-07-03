@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- ASP.NET Core 10 -->
+    <PackageVersion Include="ClosedXML" Version="0.105.0" />
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
     <!-- EF Core 9 (Pomelo doesn't ship a 10.x build yet; EF Core 9 runs fine on .NET 10) -->

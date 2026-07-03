@@ -6,6 +6,7 @@ using PSR.Service.Api.Documents;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
 using PSR.Service.Api.Reference;
+using PSR.Service.Api.Reports;
 using PSR.Service.Api.Services;
 using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
@@ -53,6 +54,7 @@ app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
 app.MapDocumentEndpoints();
 app.MapSettingsEndpoints();
+app.MapReportsEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();
 app.Run();

@@ -66,6 +66,12 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Accounts));
             options.AddPolicy("DocumentView", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts));
+
+            // Phase 6 — reports. Full reports for every non-technician role (legacy hub rule);
+            // technicians still get their own performance / parts-used via the unrestricted endpoints.
+            options.AddPolicy("ReportsFull", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer,
+                RoleNames.StoreManager, RoleNames.Accounts));
         });
         return services;
     }
