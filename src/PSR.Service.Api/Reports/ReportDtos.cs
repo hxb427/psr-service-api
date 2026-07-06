@@ -31,6 +31,11 @@ public record ServiceRegisterRow(
     string? OutwardDcNo, string? OutwardReferenceNo, DateTime? DcDate,
     string? TechnicianName, DateTime DateReceived, string? TechnicianRemarks);
 
+// ----- serial ledger (where each deployed serial-tracked unit is) -----
+public record SerialReportRow(
+    string SerialNumber, string ItemCode, string PartName, string Status,
+    string OwnerType, string? OwnerRef, string? TechnicianName, DateTime? LastUpdatedAt);
+
 // ----- daily summary -----
 public record DailySummaryDto(
     DateTime Date, int ReceivedCount,

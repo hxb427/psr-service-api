@@ -36,7 +36,9 @@ public static partial class ServicesEndpoints
             if (part is null) return TypedResults.BadRequest("Part not found.");
             line.PartId = part.Id;
             line.UnitPrice = part.CustomerRate;                 // server-set; technicians never send price
-            if (lineType is ServiceLineType.Replacement) line.ReplacementSerialNo = req.ReplacementSerialNo?.Trim();
+            // Replacement lines carry the new unit's serial; serial-tracked component lines carry the fitted serial.
+            if (lineType is ServiceLineType.Replacement || part.IsSerialTracked)
+                line.ReplacementSerialNo = req.ReplacementSerialNo?.Trim();
         }
         else // ServiceCharge
         {

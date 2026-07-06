@@ -22,6 +22,7 @@ public static class ReportsEndpoints
         group.MapGet("/technician-performance/{technicianId:long}", TechPerformanceDetailAsync);
         group.MapGet("/parts-used", PartsUsedAsync);
         group.MapGet("/held-items", HeldItemsAsync).RequireAuthorization("ReportsFull");
+        group.MapGet("/serials", SerialLedgerAsync).RequireAuthorization("StockManage");
         group.MapGet("/service-register", ServiceRegisterAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/daily-summary", DailySummaryAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/tat", TatAsync).RequireAuthorization("ReportsFull");
@@ -218,6 +219,43 @@ public static class ReportsEndpoints
                 new[] { "Technician", "Item code", "Part", "On hand" },
                 rows.Select(x => (IReadOnlyList<object?>)new object?[] { x.TechnicianName, x.ItemCode, x.PartName, x.OnHand })),
                 XlsxMime, "held-items.xlsx");
+        return TypedResults.Ok(rows);
+    }
+
+    // ---------------------------------------------------------------- serial ledger (deployed serial-tracked units)
+
+    private static async Task<Results<Ok<List<SerialReportRow>>, FileContentHttpResult>> SerialLedgerAsync(
+        AppDbContext db, string? status, string? ownerType, long? technicianId, long? partId, string? search, string? format, CancellationToken ct)
+    {
+        var q = from c in db.ComponentSerials.AsNoTracking()
+                join p in db.Parts on c.PartId equals p.Id
+                join u in db.Users on c.TechnicianId equals (long?)u.Id into ug
+                from u in ug.DefaultIfEmpty()
+                select new { c, p.ItemCode, PartName = p.Name, TechName = u != null ? u.Username : null };
+
+        if (partId is { } pid) q = q.Where(x => x.c.PartId == pid);
+        if (technicianId is { } tid) q = q.Where(x => x.c.TechnicianId == tid);
+        if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<SerialStatus>(status, true, out var st))
+            q = q.Where(x => x.c.Status == st);
+        if (!string.IsNullOrWhiteSpace(ownerType) && Enum.TryParse<SerialOwnerType>(ownerType, true, out var ot))
+            q = q.Where(x => x.c.OwnerType == ot);
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var v = search.Trim();
+            q = q.Where(x => x.c.SerialNumber.Contains(v) || x.ItemCode.Contains(v) || x.PartName.Contains(v));
+        }
+
+        var rows = (await q.OrderBy(x => x.ItemCode).ThenBy(x => x.c.SerialNumber).Take(10_000).ToListAsync(ct))
+            .Select(x => new SerialReportRow(x.c.SerialNumber, x.ItemCode, x.PartName, x.c.Status.ToString(),
+                x.c.OwnerType.ToString(), x.c.OwnerRef, x.TechName, x.c.LastUpdatedAt))
+            .ToList();
+
+        if (IsXlsx(format))
+            return TypedResults.File(XlsxBuilder.Build("Serial ledger",
+                new[] { "Serial", "Item code", "Part", "Status", "Owner type", "Owner", "Technician", "Last updated" },
+                rows.Select(x => (IReadOnlyList<object?>)new object?[] { x.SerialNumber, x.ItemCode, x.PartName, x.Status,
+                    x.OwnerType, x.OwnerRef, x.TechnicianName, x.LastUpdatedAt })),
+                XlsxMime, "serial-ledger.xlsx");
         return TypedResults.Ok(rows);
     }
 

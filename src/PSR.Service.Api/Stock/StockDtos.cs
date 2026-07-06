@@ -19,9 +19,12 @@ public record StockRequestDto(
     long Id, string RequestNo, long RequestedByUserId, string? RequestedByUsername,
     DateTime RequestDate, long PartId, string ItemCode, string PartName,
     int QtyRequested, int QtyIssued, string Status, DateTime? IssuedDate, string? Remarks,
-    string? Courier, string? TrackingNo);
+    string? Courier, string? TrackingNo,
+    bool IsSerialTracked, bool RequesterIsFieldTechnician);
 
-public record IssueRequest([Range(1, 1_000_000)] int Qty, [StringLength(80)] string? Courier = null, [StringLength(80)] string? TrackingNo = null);
+// Serials is required (count == issued qty) only when a serial-tracked part is issued to a field technician.
+public record IssueRequest([Range(1, 1_000_000)] int Qty, [StringLength(80)] string? Courier = null, [StringLength(80)] string? TrackingNo = null,
+    IReadOnlyList<string>? Serials = null);
 
 public record TechInventoryRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand);
 

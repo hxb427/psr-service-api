@@ -36,7 +36,9 @@ public static class StockRequestsEndpoints
                 join p in db.Parts on r.PartId equals p.Id
                 join u in db.Users on r.RequestedByUserId equals u.Id into ug
                 from u in ug.DefaultIfEmpty()
-                select new { r, p.ItemCode, p.Name, Username = u != null ? u.Username : null };
+                select new { r, p.ItemCode, p.Name, p.IsSerialTracked,
+                    Username = u != null ? u.Username : null,
+                    RequesterIsField = u != null && u.IsFieldTechnician };
 
         if (!manage) q = q.Where(x => x.r.RequestedByUserId == uid);
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<StockRequestStatus>(status, true, out var st))
@@ -46,7 +48,8 @@ public static class StockRequestsEndpoints
         var items = rows.Select(x => new StockRequestDto(
             x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
             x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued,
-            x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks, x.r.Courier, x.r.TrackingNo)).ToList();
+            x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks, x.r.Courier, x.r.TrackingNo,
+            x.IsSerialTracked, x.RequesterIsField)).ToList();
         return TypedResults.Ok(items);
     }
 
@@ -75,14 +78,16 @@ public static class StockRequestsEndpoints
         }
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
+        var requesterIsField = await db.Users.Where(u => u.Id == uid).Select(u => u.IsFieldTechnician).FirstOrDefaultAsync(ct);
         var dto = new StockRequestDto(reqEntity.Id, reqEntity.RequestNo, uid, null, reqEntity.RequestDate,
-            part.Id, part.ItemCode, part.Name, reqEntity.QtyRequested, 0, reqEntity.Status.ToString(), null, reqEntity.Remarks, null, null);
+            part.Id, part.ItemCode, part.Name, reqEntity.QtyRequested, 0, reqEntity.Status.ToString(), null, reqEntity.Remarks, null, null,
+            part.IsSerialTracked, requesterIsField);
         return TypedResults.Created($"/stock-requests/{reqEntity.Id}", dto);
     }
 
     private static async Task<Results<Ok<StockRequestDto>, NotFound, BadRequest<string>>> IssueAsync(
         long id, [FromBody] IssueRequest req, ClaimsPrincipal user, AppDbContext db,
-        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
+        StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var r = await db.StockRequests.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (r is null) return TypedResults.NotFound();
@@ -93,11 +98,32 @@ public static class StockRequestsEndpoints
         var issueQty = Math.Min(req.Qty, remaining);
         if (issueQty <= 0) return TypedResults.BadRequest("Nothing left to issue on this request.");
 
+        var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == r.PartId, ct);
+        if (part is null) return TypedResults.BadRequest("Part not found.");
+        var requester = await db.Users.FirstOrDefaultAsync(u => u.Id == r.RequestedByUserId, ct);
+
+        // Serial capture applies only when a serial-tracked part goes to a field technician.
+        var needSerials = part.IsSerialTracked && requester is { IsFieldTechnician: true };
+        var serials = (req.Serials ?? [])
+            .Select(s => s?.Trim() ?? string.Empty).Where(s => s.Length > 0).ToList();
+        if (needSerials)
+        {
+            if (serials.Count != issueQty)
+                return TypedResults.BadRequest($"Enter exactly {issueQty} serial number(s) for this serial-tracked part.");
+            var conflicts = await serial.FindIssueConflictsAsync(r.PartId, serials, ct);
+            if (conflicts.Count > 0)
+                return TypedResults.BadRequest("Cannot issue: " +
+                    string.Join("; ", conflicts.Select(kv => $"{kv.Key} — {kv.Value}")));
+        }
+
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
             await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid, "STOCK_REQUEST", r.Id, ct);
+            if (needSerials)
+                await serial.CaptureOnIssueAsync(r.PartId, part.Name, r.RequestedByUserId,
+                    requester!.FullName ?? requester.Username, serials, uid, ct);
             r.QtyIssued += issueQty;
             r.Status = r.QtyIssued >= r.QtyRequested ? StockRequestStatus.Issued : StockRequestStatus.Partial;
             r.IssuedByUserId = uid;
@@ -157,11 +183,13 @@ public static class StockRequestsEndpoints
                        join u in db.Users on r.RequestedByUserId equals u.Id into ug
                        from u in ug.DefaultIfEmpty()
                        where r.Id == id
-                       select new { r, p.ItemCode, p.Name, Username = u != null ? u.Username : null })
+                       select new { r, p.ItemCode, p.Name, p.IsSerialTracked,
+                           Username = u != null ? u.Username : null,
+                           RequesterIsField = u != null && u.IsFieldTechnician })
             .FirstAsync(ct);
         return new StockRequestDto(x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
             x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued, x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks,
-            x.r.Courier, x.r.TrackingNo);
+            x.r.Courier, x.r.TrackingNo, x.IsSerialTracked, x.RequesterIsField);
     }
 
     private static async Task<Results<NoContent, NotFound, BadRequest<string>, ForbidHttpResult>> DeleteAsync(

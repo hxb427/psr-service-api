@@ -28,6 +28,7 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         b.Property(x => x.Email).HasColumnName("email").HasMaxLength(200);
 
         b.Property(x => x.IsActive).HasColumnName("is_active").HasDefaultValue(true);
+        b.Property(x => x.IsFieldTechnician).HasColumnName("is_field_technician").HasDefaultValue(false);
         b.Property(x => x.TokenVersion).HasColumnName("token_version").HasDefaultValue(0);
         b.Property(x => x.MustChangePassword).HasColumnName("must_change_password").HasDefaultValue(false);
         b.Property(x => x.PasswordChangedAt).HasColumnName("password_changed_at");

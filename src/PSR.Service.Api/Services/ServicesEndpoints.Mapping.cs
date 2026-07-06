@@ -29,6 +29,22 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
+    /// <summary>Best display name for the job's party (dealer or direct customer), for serial owner_ref.</summary>
+    private static async Task<string> PartyLabelAsync(AppDbContext db, ServiceJob job, CancellationToken ct)
+    {
+        if (job.DealerId is { } did)
+        {
+            var d = await db.Dealers.AsNoTracking().Where(x => x.Id == did).Select(x => x.Name).FirstOrDefaultAsync(ct);
+            if (!string.IsNullOrWhiteSpace(d)) return d!;
+        }
+        if (job.CustomerId is { } cid)
+        {
+            var c = await db.Customers.AsNoTracking().Where(x => x.Id == cid).Select(x => x.Name).FirstOrDefaultAsync(ct);
+            if (!string.IsNullOrWhiteSpace(c)) return c!;
+        }
+        return job.ServiceNo;
+    }
+
     private static void WriteTransition(AppDbContext db, ServiceJob job, ServiceStatus to, long uid, string? note)
     {
         db.ServiceStatusHistory.Add(new ServiceStatusHistory

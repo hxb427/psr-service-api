@@ -223,7 +223,7 @@ public static partial class ServicesEndpoints
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> CompleteAsync(
         long id, [FromBody] CompleteRequest? req, ClaimsPrincipal user, AppDbContext db,
-        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
+        StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
@@ -242,6 +242,9 @@ public static partial class ServicesEndpoints
                 && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
                 await ledger.ConsumeAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
 
+            // Move any serial-tracked parts fitted/handed to the customer into the serial ledger.
+            await InstallJobSerialsAsync(db, serial, job, uid, ct);
+
             if (req?.TechnicianRemarks is { } remarks) job.TechnicianRemarks = remarks.Trim();
             // A total-loss job routes to replacement-approval instead of plain pending-dispatch.
             var to = job.IsTotalLoss ? ServiceStatus.ReplacementApprovalPending : ServiceStatus.Completed;
@@ -259,7 +262,7 @@ public static partial class ServicesEndpoints
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> ReplaceAsync(
         long id, [FromBody] ReplaceRequest req, ClaimsPrincipal user, AppDbContext db,
-        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
+        StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.ReplacementSerialNo))
             return TypedResults.BadRequest("Replacement serial number is required.");
@@ -282,8 +285,14 @@ public static partial class ServicesEndpoints
         {
             // Ship the replacement unit out of the warehouse only when it maps to a catalog part.
             if (part is not null)
+            {
                 await ledger.ReplacementOutAsync(part.Id, qty, uid, job.Id,
                     req.ReplacementSerialNo.Trim(), $"Replacement for service {job.ServiceNo}", ct);
+                // A serial-tracked replacement unit is now deployed to the customer.
+                if (part.IsSerialTracked)
+                    await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
+                        await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct);
+            }
 
             job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
             job.ReplacementPartId = part?.Id;
@@ -296,5 +305,30 @@ public static partial class ServicesEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    /// <summary>On completion, transition every serial-tracked part fitted/handed to the customer to
+    /// INSTALLED (component) / USED (replacement) with owner CUSTOMER. The per-line serial lives in
+    /// <see cref="ServiceLine.ReplacementSerialNo"/> (captured when the line was added).</summary>
+    private static async Task InstallJobSerialsAsync(
+        AppDbContext db, SerialService serial, ServiceJob job, long uid, CancellationToken ct)
+    {
+        var lines = job.Lines.Where(l => l.PartId.HasValue
+            && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement
+            && !string.IsNullOrWhiteSpace(l.ReplacementSerialNo)).ToList();
+        if (lines.Count == 0) return;
+
+        var party = await PartyLabelAsync(db, job, ct);
+        var partCache = new Dictionary<long, Part?>();
+        foreach (var line in lines)
+        {
+            var pid = line.PartId!.Value;
+            if (!partCache.TryGetValue(pid, out var part))
+                partCache[pid] = part = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
+            if (part is null || !part.IsSerialTracked) continue;
+
+            var newStatus = line.LineType == ServiceLineType.Replacement ? SerialStatus.Used : SerialStatus.Installed;
+            await serial.InstallToCustomerAsync(pid, line.ReplacementSerialNo!.Trim(), part.Name, party, newStatus, uid, ct);
+        }
     }
 }

@@ -8,6 +8,7 @@ public record UserListItemDto(
     string? FullName,
     string? Email,
     bool IsActive,
+    bool IsFieldTechnician,
     bool MustChangePassword,
     DateTime? LastLoginAt,
     string[] Roles);
@@ -18,6 +19,7 @@ public record UserDetailDto(
     string? FullName,
     string? Email,
     bool IsActive,
+    bool IsFieldTechnician,
     bool MustChangePassword,
     DateTime? LastLoginAt,
     DateTime CreatedAt,
@@ -28,11 +30,13 @@ public record CreateUserRequest(
     [Required, StringLength(100, MinimumLength = 6)] string Password,
     [StringLength(200)] string? FullName,
     [EmailAddress, StringLength(200)] string? Email,
-    string[] Roles);
+    string[] Roles,
+    bool IsFieldTechnician = false);
 
 public record UpdateUserRequest(
     [StringLength(200)] string? FullName,
-    [EmailAddress, StringLength(200)] string? Email);
+    [EmailAddress, StringLength(200)] string? Email,
+    bool IsFieldTechnician = false);
 
 public record ResetPasswordRequest(
     [Required, StringLength(100, MinimumLength = 6)] string NewPassword);

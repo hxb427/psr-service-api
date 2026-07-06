@@ -79,6 +79,7 @@ public static class UsersEndpoints
             FullName = req.FullName?.Trim(),
             Email = req.Email?.Trim(),
             IsActive = true,
+            IsFieldTechnician = req.IsFieldTechnician,
             MustChangePassword = true,
         };
         foreach (var r in roles)
@@ -110,6 +111,7 @@ public static class UsersEndpoints
 
         user.FullName = req.FullName?.Trim();
         user.Email = req.Email?.Trim();
+        user.IsFieldTechnician = req.IsFieldTechnician;
 
         principal.TryGetUserId(out var actorId);
         audit.Log(actorId, "user.update", "user", id, ip: http.GetIp());
@@ -253,10 +255,10 @@ public static class UsersEndpoints
     }
 
     private static UserListItemDto ToListItem(User u) => new(
-        u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.MustChangePassword, u.LastLoginAt,
+        u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.IsFieldTechnician, u.MustChangePassword, u.LastLoginAt,
         u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray());
 
     private static UserDetailDto ToDetail(User u) => new(
-        u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.MustChangePassword, u.LastLoginAt, u.CreatedAt,
+        u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.IsFieldTechnician, u.MustChangePassword, u.LastLoginAt, u.CreatedAt,
         u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray());
 }

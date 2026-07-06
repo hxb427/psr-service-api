@@ -24,6 +24,7 @@ builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<NumberSequenceService>();
 builder.Services.AddScoped<StockLedgerService>();
+builder.Services.AddScoped<SerialService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<AppSettingsService>();
 builder.Services.AddSingleton(
@@ -50,6 +51,7 @@ app.MapDealerEndpoints();
 app.MapStockEndpoints();
 app.MapStockRequestEndpoints();
 app.MapStockReturnEndpoints();
+app.MapSerialEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
 app.MapDocumentEndpoints();
