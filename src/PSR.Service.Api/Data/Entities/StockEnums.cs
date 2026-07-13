@@ -9,6 +9,7 @@ public enum MovementType
     ConsumptionReversal, // technician += qty (a completed service was reverted — parts returned to the tech)
     Replacement,  // warehouse -= qty (a whole replacement unit shipped out for a Replaced service)
     Adjustment,   // warehouse += qty (qty may be negative)
+    Transfer,     // sender technician -= qty ; receiver technician += qty (peer transfer at acknowledgement)
 }
 
 public enum StockRequestStatus

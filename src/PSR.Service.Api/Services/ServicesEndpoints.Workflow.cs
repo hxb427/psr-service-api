@@ -104,7 +104,7 @@ public static partial class ServicesEndpoints
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> RevertAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db,
-        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
+        StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
@@ -121,11 +121,20 @@ public static partial class ServicesEndpoints
         try
         {
             // Completion consumed the technician's parts — reverting returns them, so a re-complete
-            // consumes once (not twice).
+            // consumes once (not twice). Serial-tracked units fitted at completion come back too.
             if (job.TechnicianId is { } techId)
+            {
+                var techName = await db.Users.AsNoTracking().Where(u => u.Id == techId)
+                    .Select(u => u.FullName ?? u.Username).FirstOrDefaultAsync(ct) ?? $"#{techId}";
                 foreach (var line in job.Lines.Where(l => l.PartId.HasValue
                     && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
+                {
                     await ledger.ReverseConsumptionAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
+                    if (!string.IsNullOrWhiteSpace(line.ReplacementSerialNo))
+                        await serial.UninstallToTechnicianAsync(line.PartId!.Value, line.ReplacementSerialNo!,
+                            techId, techName, uid, ct);
+                }
+            }
 
             WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service reverted to in-service");
             audit.Log(uid, "service.revert", "service", job.Id, ip: http.GetIp());

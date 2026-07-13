@@ -43,6 +43,9 @@ public record UpdatePartRequest(
     bool IsSerialTracked,
     [StringLength(500)] string? Remarks);
 
+// Serial-tracking config toggle (grid one-tap; avoids resending the full part on PUT).
+public record SetSerialTrackingRequest(bool Enabled);
+
 public record ServiceChargeDto(long Id, string Name, decimal Charge, decimal TaxPercent, string? Remarks, bool IsActive);
 
 public record CreateServiceChargeRequest(

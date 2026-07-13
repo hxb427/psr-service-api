@@ -21,6 +21,16 @@ public class AppDbContext : DbContext
     public DbSet<StockReturn> StockReturns => Set<StockReturn>();
     public DbSet<ComponentSerial> ComponentSerials => Set<ComponentSerial>();
     public DbSet<SerialStatusHistory> SerialStatusHistory => Set<SerialStatusHistory>();
+    public DbSet<StockIssueSerial> StockIssueSerials => Set<StockIssueSerial>();
+    public DbSet<StockIssueAck> StockIssueAcks => Set<StockIssueAck>();
+    public DbSet<StockReturnSerial> StockReturnSerials => Set<StockReturnSerial>();
+    public DbSet<TechnicianTransfer> TechnicianTransfers => Set<TechnicianTransfer>();
+    public DbSet<TechnicianTransferLine> TechnicianTransferLines => Set<TechnicianTransferLine>();
+    public DbSet<TechnicianTransferSerial> TechnicianTransferSerials => Set<TechnicianTransferSerial>();
+    public DbSet<FieldService> FieldServices => Set<FieldService>();
+    public DbSet<FieldServiceLine> FieldServiceLines => Set<FieldServiceLine>();
+    public DbSet<FieldSale> FieldSales => Set<FieldSale>();
+    public DbSet<FieldSaleLine> FieldSaleLines => Set<FieldSaleLine>();
     public DbSet<NumberSequence> NumberSequences => Set<NumberSequence>();
     public DbSet<ServiceJob> Services => Set<ServiceJob>();
     public DbSet<ServiceLine> ServiceLines => Set<ServiceLine>();

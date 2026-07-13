@@ -17,6 +17,11 @@ public static class SequenceKeys
     public const string StockReturn = "STOCK_RETURN";
     public const string Service = "SERVICE";
 
+    // Phase 2 field operations (mobile field portal).
+    public const string Transfer = "TRANSFER";
+    public const string FieldService = "FIELD_SERVICE";
+    public const string FieldSale = "FIELD_SALE";
+
     // Phase 5 — year-scoped document numbers (clean sequential, reset each year).
     public const string ProformaInvoice = "PI";
     public const string Invoice = "INVOICE";

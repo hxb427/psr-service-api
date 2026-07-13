@@ -28,9 +28,16 @@ public record IssueRequest([Range(1, 1_000_000)] int Qty, [StringLength(80)] str
 
 public record TechInventoryRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand);
 
-public record CreateStockReturnRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty, [StringLength(500)] string? Remarks);
+// Courier/tracking + serial ids are the field-technician shipment additions (legacy
+// technician_return_dispatches); desktop in-house returns send only part/qty/remarks.
+public record CreateStockReturnRequest(
+    [Required] long PartId, [Range(1, 1_000_000)] int Qty, [StringLength(500)] string? Remarks,
+    [StringLength(80)] string? Courier = null, [StringLength(80)] string? TrackingNo = null,
+    List<long>? SerialIds = null);
 
 public record StockReturnDto(
     long Id, string ReturnNo, long TechnicianId, string? TechnicianUsername,
     long PartId, string ItemCode, string PartName, int Qty, string Status,
-    DateTime? AcknowledgedDate, string? Remarks, DateTime CreatedAt);
+    DateTime? AcknowledgedDate, string? Remarks, DateTime CreatedAt,
+    string? Courier = null, string? TrackingNo = null,
+    List<StockReturnSerialDto>? Serials = null);

@@ -14,7 +14,8 @@ public static partial class ServicesEndpoints
     // ---------------------------------------------------------------- lines
 
     private static async Task<Results<Ok<ServiceLineDto>, NotFound, BadRequest<string>, ForbidHttpResult>> AddLineAsync(
-        long id, [FromBody] AddLineRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, [FromBody] AddLineRequest req, ClaimsPrincipal user, AppDbContext db,
+        Stock.SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
@@ -39,6 +40,15 @@ public static partial class ServicesEndpoints
             // Replacement lines carry the new unit's serial; serial-tracked component lines carry the fitted serial.
             if (lineType is ServiceLineType.Replacement || part.IsSerialTracked)
                 line.ReplacementSerialNo = req.ReplacementSerialNo?.Trim();
+
+            // A fitted serial on a serial-tracked component must be a unit the technician actually
+            // holds (RECEIVED, their custody) — legacy pick-list rule enforced server-side.
+            if (lineType is ServiceLineType.Component && part.IsSerialTracked
+                && !string.IsNullOrWhiteSpace(line.ReplacementSerialNo) && job.TechnicianId is { } techId)
+            {
+                var err = await serial.ValidateFittedSerialAsync(part.Id, line.ReplacementSerialNo!, techId, ct);
+                if (err is not null) return TypedResults.BadRequest(err);
+            }
         }
         else // ServiceCharge
         {

@@ -28,13 +28,14 @@ public static class PartsEndpoints
         group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("Admin");
         group.MapPost("/{id:long}/activate", ActivateAsync).RequireAuthorization("Admin");
         group.MapPost("/{id:long}/deactivate", DeactivateAsync).RequireAuthorization("Admin");
+        group.MapPost("/{id:long}/serial-tracking", SetSerialTrackingAsync).RequireAuthorization("Admin");
 
         return app;
     }
 
     private static async Task<Ok<PagedResult<PartDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
-        string? search, bool? activeOnly, int? page, int? pageSize, CancellationToken ct)
+        string? search, bool? activeOnly, bool? serialTracked, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -42,6 +43,7 @@ public static class PartsEndpoints
 
         var q = db.Parts.AsNoTracking().AsQueryable();
         if (activeOnly == true) q = q.Where(p => p.IsActive);
+        if (serialTracked is { } st) q = q.Where(p => p.IsSerialTracked == st);
         if (!string.IsNullOrWhiteSpace(search))
         {
             var s = search.Trim();
@@ -146,6 +148,23 @@ public static class PartsEndpoints
         audit.Log(actor, active ? "part.activate" : "part.deactivate", "part", id, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.NoContent();
+    }
+
+    /// <summary>Serial-tracking config toggle (old app's dedicated config page). Only the flag
+    /// changes — unlike PUT /parts/{id}, no other fields are touched.</summary>
+    private static async Task<Results<Ok<PartDto>, NotFound>> SetSerialTrackingAsync(
+        long id, [FromBody] SetSerialTrackingRequest req, ClaimsPrincipal user, AppDbContext db,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var p = await db.Parts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (p is null) return TypedResults.NotFound();
+
+        p.IsSerialTracked = req.Enabled;
+        user.TryGetUserId(out var actor);
+        audit.Log(actor, "part.serial-tracking", "part", id,
+            details: req.Enabled ? "enabled" : "disabled", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        return TypedResults.Ok(ToDto(p, CanSeePricing(user)));
     }
 
     private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);

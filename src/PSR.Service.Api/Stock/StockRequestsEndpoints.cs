@@ -120,10 +120,13 @@ public static class StockRequestsEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid, "STOCK_REQUEST", r.Id, ct);
+            var movement = await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid, "STOCK_REQUEST", r.Id, ct);
             if (needSerials)
-                await serial.CaptureOnIssueAsync(r.PartId, part.Name, r.RequestedByUserId,
+            {
+                await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
+                await serial.CaptureOnIssueAsync(movement.Id, r.PartId, part.Name, r.RequestedByUserId,
                     requester!.FullName ?? requester.Username, serials, uid, ct);
+            }
             r.QtyIssued += issueQty;
             r.Status = r.QtyIssued >= r.QtyRequested ? StockRequestStatus.Issued : StockRequestStatus.Partial;
             r.IssuedByUserId = uid;

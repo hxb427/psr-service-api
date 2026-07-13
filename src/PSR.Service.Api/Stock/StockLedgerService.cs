@@ -38,16 +38,20 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    public async Task IssueAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    /// <summary>Returns the movement entity so callers can link serial rows to it (id is assigned
+    /// once the caller saves changes).</summary>
+    public async Task<StockMovement> IssueAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
     {
         if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
             throw new StockException("Insufficient warehouse stock to issue.");
         await IncrementAsync(partId, technicianId, qty, ct);
-        db.StockMovements.Add(new StockMovement
+        var movement = new StockMovement
         {
             PartId = partId, MovementType = MovementType.Issue, Quantity = qty, TechnicianId = technicianId,
             PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
-        });
+        };
+        db.StockMovements.Add(movement);
+        return movement;
     }
 
     public async Task ReturnToStockAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
@@ -58,6 +62,21 @@ public class StockLedgerService(AppDbContext db)
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.Return, Quantity = qty, TechnicianId = technicianId,
+            PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
+    /// <summary>Peer transfer at acknowledgement: sender technician → receiver technician.
+    /// TechnicianId on the movement is the SENDER; the receiver is on the transfer row.</summary>
+    public async Task TransferAsync(long partId, long fromTechnicianId, long toTechnicianId, int qty,
+        long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        if (!await GuardedDecrementAsync(partId, fromTechnicianId, qty, ct))
+            throw new StockException("Sender does not hold enough of this part.");
+        await IncrementAsync(partId, toTechnicianId, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.Transfer, Quantity = qty, TechnicianId = fromTechnicianId,
             PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
         });
     }

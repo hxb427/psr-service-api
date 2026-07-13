@@ -96,6 +96,8 @@ public class StockReturnConfiguration : IEntityTypeConfiguration<StockReturn>
         b.Property(x => x.AcknowledgedByUserId).HasColumnName("acknowledged_by_user_id");
         b.Property(x => x.AcknowledgedDate).HasColumnName("acknowledged_date");
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
+        b.Property(x => x.Courier).HasColumnName("courier").HasMaxLength(80);
+        b.Property(x => x.TrackingNo).HasColumnName("tracking_no").HasMaxLength(80);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
 
@@ -123,6 +125,9 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
             // Year-scoped document sequences (clean sequential, reset annually). Year is bumped on first use.
             new NumberSequence { Key = SequenceKeys.ProformaInvoice, Prefix = "PI", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.Invoice, Prefix = "INV", NextValue = 1, Year = 2026 },
-            new NumberSequence { Key = SequenceKeys.DeliveryChallan, Prefix = "DC", NextValue = 1, Year = 2026 });
+            new NumberSequence { Key = SequenceKeys.DeliveryChallan, Prefix = "DC", NextValue = 1, Year = 2026 },
+            new NumberSequence { Key = SequenceKeys.Transfer, Prefix = "TRF", NextValue = 1 },
+            new NumberSequence { Key = SequenceKeys.FieldService, Prefix = "FSV", NextValue = 1 },
+            new NumberSequence { Key = SequenceKeys.FieldSale, Prefix = "FSL", NextValue = 1 });
     }
 }
