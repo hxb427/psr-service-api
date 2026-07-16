@@ -5,6 +5,7 @@ using PSR.Service.Api.Data;
 using PSR.Service.Api.Documents;
 using PSR.Service.Api.Health;
 using PSR.Service.Api.Logging;
+using PSR.Service.Api.MachineTests;
 using PSR.Service.Api.Reference;
 using PSR.Service.Api.Reports;
 using PSR.Service.Api.Services;
@@ -27,6 +28,10 @@ builder.Services.AddScoped<StockLedgerService>();
 builder.Services.AddScoped<SerialService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<AppSettingsService>();
+
+// Passtest (Hostinger MySQL, read-only) — direct connection, results cached.
+builder.Services.Configure<PasstestOptions>(builder.Configuration.GetSection(PasstestOptions.SectionName));
+builder.Services.AddScoped<PasstestRepository>();
 builder.Services.AddSingleton(
     builder.Configuration.GetSection(CompanyInfo.SectionName).Get<CompanyInfo>() ?? new CompanyInfo());
 builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
@@ -34,7 +39,7 @@ builder.Services.AddCors(opts => opts.AddDefaultPolicy(p =>
 
 var app = builder.Build();
 
-app.UseSerilogRequestLogging();
+app.UseSerilogRequestLoggingWithContext();
 app.UseCors();
 app.UseAuthentication();
 app.UseTokenVersionValidation();
@@ -55,6 +60,7 @@ app.MapSerialEndpoints();
 app.MapStockAckEndpoints();
 app.MapTransferEndpoints();
 app.MapFieldOpsEndpoints();
+app.MapMachineTestEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
 app.MapDocumentEndpoints();

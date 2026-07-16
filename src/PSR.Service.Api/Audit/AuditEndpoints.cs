@@ -35,7 +35,11 @@ public static class AuditEndpoints
         var query = db.AuditLog.AsNoTracking().AsQueryable();
 
         if (userId is not null) query = query.Where(a => a.UserId == userId);
-        if (!string.IsNullOrWhiteSpace(action)) query = query.Where(a => a.Action == action);
+        if (!string.IsNullOrWhiteSpace(action))
+        {
+            var term = action.Trim();
+            query = query.Where(a => a.Action.Contains(term));
+        }
         if (from is not null) query = query.Where(a => a.CreatedAt >= from);
         if (to is not null) query = query.Where(a => a.CreatedAt <= to);
 

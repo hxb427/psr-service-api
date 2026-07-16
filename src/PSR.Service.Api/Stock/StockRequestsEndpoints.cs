@@ -55,7 +55,7 @@ public static class StockRequestsEndpoints
 
     private static async Task<Results<Created<StockRequestDto>, NotFound, BadRequest<string>>> CreateAsync(
         [FromBody] CreateStockRequestRequest req, ClaimsPrincipal user, AppDbContext db,
-        NumberSequenceService seq, CancellationToken ct)
+        NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == req.PartId, ct);
         if (part is null) return TypedResults.NotFound();
@@ -73,6 +73,9 @@ public static class StockRequestsEndpoints
                 QtyRequested = req.Qty, RequestDate = DateTime.UtcNow, Remarks = req.Remarks,
             };
             db.StockRequests.Add(reqEntity);
+            await db.SaveChangesAsync(ct);
+            audit.Log(uid, "stock-request.create", "stock_request", reqEntity.Id,
+                details: $"{no} {part.ItemCode} x{req.Qty}", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }

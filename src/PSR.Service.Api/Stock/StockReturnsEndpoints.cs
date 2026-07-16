@@ -48,7 +48,7 @@ public static class StockReturnsEndpoints
 
     private static async Task<Results<Created<StockReturnDto>, NotFound, BadRequest<string>>> CreateAsync(
         [FromBody] CreateStockReturnRequest req, ClaimsPrincipal user, AppDbContext db,
-        NumberSequenceService seq, SerialService serial, CancellationToken ct)
+        NumberSequenceService seq, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == req.PartId, ct);
         if (part is null) return TypedResults.NotFound();
@@ -86,6 +86,9 @@ public static class StockReturnsEndpoints
                 db.StockReturnSerials.Add(new StockReturnSerial
                 { StockReturnId = ret.Id, ComponentSerialId = sid, Defective = defective });
             }
+            audit.Log(uid, "stock-return.create", "stock_return", ret.Id,
+                details: $"{ret.ReturnNo} {part.ItemCode} x{req.Qty}"
+                    + (serialIds.Count > 0 ? $" +{serialIds.Count} SN" : ""), ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
