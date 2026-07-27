@@ -94,6 +94,14 @@ public record ReplaceRequest(
     [Range(1, 1_000_000)] int Qty = 1,
     [StringLength(500)] string? Note = null);
 public record PaymentRequest([Required] string Status);
+// Set the courier / gate-pass reference without dispatching (legacy "Set Outward Reference").
+public record OutwardReferenceRequest(
+    [Required, StringLength(80)] string ReferenceNo,
+    [StringLength(50)] string? OutwardDcNo);
+// Record an invoice number raised outside the app (legacy "Set Invoice No").
+public record InvoiceNoRequest(
+    [Required, StringLength(50)] string InvNo,
+    DateTime? InvDate);
 
 // ----- read -----
 public record ServiceListItemDto(

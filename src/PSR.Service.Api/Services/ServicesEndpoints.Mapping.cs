@@ -45,6 +45,20 @@ public static partial class ServicesEndpoints
         return job.ServiceNo;
     }
 
+    /// <summary>Record an event that changes the job WITHOUT moving it through the workflow (payment,
+    /// total loss, a manually-set invoice / outward reference, deletion). Same convention BillingService
+    /// uses for document stamps: FromStatus is the unchanged workflow status, ToStatus is the event label,
+    /// so the detail pane's History shows it but the status metrics ignore it.</summary>
+    private static void WriteNote(AppDbContext db, ServiceJob job, string eventLabel, long uid, string? note)
+    {
+        db.ServiceStatusHistory.Add(new ServiceStatusHistory
+        {
+            ServiceId = job.Id, FromStatus = job.ServiceStatus.ToString(), ToStatus = eventLabel,
+            ChangedByUserId = uid, Note = note,
+        });
+        job.RowVersion++;
+    }
+
     private static void WriteTransition(AppDbContext db, ServiceJob job, ServiceStatus to, long uid, string? note)
     {
         db.ServiceStatusHistory.Add(new ServiceStatusHistory

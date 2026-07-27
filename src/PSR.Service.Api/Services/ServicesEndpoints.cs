@@ -35,6 +35,9 @@ public static partial class ServicesEndpoints
         group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/replacement-reject", RejectReplacementAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
+        // Manual stamps that do NOT move the workflow (legacy "Set Outward Reference" / "Set Invoice No").
+        group.MapPost("/{id:long}/outward-reference", SetOutwardReferenceAsync).RequireAuthorization("DispatchManage");
+        group.MapPost("/{id:long}/invoice-no", SetInvoiceNoAsync).RequireAuthorization("DocumentManage");
         group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
         return app;

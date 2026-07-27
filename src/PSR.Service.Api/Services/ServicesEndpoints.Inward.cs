@@ -35,7 +35,7 @@ public static partial class ServicesEndpoints
         try
         {
             var customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
-                req.OrganizationName, req.Phone, req.Email, req.Address, ct);
+                req.OrganizationName, req.Phone, req.Email, req.Address, ct, audit, uid, http.GetIp());
             if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
 
             var no = await seq.NextAsync(SequenceKeys.Service, ct);
@@ -115,7 +115,7 @@ public static partial class ServicesEndpoints
             else
             {
                 customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
-                    req.OrganizationName, req.Phone, null, req.Address, ct);
+                    req.OrganizationName, req.Phone, null, req.Address, ct, audit, uid, http.GetIp());
                 if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
                 customerName = await db.Customers.Where(c => c.Id == customerId).Select(c => c.Name).FirstAsync(ct);
             }
@@ -159,8 +159,11 @@ public static partial class ServicesEndpoints
         return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
     }
 
+    /// <summary>Match an existing customer by name or create one. The create is audited — inward is the only
+    /// path that adds customers implicitly, so without this a customer master row appears from nowhere.</summary>
     private static async Task<long?> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
-        string? org, string? phone, string? email, string? address, CancellationToken ct)
+        string? org, string? phone, string? email, string? address, CancellationToken ct,
+        IAuditService? audit = null, long uid = 0, string? ip = null)
     {
         if (customerId is { } cid)
             return await db.Customers.AnyAsync(c => c.Id == cid, ct) ? cid : null;
@@ -177,6 +180,7 @@ public static partial class ServicesEndpoints
         };
         db.Customers.Add(created);
         await db.SaveChangesAsync(ct);
+        audit?.Log(uid, "customer.create", "customer", created.Id, details: $"auto-created at inward: {name}", ip: ip);
         return created.Id;
     }
 }

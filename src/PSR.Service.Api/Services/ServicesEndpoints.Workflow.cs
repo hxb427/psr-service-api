@@ -95,7 +95,7 @@ public static partial class ServicesEndpoints
 
         user.TryGetUserId(out var uid);
         job.IsTotalLoss = !job.IsTotalLoss;   // toggle
-        job.RowVersion++;
+        WriteNote(db, job, "TotalLoss", uid, job.IsTotalLoss ? "Marked total loss" : "Total loss cleared");
         audit.Log(uid, "service.total-loss", "service", job.Id, details: job.IsTotalLoss ? "marked" : "cleared", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
@@ -206,23 +206,89 @@ public static partial class ServicesEndpoints
             return TypedResults.BadRequest("Payment can only be set once the service is completed.");
 
         user.TryGetUserId(out var uid);
+        var was = job.PaymentStatus;
         job.PaymentStatus = ps;
-        job.RowVersion++;
+        WriteNote(db, job, "Payment", uid, $"Payment {was} → {ps}");
         audit.Log(uid, "service.payment", "service", job.Id, details: ps.ToString(), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static async Task<Results<NoContent, NotFound>> SoftDeleteAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    // ---------------------------------------------------------------- manual document / reference stamps
+
+    // Set the courier / gate-pass reference WITHOUT dispatching. The legacy Pending-Dispatch and
+    // Global-Search pages both had this: the reference often arrives after the job has already moved on.
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> SetOutwardReferenceAsync(
+        long id, [FromBody] OutwardReferenceRequest req, ClaimsPrincipal user, AppDbContext db,
+        IAuditService audit, HttpContext http, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(req.ReferenceNo)) return TypedResults.BadRequest("Reference number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
 
         user.TryGetUserId(out var uid);
+        job.OutwardReferenceNo = req.ReferenceNo.Trim();
+        var note = $"Outward reference set to {job.OutwardReferenceNo}";
+        // Only overwrite the DC number when one was supplied — a blank field must not wipe a generated DC.
+        if (!string.IsNullOrWhiteSpace(req.OutwardDcNo))
+        {
+            job.OutwardDcNo = req.OutwardDcNo.Trim();
+            note += $", DC {job.OutwardDcNo}";
+        }
+        WriteNote(db, job, "OutwardRef", uid, note);
+        audit.Log(uid, "service.outward-reference", "service", job.Id, details: job.OutwardReferenceNo, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    // Record an invoice raised outside the app (legacy "Set Invoice No"). Generating an invoice here
+    // stamps the same field, so refuse to silently overwrite one that a generated document owns.
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> SetInvoiceNoAsync(
+        long id, [FromBody] InvoiceNoRequest req, ClaimsPrincipal user, AppDbContext db,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.InvNo)) return TypedResults.BadRequest("Invoice number is required.");
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        if (!CompletedOrLater.Contains(job.ServiceStatus))
+            return TypedResults.BadRequest($"An invoice number can only be recorded once the service is completed (currently {job.ServiceStatus}).");
+        // Explicit join rather than the Document nav — the line's relationship is convention-mapped only.
+        var generatedInvoice = await (from l in db.ServiceDocumentLines
+                                      join d in db.ServiceDocuments on l.DocumentId equals d.Id
+                                      where l.ServiceJobId == id && d.DocType == DocumentType.Invoice
+                                      select l.Id).AnyAsync(ct);
+        if (generatedInvoice) return TypedResults.BadRequest("This job is already covered by a generated invoice.");
+
+        user.TryGetUserId(out var uid);
+        var was = job.InvNo;
+        job.InvNo = req.InvNo.Trim();
+        job.InvDate = req.InvDate ?? DateTime.UtcNow;
+        WriteNote(db, job, "InvoiceNo", uid,
+            was is null ? $"Invoice number set to {job.InvNo}" : $"Invoice number {was} → {job.InvNo}");
+        audit.Log(uid, "service.invoice-no", "service", job.Id, details: job.InvNo, ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    private static async Task<Results<NoContent, NotFound, BadRequest<string>>> SoftDeleteAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+        // A billed job must not vanish from underneath its paperwork — the document still references it,
+        // and every list filters IsDeleted out, so the invoice would lose its line.
+        if (await db.ServiceDocumentLines.AnyAsync(l => l.ServiceJobId == id, ct))
+            return TypedResults.BadRequest("Cannot delete — a PI, invoice or delivery challan has already been generated for this job.");
+        if (!string.IsNullOrWhiteSpace(job.PiNo) || !string.IsNullOrWhiteSpace(job.InvNo)
+            || !string.IsNullOrWhiteSpace(job.OutwardDcNo))
+            return TypedResults.BadRequest("Cannot delete — this job already carries a PI, invoice or DC number.");
+
+        user.TryGetUserId(out var uid);
         job.IsDeleted = true;
-        job.RowVersion++;
+        WriteNote(db, job, "Deleted", uid, "Job deleted (hidden from all lists)");
         audit.Log(uid, "service.delete", "service", job.Id, details: job.ServiceNo, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.NoContent();
