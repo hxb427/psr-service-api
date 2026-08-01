@@ -48,8 +48,10 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
 
             // Phase 4 — service workflow (inward_manager / dispatch_manager roles removed → folded into manager/supervisor)
+            // The receiving-desk role is admitted HERE and nowhere else — booking inward is the whole
+            // of what it can do. Every other policy below deliberately omits it.
             options.AddPolicy("InwardManage", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Inward));
             options.AddPolicy("ServiceAssign", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("ServiceManage", p => p.RequireRole(

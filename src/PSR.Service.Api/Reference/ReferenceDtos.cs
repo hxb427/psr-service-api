@@ -60,6 +60,14 @@ public record UpdateServiceChargeRequest(
     [Range(0, 100)] decimal TaxPercent,
     [StringLength(500)] string? Remarks);
 
+// Personal usage ranking for the add-line picker. Ordered most-used first; carries no pricing, so
+// unlike PartDto it needs no role-aware projection.
+public record TopUsedPartRow(long PartId, string ItemCode, string Name, int UseCount, DateTime LastUsedAt);
+
+public record TopUsedChargeRow(long ServiceChargeId, string Name, int UseCount, DateTime LastUsedAt);
+
+public record TopUsedResponse(List<TopUsedPartRow> Parts, List<TopUsedChargeRow> ServiceCharges);
+
 public record DealerDto(long Id, string Name, int WarrantyMonths,
     string? Address, string? Gstin, string? State, string? StateCode, string? Remarks, bool IsActive);
 

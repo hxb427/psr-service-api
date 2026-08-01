@@ -52,6 +52,7 @@ app.MapRoleEndpoints();
 app.MapAuditEndpoints();
 app.MapPartEndpoints();
 app.MapServiceChargeEndpoints();
+app.MapTopUsedEndpoints();
 app.MapDealerEndpoints();
 app.MapStockEndpoints();
 app.MapStockRequestEndpoints();
