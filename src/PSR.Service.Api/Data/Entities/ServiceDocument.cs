@@ -21,7 +21,9 @@ public class ServiceDocument
     // A document covers one OR MORE service jobs of a single customer (old app: one PI lists many units).
     // The covered jobs are the distinct ServiceJobId values across Lines; ServiceId stays null for multi-job docs.
     public long? ServiceId { get; set; }                 // legacy single-job link (kept nullable; unused for multi-job)
-    public long? SpareSaleId { get; set; }               // reserved for spare-sale documents (Phase 5.2)
+    /// <summary>Set instead of the service links when this document bills a direct spare sale
+    /// (counter sale of warehouse stock). A document is one or the other, never both.</summary>
+    public long? SpareSaleId { get; set; }
 
     // ----- party snapshot (frozen at generation; entered on the generate form, like the old app) -----
     public string PartyName { get; set; } = string.Empty;
@@ -54,7 +56,8 @@ public class ServiceDocumentLine
 {
     public long Id { get; set; }
     public long DocumentId { get; set; }
-    public long? ServiceJobId { get; set; }              // the serviced unit this line bills (null only for ad-hoc lines)
+    public long? ServiceJobId { get; set; }              // the serviced unit this line bills (null on spare-sale lines)
+    public long? PartId { get; set; }                    // the catalogue item sold (spare-sale lines only)
     public string Description { get; set; } = string.Empty;
     public string? Warranty { get; set; }                // snapshot of the unit's warranty status (Active units bill at 0)
     public string? ServiceChallan { get; set; }          // the unit's inward challan no

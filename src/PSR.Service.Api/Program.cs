@@ -10,6 +10,7 @@ using PSR.Service.Api.Reference;
 using PSR.Service.Api.Reports;
 using PSR.Service.Api.Services;
 using PSR.Service.Api.Settings;
+using PSR.Service.Api.SpareSales;
 using PSR.Service.Api.Stock;
 using PSR.Service.Api.Users;
 
@@ -27,6 +28,7 @@ builder.Services.AddScoped<NumberSequenceService>();
 builder.Services.AddScoped<StockLedgerService>();
 builder.Services.AddScoped<SerialService>();
 builder.Services.AddScoped<BillingService>();
+builder.Services.AddScoped<SpareSaleService>();
 builder.Services.AddScoped<AppSettingsService>();
 
 // Passtest (Hostinger MySQL, read-only) — direct connection, results cached.
@@ -64,6 +66,7 @@ app.MapFieldOpsEndpoints();
 app.MapMachineTestEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();
+app.MapSpareSaleEndpoints();
 app.MapDocumentEndpoints();
 app.MapSettingsEndpoints();
 app.MapReportsEndpoints();

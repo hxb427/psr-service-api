@@ -9,11 +9,18 @@ namespace PSR.Service.Api.Documents;
 /// <summary>A computed-but-unsaved document plus the jobs it covers (used by the preview path).</summary>
 public sealed record BuiltDocument(ServiceDocument Doc, List<ServiceJob> Jobs);
 
+/// <summary>A computed-but-unsaved spare-sale document plus the sale it bills.</summary>
+public sealed record BuiltSaleDocument(ServiceDocument Doc, SpareSale Sale);
+
+/// <summary>The billing party, after the request's own fields have been layered over the party master.</summary>
+internal sealed record PartySnapshot(string Name, string? Address, string? Gstin, string? State, string? StateCode);
+
 /// <summary>Builds a PI / Invoice / DC over one or more completed jobs of a single customer (old-app workflow):
 /// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter).
 /// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
 /// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
-public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company, AppSettingsService settings)
+public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company,
+    AppSettingsService settings, StockLedgerService ledger)
 {
     /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
     public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
@@ -71,54 +78,15 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
                 break;
         }
 
-        // Party snapshot — request fields win, else fall back to the jobs' party master (dealer carries full
-        // billing details: address/GSTIN/state; a direct customer carries name+address).
+        // Party snapshot — request fields win, else fall back to the jobs' party master.
         var first = jobs[0];
-        var partyName = req.PartyName?.Trim();
-        var partyAddress = req.PartyAddress?.Trim();
-        var partyGstin = req.PartyGstin?.Trim();
-        var partyState = req.PartyState?.Trim();
-        var partyStateCode = req.PartyStateCode?.Trim();
-        if (first.DealerId is { } did)
-        {
-            var dealer = await db.Dealers.Where(x => x.Id == did)
-                .Select(x => new { x.Name, x.Address, x.Gstin, x.State, x.StateCode }).FirstOrDefaultAsync(ct);
-            if (string.IsNullOrWhiteSpace(partyName)) partyName = dealer?.Name;
-            partyAddress ??= dealer?.Address;
-            partyGstin ??= dealer?.Gstin;
-            partyState ??= dealer?.State;
-            partyStateCode ??= dealer?.StateCode;
-        }
-        else if (first.CustomerId is { } cid)
-        {
-            var c = await db.Customers.Where(x => x.Id == cid).Select(x => new { x.Name, x.Address }).FirstOrDefaultAsync(ct);
-            if (string.IsNullOrWhiteSpace(partyName)) partyName = c?.Name;
-            partyAddress ??= c?.Address;
-        }
-        if (string.IsNullOrWhiteSpace(partyName)) throw new BillingException("Party name is required.");
-
-        var interState = !string.IsNullOrWhiteSpace(partyStateCode)
-            && !string.Equals(partyStateCode, company.StateCode, StringComparison.OrdinalIgnoreCase);
+        var party = await ResolvePartyAsync(first.DealerId, first.CustomerId, req.PartyName, req.PartyAddress,
+            req.PartyGstin, req.PartyState, req.PartyStateCode, ct);
 
         var overrides = (req.Lines ?? new()).GroupBy(l => l.ServiceId).ToDictionary(g => g.Key, g => g.Last());
 
-        var doc = new ServiceDocument
-        {
-            DocType = docType,
-            DocDate = req.DocDate ?? DateTime.UtcNow,
-            PartyName = partyName,
-            PartyAddress = partyAddress,
-            // Consignee/delivery address — defaults to the billing address when not given separately.
-            ConsigneeAddress = string.IsNullOrWhiteSpace(req.ConsigneeAddress) ? partyAddress : req.ConsigneeAddress.Trim(),
-            PartyGstin = partyGstin,
-            PartyState = partyState,
-            PartyStateCode = partyStateCode,
-            IsInterState = interState,
-            CourierMode = req.CourierMode?.Trim(),
-            CourierCharges = req.CourierCharges ?? 0m,
-            Remarks = req.Remarks?.Trim(),
-            CreatedByUserId = userId,
-        };
+        var doc = NewDocument(docType, party, req.DocDate, req.ConsigneeAddress,
+            req.CourierMode, req.CourierCharges, req.Remarks, userId);
 
         decimal taxable = 0, tax = 0;
         foreach (var job in jobs.OrderBy(j => j.Id))
@@ -170,11 +138,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             });
         }
 
-        doc.TaxableAmount = taxable;
-        if (interState) doc.IgstAmount = tax;
-        else { doc.CgstAmount = Math.Round(tax / 2m, 2); doc.SgstAmount = tax - doc.CgstAmount; }
-        doc.TotalAmount = taxable + tax + doc.CourierCharges;
-
+        ApplyTotals(doc, taxable, tax);
         return new BuiltDocument(doc, jobs);
     }
 
@@ -219,5 +183,173 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return doc.Id;
+    }
+
+    // ================================================================ spare sales
+
+    /// <summary>Validate + compute the PI or tax invoice for a direct spare sale. Nothing is persisted, no
+    /// number is allocated and — importantly — no stock moves; that is <see cref="GenerateSaleAsync"/>'s job.</summary>
+    public async Task<BuiltSaleDocument> BuildSaleAsync(GenerateSaleDocumentRequest req, long userId, CancellationToken ct)
+    {
+        if (!Enum.TryParse<DocumentType>(req.DocType, true, out var docType))
+            throw new BillingException($"Unknown document type '{req.DocType}'. Use PI or Invoice.");
+        if (docType == DocumentType.DC)
+            throw new BillingException("A delivery challan is not issued for a spare sale — generate the PI or the tax invoice.");
+        if (docType == DocumentType.Invoice && !await settings.InvoiceGenerationEnabledAsync(ct))
+            throw new BillingException("Invoice generation is currently disabled by an administrator.");
+
+        // Tracked, not AsNoTracking — GenerateSaleAsync stamps the document number back onto this row.
+        var sale = await db.SpareSales.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == req.SaleId && !s.IsDeleted, ct)
+            ?? throw new BillingException("That sale was not found.");
+
+        if (sale.Status == SpareSaleStatus.Cancelled) throw new BillingException("This sale is cancelled.");
+        if (sale.Lines.Count == 0) throw new BillingException("This sale has no items on it.");
+
+        // The gate, mirroring the service chain: PI first, then payment, then the invoice.
+        if (docType == DocumentType.PI)
+        {
+            if (!string.IsNullOrWhiteSpace(sale.PiNo))
+                throw new BillingException($"A PI ({sale.PiNo}) has already been generated for this sale.");
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(sale.PiNo))
+                throw new BillingException("Generate the PI before the invoice.");
+            if (sale.PaymentStatus != PaymentStatus.Paid)
+                throw new BillingException("Mark payment received before generating the invoice.");
+            if (!string.IsNullOrWhiteSpace(sale.InvNo))
+                throw new BillingException($"Invoice {sale.InvNo} has already been generated for this sale.");
+        }
+
+        var party = await ResolvePartyAsync(sale.DealerId, sale.CustomerId, req.PartyName, req.PartyAddress,
+            req.PartyGstin, req.PartyState, req.PartyStateCode, ct);
+
+        var doc = NewDocument(docType, party, req.DocDate, req.ConsigneeAddress,
+            req.CourierMode, req.CourierCharges, req.Remarks, userId);
+        doc.SpareSaleId = sale.Id;
+
+        foreach (var l in sale.Lines.OrderBy(l => l.Id))
+        {
+            doc.Lines.Add(new ServiceDocumentLine
+            {
+                ServiceJobId = null,
+                PartId = l.PartId,
+                Description = $"{l.Description} ({l.ItemCode})",
+                Warranty = null,                 // meaningless on a spare sale — the PDF drops the column
+                ServiceChallan = null,
+                HsnCode = l.HsnCode,
+                Qty = l.Qty,
+                // Tax-inclusive per unit, the same convention the service document lines use, so the
+                // printed Rate × Qty reconciles with Amount on both kinds of document.
+                UnitRate = l.Qty > 0 ? Math.Round(l.LineTotal / l.Qty, 2) : l.LineTotal,
+                TaxableAmount = l.TaxableAmount,
+                GstPercent = l.GstPercent,
+                TaxAmount = l.TaxAmount,
+                LineTotal = l.LineTotal,
+                Remarks = null,
+            });
+        }
+
+        ApplyTotals(doc, sale.Lines.Sum(l => l.TaxableAmount), sale.Lines.Sum(l => l.TaxAmount));
+        return new BuiltSaleDocument(doc, sale);
+    }
+
+    /// <summary>Persist a sale document: allocate the number and stamp it onto the sale. Generating the
+    /// INVOICE is also the moment the goods leave — each line draws its part down from the warehouse via a
+    /// guarded decrement, so an item that sold out since the sale was entered fails the whole transaction
+    /// rather than driving the balance negative.</summary>
+    public async Task<long> GenerateSaleAsync(GenerateSaleDocumentRequest req, long userId, CancellationToken ct)
+    {
+        var (doc, sale) = await BuildSaleAsync(req, userId, ct);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        doc.DocNo = await seq.NextAsync(
+            doc.DocType == DocumentType.PI ? SequenceKeys.ProformaInvoice : SequenceKeys.Invoice, ct);
+        db.ServiceDocuments.Add(doc);
+
+        if (doc.DocType == DocumentType.PI)
+        {
+            sale.PiNo = doc.DocNo;
+            sale.PiDate = doc.DocDate;
+        }
+        else
+        {
+            sale.InvNo = doc.DocNo;
+            sale.InvDate = doc.DocDate;
+            sale.Status = SpareSaleStatus.Invoiced;
+            foreach (var l in sale.Lines)
+                await ledger.SaleOutAsync(l.PartId, l.Qty, userId, sale.Id, $"{doc.DocNo} ({sale.SaleNo})", ct);
+        }
+
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return doc.Id;
+    }
+
+    // ================================================================ shared
+
+    /// <summary>Layer the request's own party fields over the party master. A dealer carries a full billing
+    /// block (address/GSTIN/state); a direct customer only carries name and address, so GST details for a
+    /// walk-in are typed on the generate form.</summary>
+    private async Task<PartySnapshot> ResolvePartyAsync(
+        long? dealerId, long? customerId, string? name, string? address,
+        string? gstin, string? state, string? stateCode, CancellationToken ct)
+    {
+        var partyName = name?.Trim();
+        var partyAddress = address?.Trim();
+        var partyGstin = gstin?.Trim();
+        var partyState = state?.Trim();
+        var partyStateCode = stateCode?.Trim();
+
+        if (dealerId is { } did)
+        {
+            var dealer = await db.Dealers.Where(x => x.Id == did)
+                .Select(x => new { x.Name, x.Address, x.Gstin, x.State, x.StateCode }).FirstOrDefaultAsync(ct);
+            if (string.IsNullOrWhiteSpace(partyName)) partyName = dealer?.Name;
+            partyAddress ??= dealer?.Address;
+            partyGstin ??= dealer?.Gstin;
+            partyState ??= dealer?.State;
+            partyStateCode ??= dealer?.StateCode;
+        }
+        else if (customerId is { } cid)
+        {
+            var c = await db.Customers.Where(x => x.Id == cid)
+                .Select(x => new { x.Name, x.Address }).FirstOrDefaultAsync(ct);
+            if (string.IsNullOrWhiteSpace(partyName)) partyName = c?.Name;
+            partyAddress ??= c?.Address;
+        }
+
+        if (string.IsNullOrWhiteSpace(partyName)) throw new BillingException("Party name is required.");
+        return new PartySnapshot(partyName, partyAddress, partyGstin, partyState, partyStateCode);
+    }
+
+    private ServiceDocument NewDocument(DocumentType docType, PartySnapshot party, DateTime? docDate,
+        string? consigneeAddress, string? courierMode, decimal? courierCharges, string? remarks, long userId) =>
+        new()
+        {
+            DocType = docType,
+            DocDate = docDate ?? DateTime.UtcNow,
+            PartyName = party.Name,
+            PartyAddress = party.Address,
+            // Consignee/delivery address — defaults to the billing address when not given separately.
+            ConsigneeAddress = string.IsNullOrWhiteSpace(consigneeAddress) ? party.Address : consigneeAddress.Trim(),
+            PartyGstin = party.Gstin,
+            PartyState = party.State,
+            PartyStateCode = party.StateCode,
+            // Out-of-state parties are billed IGST; anyone in the company's own state gets CGST + SGST.
+            IsInterState = !string.IsNullOrWhiteSpace(party.StateCode)
+                && !string.Equals(party.StateCode, company.StateCode, StringComparison.OrdinalIgnoreCase),
+            CourierMode = courierMode?.Trim(),
+            CourierCharges = courierCharges ?? 0m,
+            Remarks = remarks?.Trim(),
+            CreatedByUserId = userId,
+        };
+
+    private static void ApplyTotals(ServiceDocument doc, decimal taxable, decimal tax)
+    {
+        doc.TaxableAmount = taxable;
+        if (doc.IsInterState) doc.IgstAmount = tax;
+        else { doc.CgstAmount = Math.Round(tax / 2m, 2); doc.SgstAmount = tax - doc.CgstAmount; }
+        doc.TotalAmount = taxable + tax + doc.CourierCharges;
     }
 }

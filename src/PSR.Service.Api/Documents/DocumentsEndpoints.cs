@@ -7,6 +7,7 @@ using PSR.Service.Api.Auth;
 using PSR.Service.Api.Common;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Stock;
 
 namespace PSR.Service.Api.Documents;
 
@@ -19,12 +20,18 @@ public static class DocumentsEndpoints
         var docs = app.MapGroup("/documents").WithTags("documents").RequireAuthorization("DocumentView");
         docs.MapPost("/preview", PreviewAsync).RequireAuthorization("DocumentManage");   // watermarked, NOT saved
         docs.MapPost("/", GenerateAsync).RequireAuthorization("DocumentManage");          // multi-job generate (saves)
+        docs.MapPost("/sale/preview", PreviewSaleAsync).RequireAuthorization("DocumentManage");
+        docs.MapPost("/sale", GenerateSaleAsync).RequireAuthorization("DocumentManage");  // spare-sale PI / invoice
         docs.MapGet("/", ListAsync);
         docs.MapGet("/{id:long}", GetAsync);
         docs.MapGet("/{id:long}/pdf", PdfAsync);
 
         // Documents that cover a given service job.
         app.MapGet("/services/{serviceId:long}/documents", ListForServiceAsync)
+            .WithTags("documents").RequireAuthorization("DocumentView");
+
+        // Documents raised against a given spare sale.
+        app.MapGet("/spare-sales/{saleId:long}/documents", ListForSaleAsync)
             .WithTags("documents").RequireAuthorization("DocumentView");
 
         return app;
@@ -65,6 +72,53 @@ public static class DocumentsEndpoints
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Created($"/documents/{docId}", dto);
+    }
+
+    private static async Task<Results<FileContentHttpResult, BadRequest<string>>> PreviewSaleAsync(
+        [FromBody] GenerateSaleDocumentRequest req, ClaimsPrincipal user,
+        BillingService billing, CompanyInfo company, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        try
+        {
+            var built = await billing.BuildSaleAsync(req, uid, ct);
+            var sourcePi = built.Doc.DocType == DocumentType.Invoice ? built.Sale.PiNo : null;
+            var bytes = DocumentPdf.Render(built.Doc, company, "PREVIEW — NOT SAVED", sourcePi);
+            return TypedResults.File(bytes, "application/pdf", "sale-document-preview.pdf");
+        }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
+    }
+
+    private static async Task<Results<Created<DocumentDto>, BadRequest<string>>> GenerateSaleAsync(
+        [FromBody] GenerateSaleDocumentRequest req, ClaimsPrincipal user,
+        AppDbContext db, BillingService billing, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        long docId;
+        try
+        {
+            docId = await billing.GenerateSaleAsync(req, uid, ct);
+        }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
+        // Raised by the guarded warehouse decrement when an item sold out after the sale was entered.
+        catch (StockException ex) { return TypedResults.BadRequest(ex.Message); }
+
+        var dto = await BuildDtoAsync(db, docId, ct);
+        audit.Log(uid, "document.generate", "service_document", docId,
+            details: $"{dto.DocType} {dto.DocNo} for sale {dto.SaleNo}", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Created($"/documents/{docId}", dto);
+    }
+
+    private static async Task<Ok<List<DocumentListItemDto>>> ListForSaleAsync(long saleId, AppDbContext db, CancellationToken ct)
+    {
+        var rows = await db.ServiceDocuments.AsNoTracking()
+            .Where(d => d.SpareSaleId == saleId).OrderByDescending(d => d.Id).ToListAsync(ct);
+        var items = new List<DocumentListItemDto>();
+        foreach (var d in rows)
+            items.Add(await ToListItemAsync(db, d, ct));
+        return TypedResults.Ok(items);
     }
 
     private static async Task<Ok<List<DocumentListItemDto>>> ListForServiceAsync(long serviceId, AppDbContext db, CancellationToken ct)
@@ -114,14 +168,15 @@ public static class DocumentsEndpoints
     {
         var doc = await db.ServiceDocuments.AsNoTracking().Include(d => d.Lines).FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return TypedResults.NotFound();
-        // A tax invoice prints the source PI number (taken from any covered job).
-        string? sourcePi = doc.DocType == DocumentType.Invoice
-            ? await (from l in db.ServiceDocumentLines.AsNoTracking()
-                     where l.DocumentId == id && l.ServiceJobId != null
-                     join s in db.Services on l.ServiceJobId equals s.Id
-                     where s.PiNo != null
-                     select s.PiNo).FirstOrDefaultAsync(ct)
-            : null;
+        // A tax invoice prints the source PI number — from the sale it bills, or from any covered job.
+        string? sourcePi = doc.DocType != DocumentType.Invoice ? null
+            : doc.SpareSaleId is { } sid
+                ? await db.SpareSales.AsNoTracking().Where(s => s.Id == sid).Select(s => s.PiNo).FirstOrDefaultAsync(ct)
+                : await (from l in db.ServiceDocumentLines.AsNoTracking()
+                         where l.DocumentId == id && l.ServiceJobId != null
+                         join s in db.Services on l.ServiceJobId equals s.Id
+                         where s.PiNo != null
+                         select s.PiNo).FirstOrDefaultAsync(ct);
         var bytes = DocumentPdf.Render(doc, company, sourcePiNo: sourcePi);
         return TypedResults.File(bytes, "application/pdf", $"{doc.DocNo}.pdf");
     }
@@ -133,7 +188,11 @@ public static class DocumentsEndpoints
         var jobCount = await db.ServiceDocumentLines.AsNoTracking()
             .Where(l => l.DocumentId == d.Id && l.ServiceJobId != null)
             .Select(l => l.ServiceJobId).Distinct().CountAsync(ct);
-        return new DocumentListItemDto(d.Id, d.DocType.ToString(), d.DocNo, d.DocDate, jobCount, d.PartyName, d.TotalAmount);
+        var saleNo = d.SpareSaleId is { } sid
+            ? await db.SpareSales.AsNoTracking().Where(s => s.Id == sid).Select(s => s.SaleNo).FirstOrDefaultAsync(ct)
+            : null;
+        return new DocumentListItemDto(d.Id, d.DocType.ToString(), d.DocNo, d.DocDate, jobCount, d.PartyName,
+            d.TotalAmount, d.SpareSaleId is null ? "Service" : "Sale", saleNo);
     }
 
     private static async Task<DocumentDto> BuildDtoAsync(AppDbContext db, long id, CancellationToken ct)
@@ -141,7 +200,7 @@ public static class DocumentsEndpoints
         var doc = await db.ServiceDocuments.AsNoTracking().Include(d => d.Lines).FirstAsync(d => d.Id == id, ct);
         var lines = doc.Lines.OrderBy(l => l.Id).Select(l => new DocumentLineDto(
             l.Id, l.ServiceJobId, l.Description, l.Warranty, l.ServiceChallan, l.HsnCode,
-            l.Qty, l.UnitRate, l.TaxableAmount, l.GstPercent, l.TaxAmount, l.LineTotal, l.Remarks)).ToList();
+            l.Qty, l.UnitRate, l.TaxableAmount, l.GstPercent, l.TaxAmount, l.LineTotal, l.Remarks, l.PartId)).ToList();
 
         // Join lines→services for the covered job numbers (no List.Contains — funcletizer bug).
         var jobs = await (from l in db.ServiceDocumentLines.AsNoTracking()
@@ -151,10 +210,14 @@ public static class DocumentsEndpoints
         var serviceIds = jobs.Select(j => j.Id).ToList();
         var serviceNos = jobs.Select(j => j.ServiceNo).ToList();
 
+        var saleNo = doc.SpareSaleId is { } sid
+            ? await db.SpareSales.AsNoTracking().Where(s => s.Id == sid).Select(s => s.SaleNo).FirstOrDefaultAsync(ct)
+            : null;
+
         return new DocumentDto(
             doc.Id, doc.DocType.ToString(), doc.DocNo, doc.DocDate, serviceIds, serviceNos,
             doc.PartyName, doc.PartyAddress, doc.PartyGstin, doc.PartyState, doc.PartyStateCode, doc.IsInterState,
             doc.TaxableAmount, doc.CgstAmount, doc.SgstAmount, doc.IgstAmount, doc.CourierCharges, doc.TotalAmount,
-            doc.CourierMode, doc.Remarks, doc.CreatedAt, lines);
+            doc.CourierMode, doc.Remarks, doc.CreatedAt, lines, doc.SpareSaleId, saleNo);
     }
 }

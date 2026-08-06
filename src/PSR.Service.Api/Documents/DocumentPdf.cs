@@ -19,6 +19,9 @@ public static class DocumentPdf
             _ => "Delivery Challan",
         };
         var showMoney = doc.DocType != DocumentType.DC;   // a delivery challan lists units without pricing
+        // A spare sale bills catalogue items, so warranty and inward-challan columns are meaningless —
+        // it prints HSN instead, which a serviced unit doesn't carry.
+        var isSale = doc.SpareSaleId is not null;
 
         return Document.Create(container =>
         {
@@ -86,8 +89,16 @@ public static class DocumentPdf
                         {
                             c.ConstantColumn(24);    // sr
                             c.RelativeColumn(3);     // description
-                            c.ConstantColumn(58);    // warranty
-                            c.ConstantColumn(64);    // service challan
+                            if (isSale)
+                            {
+                                c.ConstantColumn(56);    // hsn
+                                c.ConstantColumn(44);    // gst %
+                            }
+                            else
+                            {
+                                c.ConstantColumn(58);    // warranty
+                                c.ConstantColumn(64);    // service challan
+                            }
                             c.ConstantColumn(28);    // qty
                             c.RelativeColumn(1.4f);  // remarks
                             if (showMoney) { c.ConstantColumn(60); c.ConstantColumn(66); }   // rate, amount
@@ -102,8 +113,8 @@ public static class DocumentPdf
                             }
                             Head("#");
                             Head("Description");
-                            Head("Warranty");
-                            Head("Service Challan");
+                            if (isSale) { Head("HSN"); Head("GST %", true); }
+                            else { Head("Warranty"); Head("Service Challan"); }
                             Head("Qty", true);
                             Head("Remarks");
                             if (showMoney) { Head("Rate", true); Head("Amount", true); }
@@ -115,8 +126,16 @@ public static class DocumentPdf
                             static IContainer Body(IContainer c) => c.BorderBottom(0.5f).BorderColor(Colors.Grey.Lighten2).Padding(4);
                             table.Cell().Element(Body).Text(i++.ToString());
                             table.Cell().Element(Body).Text(l.Description).FontSize(8);
-                            table.Cell().Element(Body).Text(l.Warranty ?? "-").FontSize(8);
-                            table.Cell().Element(Body).Text(l.ServiceChallan ?? "-").FontSize(8);
+                            if (isSale)
+                            {
+                                table.Cell().Element(Body).Text(l.HsnCode ?? "-").FontSize(8);
+                                table.Cell().Element(Body).AlignRight().Text(l.GstPercent.ToString("0.##")).FontSize(8);
+                            }
+                            else
+                            {
+                                table.Cell().Element(Body).Text(l.Warranty ?? "-").FontSize(8);
+                                table.Cell().Element(Body).Text(l.ServiceChallan ?? "-").FontSize(8);
+                            }
                             table.Cell().Element(Body).AlignRight().Text(l.Qty.ToString());
                             table.Cell().Element(Body).Text(l.Remarks ?? "").FontSize(8);
                             if (showMoney)

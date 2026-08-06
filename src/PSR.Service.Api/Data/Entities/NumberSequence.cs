@@ -22,6 +22,9 @@ public static class SequenceKeys
     public const string FieldService = "FIELD_SERVICE";
     public const string FieldSale = "FIELD_SALE";
 
+    // Counter/spare sales of warehouse stock (legacy sparesales).
+    public const string SpareSale = "SPARE_SALE";
+
     // Phase 5 — year-scoped document numbers (clean sequential, reset each year).
     public const string ProformaInvoice = "PI";
     public const string Invoice = "INVOICE";

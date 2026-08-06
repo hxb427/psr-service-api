@@ -29,15 +29,35 @@ public record DocLineOverride(
     int? Qty,
     [StringLength(300)] string? Remarks);
 
+// Generate the PI or the tax invoice for a direct spare sale. The lines come from the sale itself (they were
+// priced when it was entered), so only the party/courier/remarks block is filled in here.
+public record GenerateSaleDocumentRequest(
+    [Required] string DocType,
+    [Required] long SaleId,
+    DateTime? DocDate,
+    [StringLength(200)] string? PartyName,
+    [StringLength(500)] string? PartyAddress,
+    [StringLength(500)] string? ConsigneeAddress,
+    [StringLength(20)] string? PartyGstin,
+    [StringLength(60)] string? PartyState,
+    [StringLength(10)] string? PartyStateCode,
+    [StringLength(80)] string? CourierMode,
+    [Range(0, 10_000_000)] decimal? CourierCharges,
+    [StringLength(500)] string? Remarks);
+
 public record DocumentLineDto(
     long Id, long? ServiceJobId, string Description, string? Warranty, string? ServiceChallan, string? HsnCode,
-    int Qty, decimal UnitRate, decimal TaxableAmount, decimal GstPercent, decimal TaxAmount, decimal LineTotal, string? Remarks);
+    int Qty, decimal UnitRate, decimal TaxableAmount, decimal GstPercent, decimal TaxAmount, decimal LineTotal,
+    string? Remarks, long? PartId);
 
 public record DocumentDto(
     long Id, string DocType, string DocNo, DateTime DocDate, List<long> ServiceIds, List<string> ServiceNos,
     string PartyName, string? PartyAddress, string? PartyGstin, string? PartyState, string? PartyStateCode, bool IsInterState,
     decimal TaxableAmount, decimal CgstAmount, decimal SgstAmount, decimal IgstAmount, decimal CourierCharges, decimal TotalAmount,
-    string? CourierMode, string? Remarks, DateTime CreatedAt, List<DocumentLineDto> Lines);
+    string? CourierMode, string? Remarks, DateTime CreatedAt, List<DocumentLineDto> Lines,
+    long? SpareSaleId, string? SaleNo);
 
+// Source is "Service" or "Sale" — one register lists both, and JobCount is 0 on a sale document.
 public record DocumentListItemDto(
-    long Id, string DocType, string DocNo, DateTime DocDate, int JobCount, string PartyName, decimal TotalAmount);
+    long Id, string DocType, string DocNo, DateTime DocDate, int JobCount, string PartyName, decimal TotalAmount,
+    string Source, string? SaleNo);

@@ -55,6 +55,7 @@ public class ServiceDocumentLineConfiguration : IEntityTypeConfiguration<Service
         b.Property(x => x.Id).HasColumnName("id");
         b.Property(x => x.DocumentId).HasColumnName("document_id");
         b.Property(x => x.ServiceJobId).HasColumnName("service_job_id");
+        b.Property(x => x.PartId).HasColumnName("part_id");
         b.Property(x => x.Description).HasColumnName("description").HasMaxLength(300).IsRequired();
         b.Property(x => x.Warranty).HasColumnName("warranty").HasMaxLength(30);
         b.Property(x => x.ServiceChallan).HasColumnName("service_challan").HasMaxLength(50);

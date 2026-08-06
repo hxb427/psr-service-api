@@ -161,9 +161,11 @@ public static partial class ServicesEndpoints
 
     /// <summary>Match an existing customer by name or create one. The create is audited — inward is the only
     /// path that adds customers implicitly, so without this a customer master row appears from nowhere.</summary>
-    private static async Task<long?> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
+    /// <summary>Match a customer by id, else by exact active name, else create one. Shared with the spare-sales
+    /// module so a walk-in typed at the counter lands in the same master as one typed at the inward desk.</summary>
+    internal static async Task<long?> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
         string? org, string? phone, string? email, string? address, CancellationToken ct,
-        IAuditService? audit = null, long uid = 0, string? ip = null)
+        IAuditService? audit = null, long uid = 0, string? ip = null, string origin = "inward")
     {
         if (customerId is { } cid)
             return await db.Customers.AnyAsync(c => c.Id == cid, ct) ? cid : null;
@@ -180,7 +182,7 @@ public static partial class ServicesEndpoints
         };
         db.Customers.Add(created);
         await db.SaveChangesAsync(ct);
-        audit?.Log(uid, "customer.create", "customer", created.Id, details: $"auto-created at inward: {name}", ip: ip);
+        audit?.Log(uid, "customer.create", "customer", created.Id, details: $"auto-created at {origin}: {name}", ip: ip);
         return created.Id;
     }
 }

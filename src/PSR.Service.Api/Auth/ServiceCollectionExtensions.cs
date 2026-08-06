@@ -63,6 +63,15 @@ public static class ServiceCollectionExtensions
             options.AddPolicy("PaymentManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Accounts));
 
+            // Spare sales — counter sales of warehouse stock. Entering one is a commercial decision
+            // (legacy restricted the page to admin/manager/supervisor); viewing adds the roles that
+            // read the register: accounts bills it, store_manager picks it, viewer is read-only.
+            options.AddPolicy("SaleManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            options.AddPolicy("SaleView", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer,
+                RoleNames.Accounts, RoleNames.StoreManager));
+
             // Phase 5 — documents (PI / Invoice / DC). Generating is a billing action; viewing is wider.
             options.AddPolicy("DocumentManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Accounts));
