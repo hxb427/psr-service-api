@@ -15,5 +15,8 @@ public class AppSettingConfiguration : IEntityTypeConfiguration<AppSetting>
 
         // Invoice generation is allowed by default; an admin can switch it off.
         b.HasData(new AppSetting { Key = SettingKeys.InvoiceGenerationEnabled, Value = "true" });
+
+        // No version floor until an admin sets one — 0.0.0 lets every client through.
+        b.HasData(new AppSetting { Key = SettingKeys.MinClientVersion, Value = "0.0.0" });
     }
 }

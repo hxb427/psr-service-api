@@ -43,6 +43,9 @@ var app = builder.Build();
 
 app.UseSerilogRequestLoggingWithContext();
 app.UseCors();
+// Before authentication: an outdated client is turned away with 426 even at login,
+// otherwise "mandatory update" would only be a suggestion.
+app.UseClientVersionGate();
 app.UseAuthentication();
 app.UseTokenVersionValidation();
 app.UseAuthorization();

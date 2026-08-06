@@ -11,4 +11,9 @@ public class AppSetting
 public static class SettingKeys
 {
     public const string InvoiceGenerationEnabled = "invoice_generation_enabled";
+
+    /// <summary>Oldest WPF client version allowed to talk to this API. Clients below it get
+    /// 426 Upgrade Required on everything except /health and /app-version, which is what makes a
+    /// mandatory update actually mandatory — the app is useless until updated. "0.0.0" = no floor.</summary>
+    public const string MinClientVersion = "min_client_version";
 }

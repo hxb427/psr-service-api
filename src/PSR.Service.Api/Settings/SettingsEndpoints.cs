@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
@@ -9,8 +10,12 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Settings;
 
-public record AppSettingsDto(bool InvoiceGenerationEnabled);
-public record UpdateAppSettingsRequest(bool InvoiceGenerationEnabled);
+public record AppSettingsDto(bool InvoiceGenerationEnabled, string MinClientVersion);
+public record UpdateAppSettingsRequest(bool InvoiceGenerationEnabled, string? MinClientVersion);
+
+/// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
+/// floor. Served on /app-version, which the version gate exempts.</summary>
+public record AppVersionDto(string MinClientVersion);
 
 /// <summary>Reads/writes admin feature toggles. Anyone authenticated can read (so clients can grey out
 /// disabled actions); only admins can change them.</summary>
@@ -23,15 +28,27 @@ public class AppSettingsService(AppDbContext db)
     }
 
     public async Task SetBoolAsync(string key, bool value, CancellationToken ct)
+        => await SetStringAsync(key, value ? "true" : "false", ct);
+
+    public async Task<string> GetStringAsync(string key, string fallback, CancellationToken ct)
+    {
+        var v = await db.AppSettings.AsNoTracking().Where(s => s.Key == key).Select(s => s.Value).FirstOrDefaultAsync(ct);
+        return v ?? fallback;
+    }
+
+    public async Task SetStringAsync(string key, string value, CancellationToken ct)
     {
         var row = await db.AppSettings.FirstOrDefaultAsync(s => s.Key == key, ct);
-        if (row is null) db.AppSettings.Add(new AppSetting { Key = key, Value = value ? "true" : "false" });
-        else row.Value = value ? "true" : "false";
+        if (row is null) db.AppSettings.Add(new AppSetting { Key = key, Value = value });
+        else row.Value = value;
         await db.SaveChangesAsync(ct);
     }
 
     public Task<bool> InvoiceGenerationEnabledAsync(CancellationToken ct)
         => GetBoolAsync(SettingKeys.InvoiceGenerationEnabled, true, ct);
+
+    public Task<string> MinClientVersionAsync(CancellationToken ct)
+        => GetStringAsync(SettingKeys.MinClientVersion, "0.0.0", ct);
 }
 
 public static class SettingsEndpoints
@@ -41,21 +58,54 @@ public static class SettingsEndpoints
         var group = app.MapGroup("/settings").WithTags("settings").RequireAuthorization();
         group.MapGet("/", GetAsync);
         group.MapPut("/", UpdateAsync).RequireAuthorization("Admin");
+
+        // Anonymous on purpose: a client below the floor can't authenticate (login is gated too),
+        // yet still needs to learn which version it must update to.
+        app.MapGet("/app-version", AppVersionAsync).WithTags("settings");
         return app;
     }
 
-    private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
-        => TypedResults.Ok(new AppSettingsDto(await settings.InvoiceGenerationEnabledAsync(ct)));
+    private static async Task<Ok<AppVersionDto>> AppVersionAsync(AppSettingsService settings, CancellationToken ct)
+        => TypedResults.Ok(new AppVersionDto(await settings.MinClientVersionAsync(ct)));
 
-    private static async Task<Ok<AppSettingsDto>> UpdateAsync(
+    private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
+        => TypedResults.Ok(new AppSettingsDto(
+            await settings.InvoiceGenerationEnabledAsync(ct),
+            await settings.MinClientVersionAsync(ct)));
+
+    private static async Task<Results<Ok<AppSettingsDto>, BadRequest<string>>> UpdateAsync(
         [FromBody] UpdateAppSettingsRequest req, ClaimsPrincipal user,
-        AppSettingsService settings, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        AppSettingsService settings, AppDbContext db, IAuditService audit, IMemoryCache cache,
+        HttpContext http, CancellationToken ct)
     {
+        // Null = older client that doesn't know the field; leave the floor untouched.
+        // Empty = clear the floor. Anything else must parse, or a typo like "1..2" would
+        // lock every client out of the API at once.
+        string? minToStore = null;
+        if (req.MinClientVersion is not null)
+        {
+            var trimmed = req.MinClientVersion.Trim();
+            if (trimmed.Length == 0) minToStore = "0.0.0";
+            else if (ClientVersionGate.TryParse(trimmed, out var parsed)) minToStore = parsed.ToString(3);
+            else return TypedResults.BadRequest($"'{req.MinClientVersion}' is not a valid version. Use the x.y.z form, e.g. 1.2.0.");
+        }
+
         await settings.SetBoolAsync(SettingKeys.InvoiceGenerationEnabled, req.InvoiceGenerationEnabled, ct);
+        if (minToStore is not null)
+        {
+            await settings.SetStringAsync(SettingKeys.MinClientVersion, minToStore, ct);
+            // The gate caches the floor for 60s; evicting makes a raise bite immediately.
+            cache.Remove(ClientVersionGate.CacheKey);
+        }
+
         user.TryGetUserId(out var uid);
         audit.Log(uid, "settings.update", "app_settings", null,
-            details: $"{SettingKeys.InvoiceGenerationEnabled}={req.InvoiceGenerationEnabled}", ip: http.GetIp());
+            details: $"{SettingKeys.InvoiceGenerationEnabled}={req.InvoiceGenerationEnabled}"
+                   + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : ""),
+            ip: http.GetIp());
         await db.SaveChangesAsync(ct);
-        return TypedResults.Ok(new AppSettingsDto(req.InvoiceGenerationEnabled));
+
+        return TypedResults.Ok(new AppSettingsDto(
+            req.InvoiceGenerationEnabled, await settings.MinClientVersionAsync(ct)));
     }
 }
