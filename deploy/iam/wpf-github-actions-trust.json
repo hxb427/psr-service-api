@@ -1,8 +1,9 @@
 {
+  "_comment": "GitHub sends OIDC subjects with immutable numeric IDs appended to the owner and repo (repo:owner@OWNERID/repo@REPOID:ref:...), NOT the plain name form. A trust policy written against names is silently denied with 'Not authorized to perform sts:AssumeRoleWithWebIdentity'. Get the real subject before creating the role: trigger the workflow once, then read CloudTrail > Event history > AssumeRoleWithWebIdentity > userIdentity.userName, and paste that value below with the ref wildcarded. The IDs never change, so pinning them is both correct and rename-proof.",
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "AllowGitHubActionsFromWpfRepo",
+      "Sid": "AllowGitHubActionsFromWpfRepoTags",
       "Effect": "Allow",
       "Principal": {
         "Federated": "arn:aws:iam::REPLACE_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
@@ -13,7 +14,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:REPLACE_GITHUB_OWNER/psr-service-wpf:ref:refs/tags/v*"
+          "token.actions.githubusercontent.com:sub": "repo:REPLACE_OWNER@REPLACE_OWNER_ID/psr-service-wpf@REPLACE_REPO_ID:ref:refs/tags/v*"
         }
       }
     }

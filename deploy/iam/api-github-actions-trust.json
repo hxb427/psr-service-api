@@ -1,4 +1,5 @@
 {
+  "_comment": "The live role for this repo was created against the name-only subject and works, so it is left as-is. Newer repos get OIDC subjects carrying immutable numeric IDs (repo:owner@OWNERID/repo@REPOID:ref:...) — see wpf-github-actions-trust.json. If this deploy ever starts failing with 'Not authorized to perform sts:AssumeRoleWithWebIdentity', that is why: read the real subject from CloudTrail's AssumeRoleWithWebIdentity event (userIdentity.userName) and match the trust to it.",
   "Version": "2012-10-17",
   "Statement": [
     {

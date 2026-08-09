@@ -31,10 +31,11 @@ public static class DocumentPdf
                 page.Margin(28);
                 page.DefaultTextStyle(t => t.FontSize(9).FontColor(Colors.Black));
 
-                // Preview watermark — drawn diagonally across the whole page; absent on the saved/clean copy.
+                // Preview watermark — diagonal across the page, absent on the saved copy. Kept very pale
+                // so it reads as a background wash rather than covering the figures being checked.
                 if (!string.IsNullOrWhiteSpace(watermark))
                     page.Foreground().AlignCenter().AlignMiddle().Rotate(-45)
-                        .Text(watermark).FontSize(52).Bold().FontColor(Colors.Red.Lighten3);
+                        .Text(watermark).FontSize(46).Light().FontColor(Colors.Grey.Lighten2);
 
                 page.Header().Column(col =>
                 {

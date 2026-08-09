@@ -123,10 +123,12 @@ public class StockLedgerService(AppDbContext db)
     /// <summary>Ship a spare out of the warehouse against a direct sale. Called once per sale line when the
     /// tax invoice is generated — that is the point the goods actually leave, so a Pending sale reserves
     /// nothing and an over-sold item fails here rather than silently going negative.</summary>
-    public async Task SaleOutAsync(long partId, int qty, long byUser, long saleId, string? remarks, CancellationToken ct)
+    public async Task SaleOutAsync(long partId, string itemCode, int qty, long byUser, long saleId,
+        string? remarks, CancellationToken ct)
     {
         if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
-            throw new StockException("Insufficient warehouse stock to invoice this sale.");
+            throw new StockException(
+                $"{itemCode} no longer has {qty} in warehouse stock — the invoice was not raised and nothing was taken out.");
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.Sale, Quantity = qty,

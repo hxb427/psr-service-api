@@ -205,7 +205,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         if (sale.Status == SpareSaleStatus.Cancelled) throw new BillingException("This sale is cancelled.");
         if (sale.Lines.Count == 0) throw new BillingException("This sale has no items on it.");
 
-        // The gate, mirroring the service chain: PI first, then payment, then the invoice.
+        // A PI is OPTIONAL for a counter sale — it is the quote you send when the customer asks for one.
+        // An invoice may therefore be raised either against a PI already issued for this sale, or straight
+        // off the sale with no PI at all. Payment is still the gate on the invoice.
         if (docType == DocumentType.PI)
         {
             if (!string.IsNullOrWhiteSpace(sale.PiNo))
@@ -213,12 +215,25 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         }
         else
         {
-            if (string.IsNullOrWhiteSpace(sale.PiNo))
-                throw new BillingException("Generate the PI before the invoice.");
             if (sale.PaymentStatus != PaymentStatus.Paid)
                 throw new BillingException("Mark payment received before generating the invoice.");
             if (!string.IsNullOrWhiteSpace(sale.InvNo))
                 throw new BillingException($"Invoice {sale.InvNo} has already been generated for this sale.");
+
+            // The goods leave on this document, so re-check availability up front and name the item.
+            // Stock can have moved since the sale was entered — a PI is not a reservation. The guarded
+            // decrement in GenerateSaleAsync is still the authority; this only gives a better message
+            // (and reaches the user at preview time, before they confirm).
+            foreach (var l in sale.Lines)
+            {
+                var onHand = await db.StockBalances.AsNoTracking()
+                    .Where(b => b.PartId == l.PartId && b.TechnicianId == StockBalance.Warehouse)
+                    .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
+                if (onHand < l.Qty)
+                    throw new BillingException(
+                        $"{l.ItemCode} is down to {onHand} in warehouse stock but this sale needs {l.Qty}. " +
+                        "Receive stock or edit the sale before invoicing.");
+            }
         }
 
         var party = await ResolvePartyAsync(sale.DealerId, sale.CustomerId, req.PartyName, req.PartyAddress,
@@ -278,7 +293,8 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             sale.InvDate = doc.DocDate;
             sale.Status = SpareSaleStatus.Invoiced;
             foreach (var l in sale.Lines)
-                await ledger.SaleOutAsync(l.PartId, l.Qty, userId, sale.Id, $"{doc.DocNo} ({sale.SaleNo})", ct);
+                await ledger.SaleOutAsync(l.PartId, l.ItemCode, l.Qty, userId, sale.Id,
+                    $"{doc.DocNo} ({sale.SaleNo})", ct);
         }
 
         await db.SaveChangesAsync(ct);
