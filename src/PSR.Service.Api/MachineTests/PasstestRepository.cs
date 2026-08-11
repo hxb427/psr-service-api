@@ -76,6 +76,85 @@ public class PasstestRepository(
         }
     }
 
+    /// <summary>The legacy <c>dealer_warranty</c> master — the curated dealer list, and the only
+    /// legacy source that carries warranty months. Uncached (the import button must see live data).
+    /// Returns null when the table is unreachable (e.g. the read-only login was never granted
+    /// SELECT on it) so the caller can say so instead of reporting "no dealers found".</summary>
+    public async Task<List<LegacyDealerRow>?> ScanLegacyDealersAsync(CancellationToken ct)
+    {
+        if (!Configured) return null;
+        try
+        {
+            await using var conn = await OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandTimeout = _opt.ScanTimeoutSeconds;
+            cmd.CommandText =
+                "SELECT Dealer, Warranty, Remarks FROM dealer_warranty " +
+                "WHERE Dealer IS NOT NULL AND TRIM(Dealer) <> '' ORDER BY Dealer";
+
+            var rows = new List<LegacyDealerRow>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var name = reader.GetString(0).Trim();
+                if (name.Length == 0) continue;
+                int? months = reader.IsDBNull(1) ? null
+                    : int.TryParse(reader.GetValue(1)?.ToString(), out var m) ? m : null;
+                var remarks = reader.IsDBNull(2) ? null : reader.GetString(2).Trim();
+                rows.Add(new LegacyDealerRow(name, months, remarks?.Length > 0 ? remarks : null));
+            }
+            return rows;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Legacy dealer_warranty scan failed");
+            return null;
+        }
+    }
+
+    /// <summary>Distinct customer names off passtestdata with their machine counts, bypassing the
+    /// 60-minute cache used by <see cref="CustomersAsync"/> — the import button must not show
+    /// hour-stale names. Grouping costs the same as DISTINCT and the count tells the admin which
+    /// names are dealers and which are one-off direct customers. Null on failure.</summary>
+    public async Task<List<LegacyCustomerRow>?> ScanCustomersAsync(CancellationToken ct)
+    {
+        if (!Configured) return null;
+        try
+        {
+            await using var conn = await OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandTimeout = _opt.ScanTimeoutSeconds;
+            // Address1 + Address2 off the customer's most recent invoice — rows with a blank address
+            // sort last so an old row with an address beats a new row without one. GROUP_CONCAT is
+            // capped at 1024 bytes but only the first element is read, so the cap can't corrupt it.
+            cmd.CommandText =
+                "SELECT TRIM(Customer) AS name, COUNT(*) AS machines, " +
+                "SUBSTRING_INDEX(GROUP_CONCAT(" +
+                "  CONCAT_WS(', ', NULLIF(TRIM(Address1), ''), NULLIF(TRIM(Address2), '')) " +
+                "  ORDER BY (CONCAT_WS('', TRIM(Address1), TRIM(Address2)) <> '') DESC, InvDate DESC " +
+                "  SEPARATOR '~|~'), '~|~', 1) AS addr " +
+                "FROM passtestdata " +
+                "WHERE Customer IS NOT NULL AND TRIM(Customer) <> '' " +
+                "GROUP BY TRIM(Customer) ORDER BY machines DESC";
+
+            var list = new List<LegacyCustomerRow>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                if (reader.IsDBNull(0)) continue;
+                var addr = reader.IsDBNull(2) ? null : reader.GetString(2).Trim();
+                list.Add(new LegacyCustomerRow(
+                    reader.GetString(0), reader.GetInt32(1), addr?.Length > 0 ? addr : null));
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Passtest customer scan failed");
+            return null;
+        }
+    }
+
     private async Task<Dictionary<string, string>?> FetchRowAsync(string sn, CancellationToken ct)
     {
         try

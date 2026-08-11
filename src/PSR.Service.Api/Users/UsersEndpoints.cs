@@ -171,7 +171,7 @@ public static class UsersEndpoints
         principal.TryGetUserId(out var actorId);
         if (actorId == id)
             return TypedResults.BadRequest("You cannot deactivate your own account.");
-
+ 
         if (IsAdmin(user) && !await OtherActiveAdminExistsAsync(db, id, ct))
             return TypedResults.BadRequest("Cannot deactivate the last active admin.");
 

@@ -6,6 +6,8 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.MachineTests;
+using PSR.Service.Api.Settings;
 
 namespace PSR.Service.Api.Reference;
 
@@ -16,6 +18,8 @@ public static class DealersEndpoints
         var group = app.MapGroup("/dealers").WithTags("dealers").RequireAuthorization();
 
         group.MapGet("/", ListAsync);
+        group.MapGet("/import-candidates", ImportCandidatesAsync).RequireAuthorization("Admin");
+        group.MapPost("/import", ImportAsync).RequireAuthorization("Admin");
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/", CreateAsync).RequireAuthorization("Admin");
         group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("Admin");
@@ -92,6 +96,136 @@ public static class DealersEndpoints
         audit.Log(actor, active ? "dealer.activate" : "dealer.deactivate", "dealer", id, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.NoContent();
+    }
+
+    /// <summary>Scans the legacy Hostinger DB for dealers the master doesn't have yet. The diff runs
+    /// here, not on the client: MySQL collapses the whole passtestdata table to distinct names, and
+    /// only the handful that are actually new crosses the wire. Nothing is written — the admin picks.</summary>
+    private static async Task<Results<Ok<DealerImportCandidatesDto>, StatusCodeHttpResult>> ImportCandidatesAsync(
+        AppDbContext db, PasstestRepository passtest, AppSettingsService settings, CancellationToken ct)
+    {
+        if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var legacy = await passtest.ScanLegacyDealersAsync(ct);
+        var customers = await passtest.ScanCustomersAsync(ct);
+        if (legacy is null && customers is null)
+            return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var warnings = new List<string>();
+        if (legacy is null)
+            warnings.Add("Could not read dealer_warranty — the read-only login probably has no SELECT grant on it. Warranty months are blank below and must be set by hand.");
+        if (customers is null)
+            warnings.Add("Could not read passtestdata — dealers seen only on machines are not listed.");
+
+        // Existing dealers, keyed by normalized name. Inactive ones count: they exist, so re-importing
+        // them would hit the unique index — the admin should reactivate instead.
+        var existing = await db.Dealers.AsNoTracking().Select(d => d.Name).ToListAsync(ct);
+        var existingKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in existing) existingKeys.TryAdd(DealerNameKey.Normalize(name), name);
+
+        var byKey = new Dictionary<string, DealerImportCandidateDto>(StringComparer.Ordinal);
+
+        // dealer_warranty first — it is the curated master and the only source of warranty months.
+        foreach (var row in legacy ?? [])
+        {
+            var key = DealerNameKey.Normalize(row.Name);
+            if (key.Length == 0 || existingKeys.ContainsKey(key)) continue;
+            byKey.TryAdd(key, new DealerImportCandidateDto(
+                DealerNameKey.Clean(row.Name), row.WarrantyMonths, null, row.Remarks, "dealer_warranty", 0, null));
+        }
+
+        // passtestdata names: enrich a dealer_warranty hit with its machine count and address (only
+        // passtestdata carries one — dealer_warranty is name + warranty + remarks), else stand alone.
+        foreach (var row in customers ?? [])
+        {
+            var key = DealerNameKey.Normalize(row.Name);
+            if (key.Length == 0 || existingKeys.ContainsKey(key)) continue;
+            byKey[key] = byKey.TryGetValue(key, out var hit)
+                ? hit with
+                {
+                    Source = "both",
+                    MachineCount = hit.MachineCount + row.MachineCount,
+                    Address = hit.Address ?? row.Address,
+                }
+                : new DealerImportCandidateDto(
+                    DealerNameKey.Clean(row.Name), null, row.Address, null, "passtestdata", row.MachineCount, null);
+        }
+
+        // passtestdata carries no warranty term, so fall back to the admin's default rather than
+        // leaving 0 — a dealer imported at 0 months silently reads OUT of warranty on every lookup.
+        var defaultMonths = await settings.DefaultWarrantyMonthsAsync(ct);
+
+        // Flag likely duplicates of dealers already in the master so the admin doesn't create a twin.
+        var candidates = byKey
+            .Select(kv => kv.Value with
+            {
+                WarrantyMonths = kv.Value.WarrantyMonths ?? (defaultMonths > 0 ? defaultMonths : null),
+                PossibleMatch = existingKeys
+                    .Where(e => DealerNameKey.IsNearMatch(kv.Key, e.Key))
+                    .Select(e => e.Value)
+                    .FirstOrDefault(),
+            })
+            .OrderByDescending(c => c.Source != "passtestdata")   // curated master first
+            .ThenByDescending(c => c.MachineCount)                // then by how many units they took
+            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return TypedResults.Ok(new DealerImportCandidatesDto(
+            candidates, existing.Count, legacy?.Count ?? 0, customers?.Count ?? 0, warnings));
+    }
+
+    /// <summary>Bulk-creates the dealers an admin approved. Creates only — never updates or
+    /// deactivates an existing dealer — so re-running the scan is always safe. Names that already
+    /// exist (after normalization) are skipped, not failed.</summary>
+    private static async Task<Results<Ok<DealerImportResultDto>, BadRequest<string>>> ImportAsync(
+        [FromBody] DealerImportRequest req, ClaimsPrincipal user, AppDbContext db,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        if (req.Dealers is null || req.Dealers.Count == 0) return TypedResults.BadRequest("No dealers selected.");
+        if (req.Dealers.Count > 1000) return TypedResults.BadRequest("Too many dealers in one import (max 1000).");
+
+        var existing = await db.Dealers.AsNoTracking().Select(d => d.Name).ToListAsync(ct);
+        var seen = new HashSet<string>(existing.Select(DealerNameKey.Normalize), StringComparer.Ordinal);
+
+        var toCreate = new List<Dealer>();
+        var skipped = new List<string>();
+
+        foreach (var item in req.Dealers)
+        {
+            var name = DealerNameKey.Clean(item.Name ?? string.Empty);
+            if (name.Length == 0) continue;
+            if (name.Length > 200) return TypedResults.BadRequest($"Dealer name too long (max 200): '{name[..40]}…'");
+            if (item.WarrantyMonths is < 0 or > 600)
+                return TypedResults.BadRequest($"Warranty months for '{name}' must be between 0 and 600.");
+
+            if (!seen.Add(DealerNameKey.Normalize(name))) { skipped.Add(name); continue; }
+
+            toCreate.Add(new Dealer
+            {
+                Name = name,
+                WarrantyMonths = item.WarrantyMonths,
+                Address = Fit(item.Address, 500),
+                Remarks = Fit(item.Remarks, 500),
+            });
+        }
+
+        if (toCreate.Count > 0)
+        {
+            db.Dealers.AddRange(toCreate);
+            user.TryGetUserId(out var actor);
+            audit.Log(actor, "dealer.import", "dealer", null,
+                details: $"{toCreate.Count} imported from legacy", ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+        }
+
+        return TypedResults.Ok(new DealerImportResultDto(toCreate.Count, skipped.Count, skipped));
+    }
+
+    /// <summary>Trims to null and clips to the column width — legacy free text has no length limits.</summary>
+    private static string? Fit(string? value, int max)
+    {
+        var s = value?.Trim();
+        return string.IsNullOrEmpty(s) ? null : s[..Math.Min(s.Length, max)];
     }
 
     private static DealerDto ToDto(Dealer x) =>

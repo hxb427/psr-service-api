@@ -10,8 +10,8 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Settings;
 
-public record AppSettingsDto(bool InvoiceGenerationEnabled, string MinClientVersion);
-public record UpdateAppSettingsRequest(bool InvoiceGenerationEnabled, string? MinClientVersion);
+public record AppSettingsDto(bool InvoiceGenerationEnabled, string MinClientVersion, int DefaultWarrantyMonths);
+public record UpdateAppSettingsRequest(bool InvoiceGenerationEnabled, string? MinClientVersion, int? DefaultWarrantyMonths);
 
 /// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
 /// floor. Served on /app-version, which the version gate exempts.</summary>
@@ -49,6 +49,15 @@ public class AppSettingsService(AppDbContext db)
 
     public Task<string> MinClientVersionAsync(CancellationToken ct)
         => GetStringAsync(SettingKeys.MinClientVersion, "0.0.0", ct);
+
+    public async Task<int> GetIntAsync(string key, int fallback, CancellationToken ct)
+    {
+        var v = await db.AppSettings.AsNoTracking().Where(s => s.Key == key).Select(s => s.Value).FirstOrDefaultAsync(ct);
+        return int.TryParse(v, out var i) ? i : fallback;
+    }
+
+    public Task<int> DefaultWarrantyMonthsAsync(CancellationToken ct)
+        => GetIntAsync(SettingKeys.DefaultWarrantyMonths, 0, ct);
 }
 
 public static class SettingsEndpoints
@@ -71,7 +80,8 @@ public static class SettingsEndpoints
     private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
         => TypedResults.Ok(new AppSettingsDto(
             await settings.InvoiceGenerationEnabledAsync(ct),
-            await settings.MinClientVersionAsync(ct)));
+            await settings.MinClientVersionAsync(ct),
+            await settings.DefaultWarrantyMonthsAsync(ct)));
 
     private static async Task<Results<Ok<AppSettingsDto>, BadRequest<string>>> UpdateAsync(
         [FromBody] UpdateAppSettingsRequest req, ClaimsPrincipal user,
@@ -90,7 +100,14 @@ public static class SettingsEndpoints
             else return TypedResults.BadRequest($"'{req.MinClientVersion}' is not a valid version. Use the x.y.z form, e.g. 1.2.0.");
         }
 
+        // Null = older client that doesn't send the field. Negative is meaningless, and an absurd
+        // figure would silently mark decade-old machines in warranty, so cap it at 50 years.
+        if (req.DefaultWarrantyMonths is { } dwm && (dwm < 0 || dwm > 600))
+            return TypedResults.BadRequest("Default warranty months must be between 0 and 600 (0 = no fallback).");
+
         await settings.SetBoolAsync(SettingKeys.InvoiceGenerationEnabled, req.InvoiceGenerationEnabled, ct);
+        if (req.DefaultWarrantyMonths is { } months)
+            await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
         if (minToStore is not null)
         {
             await settings.SetStringAsync(SettingKeys.MinClientVersion, minToStore, ct);
@@ -101,11 +118,14 @@ public static class SettingsEndpoints
         user.TryGetUserId(out var uid);
         audit.Log(uid, "settings.update", "app_settings", null,
             details: $"{SettingKeys.InvoiceGenerationEnabled}={req.InvoiceGenerationEnabled}"
-                   + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : ""),
+                   + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : "")
+                   + (req.DefaultWarrantyMonths is { } d ? $", {SettingKeys.DefaultWarrantyMonths}={d}" : ""),
             ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(new AppSettingsDto(
-            req.InvoiceGenerationEnabled, await settings.MinClientVersionAsync(ct)));
+            req.InvoiceGenerationEnabled,
+            await settings.MinClientVersionAsync(ct),
+            await settings.DefaultWarrantyMonthsAsync(ct)));
     }
 }

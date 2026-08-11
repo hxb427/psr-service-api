@@ -22,6 +22,9 @@ public static class StockRequestsEndpoints
         group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("StockManage");
         group.MapGet("/inventory/me", MyInventoryAsync);
         group.MapGet("/inventory/{technicianId:long}", TechInventoryAsync).RequireAuthorization("StockManage");
+        // Everyone's holdings in one call. The per-technician route above answers a single holder;
+        // asking it once per technician to build a team view would be a request per head.
+        group.MapGet("/inventory", AllInventoryAsync).RequireAuthorization("StockManage");
 
         return app;
     }
@@ -170,6 +173,24 @@ public static class StockRequestsEndpoints
 
     private static Task<Ok<List<TechInventoryRowDto>>> TechInventoryAsync(long technicianId, AppDbContext db, CancellationToken ct)
         => InventoryAsync(db, technicianId, ct);
+
+    /// <summary>Every technician's holdings, one row per (technician, part).
+    ///
+    /// TechnicianId 0 is the warehouse, not a person, so it is excluded — the warehouse has its own
+    /// page and would otherwise appear as a nameless holder. Zero and negative balances are dropped
+    /// for the same reason the single-technician view drops them: a settled part is not a holding.</summary>
+    private static async Task<Ok<List<TechnicianStockRowDto>>> AllInventoryAsync(AppDbContext db, CancellationToken ct)
+    {
+        var rows = await (from b in db.StockBalances.AsNoTracking()
+                          join p in db.Parts on b.PartId equals p.Id
+                          join u in db.Users on b.TechnicianId equals u.Id
+                          where b.TechnicianId != StockBalance.Warehouse && b.OnHand > 0
+                          orderby u.Username, p.ItemCode
+                          select new TechnicianStockRowDto(
+                              u.Id, u.Username, p.Id, p.ItemCode, p.Name, p.Unit, b.OnHand))
+            .ToListAsync(ct);
+        return TypedResults.Ok(rows);
+    }
 
     private static async Task<Ok<List<TechInventoryRowDto>>> InventoryAsync(AppDbContext db, long technicianId, CancellationToken ct)
     {

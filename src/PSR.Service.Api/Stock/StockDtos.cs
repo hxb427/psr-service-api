@@ -28,6 +28,11 @@ public record IssueRequest([Range(1, 1_000_000)] int Qty, [StringLength(80)] str
 
 public record TechInventoryRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand);
 
+/// <summary>One technician's holding of one part, for the across-the-team view. Carries the holder so
+/// the client can group without asking who each id is.</summary>
+public record TechnicianStockRowDto(
+    long TechnicianId, string TechnicianName, long PartId, string ItemCode, string Name, string? Unit, int OnHand);
+
 // Courier/tracking + serial ids are the field-technician shipment additions (legacy
 // technician_return_dispatches); desktop in-house returns send only part/qty/remarks.
 public record CreateStockReturnRequest(
