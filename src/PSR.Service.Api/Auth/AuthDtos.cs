@@ -13,7 +13,11 @@ public record LoginResponse(
     string Username,
     string? FullName,
     string[] Roles,
-    bool MustChangePassword);
+    bool MustChangePassword,
+    /// <summary>Field technicians carry stock off-site; in-house ones work at the bench. Roles alone
+    /// cannot tell the two apart — both are "technician" — so the flag has to travel with the login
+    /// for the client to know which navigation to show.</summary>
+    bool IsFieldTechnician);
 
 public record ChangePasswordRequest(
     [Required, StringLength(100, MinimumLength = 1)] string CurrentPassword,

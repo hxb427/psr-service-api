@@ -53,7 +53,8 @@ public static class AuthEndpoints
         tvCache.Invalidate(user.Id);
 
         return TypedResults.Ok(new LoginResponse(
-            token, expires, user.Id, user.Username, user.FullName, roles, user.MustChangePassword));
+            token, expires, user.Id, user.Username, user.FullName, roles, user.MustChangePassword,
+            user.IsFieldTechnician));
     }
 
     private static async Task<Results<Ok<ChangePasswordResponse>, UnauthorizedHttpResult, BadRequest<string>>>
@@ -143,7 +144,10 @@ public static class AuthEndpoints
             user.FullName,
             user.Email,
             user.MustChangePassword,
-            Roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray()
+            Roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray(),
+            // Same reason as on LoginResponse: a session restored from a stored token learns the
+            // user's shape from here, and roles cannot distinguish field from in-house.
+            user.IsFieldTechnician,
         });
     }
 
