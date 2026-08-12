@@ -77,3 +77,44 @@ public class SpareSaleLine
 
     public SpareSale Sale { get; set; } = null!;
 }
+
+/// <summary>Goods coming back from an invoiced sale.
+///
+/// A return is its own record rather than a status on the sale, because it is a separate event with its
+/// own date, reason and quantities — a customer may bring back two of the five they bought, and may do
+/// it twice. The sale itself is never rewritten: it still says what was sold and invoiced, and the
+/// returns hanging off it say what came back. That is what makes the pair auditable, and it is why
+/// cancelling an invoiced sale stays forbidden.
+///
+/// Stock goes back to the warehouse when the return is recorded, through the ledger, so the movement
+/// carries a SALE_RETURN reference instead of an anonymous adjustment.</summary>
+public class SpareSaleReturn : ITimestamps
+{
+    public long Id { get; set; }
+    public long SpareSaleId { get; set; }
+    public string ReturnNo { get; set; } = string.Empty;   // unique (SRT00001)
+    public DateTime ReturnDate { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Why it came back. Required — a return that moves stock without a reason is the thing
+    /// a stock audit cannot explain later.</summary>
+    public string Reason { get; set; } = string.Empty;
+
+    public long CreatedByUserId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public List<SpareSaleReturnLine> Lines { get; set; } = new();
+}
+
+/// <summary>One part coming back on a return. Code is snapshotted like the sale line's, so the record
+/// still reads correctly after a parts-master rename.</summary>
+public class SpareSaleReturnLine
+{
+    public long Id { get; set; }
+    public long SpareSaleReturnId { get; set; }
+    public long PartId { get; set; }
+    public string ItemCode { get; set; } = string.Empty;
+    public int Qty { get; set; }
+
+    public SpareSaleReturn Return { get; set; } = null!;
+}

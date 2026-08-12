@@ -224,14 +224,21 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             // Stock can have moved since the sale was entered — a PI is not a reservation. The guarded
             // decrement in GenerateSaleAsync is still the authority; this only gives a better message
             // (and reaches the user at preview time, before they confirm).
-            foreach (var l in sale.Lines)
+            // One query for the whole sale, not one per line.
+            var partIds = sale.Lines.Select(l => l.PartId).Distinct().ToList();
+            var onHand = await db.StockBalances.AsNoTracking()
+                .Where(b => b.TechnicianId == StockBalance.Warehouse && partIds.Contains(b.PartId))
+                .ToDictionaryAsync(b => b.PartId, b => b.OnHand, ct);
+
+            // Grouped by part: the same part can appear on two lines (list price and a discounted one),
+            // and each line passing on its own would still overdraw the balance between them.
+            foreach (var g in sale.Lines.GroupBy(l => l.PartId))
             {
-                var onHand = await db.StockBalances.AsNoTracking()
-                    .Where(b => b.PartId == l.PartId && b.TechnicianId == StockBalance.Warehouse)
-                    .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
-                if (onHand < l.Qty)
+                var need = g.Sum(l => l.Qty);
+                var have = onHand.GetValueOrDefault(g.Key);
+                if (have < need)
                     throw new BillingException(
-                        $"{l.ItemCode} is down to {onHand} in warehouse stock but this sale needs {l.Qty}. " +
+                        $"{g.First().ItemCode} is down to {have} in warehouse stock but this sale needs {need}. " +
                         "Receive stock or edit the sale before invoicing.");
             }
         }

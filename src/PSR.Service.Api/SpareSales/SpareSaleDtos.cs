@@ -28,11 +28,35 @@ public record SaveSpareSaleRequest(
 public record SalePaymentRequest([Required, StringLength(20)] string Status);
 
 /// <summary>Money fields are null for roles that may see the sale but not its pricing (store_manager).
-/// <paramref name="WarehouseOnHand"/> is live, not a snapshot — it is what the invoice will draw down.</summary>
+///
+/// The stock figures are live, not snapshots. <paramref name="WarehouseOnHand"/> is the physical balance;
+/// <paramref name="Available"/> subtracts what other pending sales have already claimed, and is the number
+/// that decides whether this sale can actually be invoiced. <paramref name="ReturnedQty"/> is how many of
+/// this line have since come back.</summary>
 public record SpareSaleLineDto(
     long Id, long PartId, string ItemCode, string Description, string? HsnCode, string? Unit,
     int Qty, string RateType, decimal? UnitRate, decimal GstPercent,
-    decimal? TaxableAmount, decimal? TaxAmount, decimal? LineTotal, int WarehouseOnHand);
+    decimal? TaxableAmount, decimal? TaxAmount, decimal? LineTotal,
+    int WarehouseOnHand, int Available, int ReturnedQty);
+
+/// <summary>A part's warehouse position for the sale form, which asks per row as the user types.</summary>
+public record PartAvailabilityDto(long PartId, int OnHand, int Committed, int Available);
+
+// ----- returns -----
+public record SaleReturnLineRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty);
+
+/// <summary>Record goods coming back from an invoiced sale. A reason is required: this moves warehouse
+/// stock, and a movement nobody can explain later is the thing a stock audit trips over.</summary>
+public record CreateSaleReturnRequest(
+    DateTime? ReturnDate,
+    [Required, StringLength(500)] string Reason,
+    [Required, MinLength(1)] List<SaleReturnLineRequest> Lines);
+
+public record SaleReturnLineDto(long PartId, string ItemCode, int Qty);
+
+public record SaleReturnDto(
+    long Id, string ReturnNo, DateTime ReturnDate, string Reason,
+    string? CreatedByUsername, DateTime CreatedAt, List<SaleReturnLineDto> Lines);
 
 public record SpareSaleListItemDto(
     long Id, string SaleNo, DateTime SaleDate, string CustomerType, string PartyName,
@@ -47,4 +71,5 @@ public record SpareSaleDetailDto(
     string? PiNo, DateTime? PiDate, string? InvNo, DateTime? InvDate,
     decimal? TaxableAmount, decimal? TaxAmount, decimal? TotalAmount,
     string? Remarks, string? CreatedByUsername, DateTime CreatedAt,
-    List<SpareSaleLineDto> Lines);
+    List<SpareSaleLineDto> Lines,
+    List<SaleReturnDto> Returns);

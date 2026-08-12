@@ -105,7 +105,7 @@ public record InvoiceNoRequest(
 
 // ----- read -----
 public record ServiceListItemDto(
-    long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
+    long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, long? DealerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
     long? TechnicianId, string? TechnicianName, DateTime DateReceived, DateTime? PromisedDate,
     // Document refs drive the gated PI → Invoice → DC chain on the dispatch screen.

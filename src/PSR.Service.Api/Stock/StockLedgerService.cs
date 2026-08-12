@@ -137,6 +137,22 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
+    /// <summary>Goods coming back from an invoiced sale go straight to the warehouse. No guard is needed
+    /// the way SaleOutAsync needs one — putting stock back cannot drive a balance negative — but it still
+    /// goes through the ledger so the movement carries a SALE_RETURN reference and shows up in the audit
+    /// trail as a return rather than an unexplained adjustment.</summary>
+    public async Task SaleReturnInAsync(long partId, int qty, long byUser, long returnId,
+        string? remarks, CancellationToken ct)
+    {
+        await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.SaleReturn, Quantity = qty,
+            PerformedByUserId = byUser, ReferenceType = "SPARE_SALE_RETURN", ReferenceId = returnId,
+            Remarks = remarks,
+        });
+    }
+
     private Task IncrementAsync(long partId, long technicianId, int delta, CancellationToken ct) =>
         db.Database.ExecuteSqlInterpolatedAsync($@"
 INSERT INTO `stock_balances` (`part_id`, `technician_id`, `on_hand`, `created_at`, `updated_at`)

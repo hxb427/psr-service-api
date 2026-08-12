@@ -20,9 +20,9 @@ public static class MachineTestsEndpoints
         return app;
     }
 
-    /// <summary>Resolve a unit by any of its serials. Warranty is InvDate + warranty months, so the
-    /// verdict is only as good as the months figure — see ResolveWarrantyMonthsAsync. 404 when not
-    /// found; 503 when the passtest source is unreachable.</summary>
+    /// <summary>Resolve a unit by any of its serials. Warranty is InvDate + warranty months; the months
+    /// come from the machine's own passtestdata row when it has one, and only otherwise from what
+    /// ResolveWarrantyMonthsAsync works out. 404 when not found; 503 when passtest is unreachable.</summary>
     private static async Task<Results<Ok<MachineTestDto>, NotFound, StatusCodeHttpResult>> BySerialAsync(
         string serial, long? dealerId, AppDbContext db, PasstestRepository passtest,
         AppSettingsService settings, CancellationToken ct)
@@ -34,7 +34,7 @@ public static class MachineTestsEndpoints
         return dto is null ? TypedResults.NotFound() : TypedResults.Ok(dto);
     }
 
-    /// <summary>Warranty months, best source first.
+    /// <summary>Warranty months when the machine's own passtestdata row carries none. Best source first.
     ///
     /// Callers that know the dealer (the inward form in dealer mode) pass it. The ones that cannot —
     /// the dashboard's quick check, the global-search serial filter, and a direct-customer inward —

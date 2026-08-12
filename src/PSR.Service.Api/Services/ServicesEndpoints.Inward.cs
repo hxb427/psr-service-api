@@ -152,7 +152,7 @@ public static partial class ServicesEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var jobs = created.Select(j => new ServiceListItemDto(
-            j.Id, j.ServiceNo, j.ChallanNo, j.InwardDcNo, j.CustomerId, customerName, j.SerialNo, j.PsCode, j.ModelName, j.Description,
+            j.Id, j.ServiceNo, j.ChallanNo, j.InwardDcNo, j.CustomerId, j.DealerId, customerName, j.SerialNo, j.PsCode, j.ModelName, j.Description,
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
             j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived, j.PromisedDate,
             j.PiNo, j.InvNo, j.OutwardDcNo)).ToList();

@@ -40,8 +40,19 @@ public static class SpareSalesEndpoints
         group.MapPost("/{id:long}/cancel", CancelAsync).RequireAuthorization("SaleManage");
         group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("SaleManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
+        group.MapPost("/{id:long}/clear-pi", ClearPiAsync).RequireAuthorization("SaleManage");
+        group.MapPost("/{id:long}/returns", CreateReturnAsync).RequireAuthorization("SaleManage");
+        // Asked per row by the sale form as the user types, so it stays a single-part lookup.
+        group.MapGet("/availability/{partId:long}", AvailabilityAsync);
 
         return app;
+    }
+
+    private static async Task<Ok<PartAvailabilityDto>> AvailabilityAsync(
+        long partId, long? excludeSaleId, SpareSaleService sales, CancellationToken ct)
+    {
+        var a = await sales.AvailabilityAsync(partId, excludeSaleId ?? 0, ct);
+        return TypedResults.Ok(new PartAvailabilityDto(a.PartId, a.OnHand, a.Committed, a.Available));
     }
 
     // ---------------------------------------------------------------- queries
@@ -202,14 +213,129 @@ public static class SpareSalesEndpoints
         var sale = await db.SpareSales.FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
         if (sale is null) return TypedResults.NotFound();
         if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
-        if (!Enum.TryParse<PaymentStatus>(req.Status, true, out var status))
-            return TypedResults.BadRequest($"Unknown payment status '{req.Status}'. Use Pending, Partial or Paid.");
+        // A counter sale is paid or it is not. Partial exists on the shared enum for service jobs, which
+        // are billed against a job that can be part-settled; a sale cannot be invoiced until it is Paid,
+        // so Partial here is a state that can never move forward and only reads as "not paid yet".
+        if (!Enum.TryParse<PaymentStatus>(req.Status, true, out var status)
+            || status == PaymentStatus.Partial)
+            return TypedResults.BadRequest($"Unknown payment status '{req.Status}'. Use Pending or Paid.");
 
         sale.PaymentStatus = status;
         user.TryGetUserId(out var uid);
         audit.Log(uid, "spare-sale.payment", "spare_sale", sale.Id,
             details: $"{sale.SaleNo} → {status}", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
+    /// <summary>Un-stamp a PI so the sale can be corrected and re-quoted.
+    ///
+    /// The issued PI document is deliberately NOT deleted — it was sent to the customer, and a quote
+    /// that vanishes from the record is worse than one that was superseded. Clearing only removes the
+    /// stamp that locks editing, so the sale's document list keeps both the old PI and the new one.</summary>
+    private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> ClearPiAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var sale = await db.SpareSales.FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
+        if (sale is null) return TypedResults.NotFound();
+        if (string.IsNullOrWhiteSpace(sale.PiNo)) return TypedResults.BadRequest("This sale has no PI to clear.");
+        if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
+        if (sale.Status == SpareSaleStatus.Invoiced)
+            return TypedResults.BadRequest($"Invoice {sale.InvNo} has been raised — the PI can no longer be cleared.");
+
+        var cleared = sale.PiNo;
+        sale.PiNo = null;
+        sale.PiDate = null;
+
+        user.TryGetUserId(out var uid);
+        audit.Log(uid, "spare-sale.clear-pi", "spare_sale", sale.Id,
+            details: $"{sale.SaleNo} — cleared PI {cleared}; the document itself is kept", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
+    /// <summary>Record goods coming back from an invoiced sale and put them back in the warehouse.
+    ///
+    /// Only an invoiced sale can be returned against, because that is the only state in which stock
+    /// actually left. Quantities are capped at what was sold minus what has already come back, so
+    /// repeated returns cannot inflate the warehouse past what went out.</summary>
+    private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> CreateReturnAsync(
+        long id, [FromBody] CreateSaleReturnRequest req, ClaimsPrincipal user, AppDbContext db,
+        StockLedgerService ledger, NumberSequenceService seq, IAuditService audit,
+        HttpContext http, CancellationToken ct)
+    {
+        var sale = await db.SpareSales.Include(s => s.Lines)
+            .FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
+        if (sale is null) return TypedResults.NotFound();
+        if (sale.Status != SpareSaleStatus.Invoiced)
+            return TypedResults.BadRequest(
+                "Only an invoiced sale can be returned against — nothing has left the warehouse yet.");
+        if (string.IsNullOrWhiteSpace(req.Reason))
+            return TypedResults.BadRequest("Give a reason for the return.");
+
+        var soldPerPart = sale.Lines.GroupBy(l => l.PartId).ToDictionary(g => g.Key, g => g.Sum(l => l.Qty));
+        var alreadyReturned = await (from rl in db.SpareSaleReturnLines.AsNoTracking()
+                                     join r in db.SpareSaleReturns.AsNoTracking() on rl.SpareSaleReturnId equals r.Id
+                                     where r.SpareSaleId == sale.Id
+                                     group rl by rl.PartId into g
+                                     select new { PartId = g.Key, Qty = g.Sum(x => x.Qty) })
+            .ToDictionaryAsync(x => x.PartId, x => x.Qty, ct);
+
+        // Fold duplicate lines for the same part before checking, so two rows of 3 cannot slip past a
+        // cap of 5 by being under it individually.
+        var asked = new Dictionary<long, int>();
+        foreach (var l in req.Lines)
+        {
+            if (l.Qty < 1) return TypedResults.BadRequest("Return quantity must be at least 1.");
+            asked[l.PartId] = asked.GetValueOrDefault(l.PartId) + l.Qty;
+        }
+
+        foreach (var (partId, qty) in asked)
+        {
+            if (!soldPerPart.TryGetValue(partId, out var sold))
+                return TypedResults.BadRequest("A returned item is not on this sale.");
+            var remaining = sold - alreadyReturned.GetValueOrDefault(partId);
+            if (qty > remaining)
+            {
+                var code = sale.Lines.First(l => l.PartId == partId).ItemCode;
+                return TypedResults.BadRequest(remaining <= 0
+                    ? $"{code} has already been returned in full."
+                    : $"{code} — {remaining} of {sold} still outstanding, {qty} being returned.");
+            }
+        }
+
+        user.TryGetUserId(out var uid);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        var ret = new SpareSaleReturn
+        {
+            SpareSaleId = sale.Id,
+            ReturnNo = await seq.NextAsync(SequenceKeys.SpareSaleReturn, ct),
+            ReturnDate = req.ReturnDate ?? DateTime.UtcNow,
+            Reason = req.Reason.Trim(),
+            CreatedByUserId = uid,
+        };
+        foreach (var (partId, qty) in asked)
+            ret.Lines.Add(new SpareSaleReturnLine
+            {
+                PartId = partId,
+                ItemCode = sale.Lines.First(l => l.PartId == partId).ItemCode,
+                Qty = qty,
+            });
+        db.SpareSaleReturns.Add(ret);
+
+        // Needs the id for the ledger's reference, and the stock move belongs to the same transaction.
+        await db.SaveChangesAsync(ct);
+        foreach (var l in ret.Lines)
+            await ledger.SaleReturnInAsync(l.PartId, l.Qty, uid, ret.Id, $"{ret.ReturnNo} ({sale.SaleNo})", ct);
+
+        audit.Log(uid, "spare-sale.return", "spare_sale", sale.Id,
+            details: $"{sale.SaleNo} — {ret.ReturnNo}, {ret.Lines.Sum(l => l.Qty)} unit(s) back: {ret.Reason}",
+            ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
 
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
     }
@@ -243,18 +369,37 @@ public static class SpareSalesEndpoints
         var createdBy = await db.Users.AsNoTracking().Where(u => u.Id == sale.CreatedByUserId)
             .Select(u => (string?)(u.FullName ?? u.Username)).FirstOrDefaultAsync(ct);
 
-        var lines = new List<SpareSaleLineDto>();
-        foreach (var l in sale.Lines.OrderBy(l => l.Id))
+        // Stock and returns are fetched for the whole sale at once. Asking per line meant a round trip
+        // per row every time a sale was opened.
+        var partIds = sale.Lines.Select(l => l.PartId).Distinct().ToList();
+        var availability = await new SpareSaleService(db).AvailabilityAsync(partIds, sale.Id, ct);
+
+        var returned = await (from rl in db.SpareSaleReturnLines.AsNoTracking()
+                              join r in db.SpareSaleReturns.AsNoTracking() on rl.SpareSaleReturnId equals r.Id
+                              where r.SpareSaleId == sale.Id
+                              group rl by rl.PartId into g
+                              select new { PartId = g.Key, Qty = g.Sum(x => x.Qty) })
+            .ToDictionaryAsync(x => x.PartId, x => x.Qty, ct);
+
+        var lines = sale.Lines.OrderBy(l => l.Id).Select(l =>
         {
-            var onHand = await db.StockBalances.AsNoTracking()
-                .Where(b => b.PartId == l.PartId && b.TechnicianId == StockBalance.Warehouse)
-                .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
-            lines.Add(new SpareSaleLineDto(
+            var a = availability.GetValueOrDefault(l.PartId, new PartAvailability(l.PartId, 0, 0));
+            return new SpareSaleLineDto(
                 l.Id, l.PartId, l.ItemCode, l.Description, l.HsnCode, l.Unit, l.Qty, l.RateType.ToString(),
                 pricing ? l.UnitRate : null, l.GstPercent,
                 pricing ? l.TaxableAmount : null, pricing ? l.TaxAmount : null, pricing ? l.LineTotal : null,
-                onHand));
-        }
+                a.OnHand, a.Available, returned.GetValueOrDefault(l.PartId));
+        }).ToList();
+
+        var returns = await db.SpareSaleReturns.AsNoTracking().Include(r => r.Lines)
+            .Where(r => r.SpareSaleId == sale.Id).OrderByDescending(r => r.Id).ToListAsync(ct);
+        var returnUserNames = await db.Users.AsNoTracking()
+            .Where(u => returns.Select(r => r.CreatedByUserId).Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.FullName ?? u.Username, ct);
+        var returnDtos = returns.Select(r => new SaleReturnDto(
+            r.Id, r.ReturnNo, r.ReturnDate, r.Reason,
+            returnUserNames.GetValueOrDefault(r.CreatedByUserId), r.CreatedAt,
+            r.Lines.OrderBy(l => l.Id).Select(l => new SaleReturnLineDto(l.PartId, l.ItemCode, l.Qty)).ToList())).ToList();
 
         return new SpareSaleDetailDto(
             sale.Id, sale.SaleNo, sale.SaleDate, sale.CustomerType, sale.DealerId, sale.CustomerId,
@@ -262,6 +407,6 @@ public static class SpareSalesEndpoints
             sale.Status.ToString(), sale.PaymentStatus.ToString(),
             sale.PiNo, sale.PiDate, sale.InvNo, sale.InvDate,
             pricing ? sale.TaxableAmount : null, pricing ? sale.TaxAmount : null, pricing ? sale.TotalAmount : null,
-            sale.Remarks, createdBy, sale.CreatedAt, lines);
+            sale.Remarks, createdBy, sale.CreatedAt, lines, returnDtos);
     }
 }

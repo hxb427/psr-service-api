@@ -28,6 +28,7 @@ public record MachineTestDto(
     string WarrantyStatus,          // IN | OUT | UNKNOWN
     DateTime? WarrantyExpiry,
     int? WarrantyMonths,
+    string? WarrantyMonthsSource,   // machine | dealer — which term produced the verdict
     List<MachineComponentDto> Components);
 
 public record MachineComponentDto(string Field, string Label, string Serial);
@@ -39,6 +40,7 @@ public record MachineCustomersDto(List<string> Customers);
 public record LegacyDealerRow(string Name, int? WarrantyMonths, string? Remarks);
 
 /// <summary>A distinct <c>passtestdata.Customer</c> value with how many machines carry it, plus the
-/// address off its most recent invoice (Address1 + Address2). The count separates real dealers
-/// (many units) from one-off direct customers (usually 1).</summary>
-public record LegacyCustomerRow(string Name, int MachineCount, string? Address);
+/// address and raw warranty text off its most recent invoice. The count separates real dealers
+/// (many units) from one-off direct customers (usually 1); the warranty text is the machine term
+/// this buyer was last sold on, which beats the house default as an import suggestion.</summary>
+public record LegacyCustomerRow(string Name, int MachineCount, string? Address, string? WarrantyText);

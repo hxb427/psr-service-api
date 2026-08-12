@@ -40,10 +40,16 @@ public class SpareSaleService(AppDbContext db)
             var (rateType, unitRate) = ResolveRate(part, lineReq, isDealer);
 
             askedPerPart[part.Id] = askedPerPart.GetValueOrDefault(part.Id) + lineReq.Qty;
-            var onHand = await WarehouseOnHandAsync(part.Id, ct);
-            if (askedPerPart[part.Id] > onHand)
+            // Checked against AVAILABLE, not raw on-hand: units already spoken for by other pending
+            // sales are not ours to sell. Without this two sales could each be entered for the last of
+            // something, both be marked paid, and the second only fail at invoicing — after the money.
+            var avail = await AvailabilityAsync(part.Id, sale.Id, ct);
+            if (askedPerPart[part.Id] > avail.Available)
                 throw new SaleValidationException(
-                    $"{part.ItemCode} — only {onHand} in warehouse stock, {askedPerPart[part.Id]} asked for.");
+                    $"{part.ItemCode} — {avail.Available} available, {askedPerPart[part.Id]} asked for"
+                    + (avail.Committed > 0
+                        ? $" ({avail.OnHand} in stock, {avail.Committed} on other pending sales)."
+                        : "."));
 
             var taxable = Math.Round(unitRate * lineReq.Qty, 2);
             var tax = Math.Round(taxable * part.GstPercent / 100m, 2);
@@ -134,4 +140,59 @@ public class SpareSaleService(AppDbContext db)
         db.StockBalances.AsNoTracking()
             .Where(b => b.PartId == partId && b.TechnicianId == StockBalance.Warehouse)
             .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
+
+    /// <summary>What a part's warehouse balance looks like to a sale being written.
+    ///
+    /// Stock only leaves on the invoice, so a pending sale holds nothing — but the units on it are
+    /// already promised to someone, and selling them twice is how a customer pays for goods that are
+    /// not there. Available treats every other pending sale as a claim. The sale being edited is
+    /// excluded so its own lines do not count against it (pass 0 for a sale not yet saved).</summary>
+    public async Task<PartAvailability> AvailabilityAsync(long partId, long excludeSaleId, CancellationToken ct)
+    {
+        var map = await AvailabilityAsync([partId], excludeSaleId, ct);
+        return map.GetValueOrDefault(partId, new PartAvailability(partId, 0, 0));
+    }
+
+    /// <summary>Availability for many parts in two queries rather than two per part.</summary>
+    public async Task<Dictionary<long, PartAvailability>> AvailabilityAsync(
+        IReadOnlyCollection<long> partIds, long excludeSaleId, CancellationToken ct)
+    {
+        if (partIds.Count == 0) return new Dictionary<long, PartAvailability>();
+
+        var onHand = await db.StockBalances.AsNoTracking()
+            .Where(b => b.TechnicianId == StockBalance.Warehouse && partIds.Contains(b.PartId))
+            .ToDictionaryAsync(b => b.PartId, b => b.OnHand, ct);
+
+        var committed = await CommittedQuery(db, partIds, excludeSaleId)
+            .ToDictionaryAsync(x => x.PartId, x => x.Qty, ct);
+
+        return partIds.Distinct().ToDictionary(
+            id => id,
+            id => new PartAvailability(id, onHand.GetValueOrDefault(id), committed.GetValueOrDefault(id)));
+    }
+
+    /// <summary>Units of each part already claimed by other pending sales. Grouped in SQL — pulling the
+    /// lines back to sum them in memory would drag every pending sale line across for one lookup.
+    /// Exposed so a test can force the provider to translate it. Cancelled and invoiced sales are
+    /// excluded: the first never ships, the second has already taken its stock.</summary>
+    public static IQueryable<PartCommitment> CommittedQuery(
+        AppDbContext db, IReadOnlyCollection<long> partIds, long excludeSaleId) =>
+        from l in db.SpareSaleLines.AsNoTracking()
+        join s in db.SpareSales.AsNoTracking() on l.SpareSaleId equals s.Id
+        where partIds.Contains(l.PartId)
+              && !s.IsDeleted
+              && s.Status == SpareSaleStatus.Pending
+              && s.Id != excludeSaleId
+        group l by l.PartId into g
+        select new PartCommitment(g.Key, g.Sum(x => x.Qty));
+}
+
+public record PartCommitment(long PartId, int Qty);
+
+/// <summary>A part's warehouse position from a sale's point of view. Available can go negative if stock
+/// was adjusted down under sales that were already entered — reported as-is rather than clamped, because
+/// a negative is exactly the shortfall someone has to resolve.</summary>
+public readonly record struct PartAvailability(long PartId, int OnHand, int Committed)
+{
+    public int Available => OnHand - Committed;
 }

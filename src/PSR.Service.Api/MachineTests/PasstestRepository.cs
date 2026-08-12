@@ -33,7 +33,10 @@ public class PasstestRepository(
 
     public bool Configured => !string.IsNullOrWhiteSpace(_opt.ConnectionString);
 
-    public async Task<MachineTestDto?> FindBySerialAsync(string serial, int? warrantyMonths, CancellationToken ct)
+    /// <summary><paramref name="fallbackMonths"/> is only used when the machine's own row carries no
+    /// warranty term. passtestdata.Warranty is per-machine — what was actually sold — so it outranks
+    /// the dealer's blanket term and the house default.</summary>
+    public async Task<MachineTestDto?> FindBySerialAsync(string serial, int? fallbackMonths, CancellationToken ct)
     {
         var sn = serial.Trim();
         if (sn.Length == 0 || !Configured) return null;
@@ -44,7 +47,7 @@ public class PasstestRepository(
             row = await FetchRowAsync(sn, ct);
             if (row is not null) cache.Set(cacheKey, row, TimeSpan.FromMinutes(_opt.SerialCacheMinutes));
         }
-        return row is null ? null : Map(row, warrantyMonths);
+        return row is null ? null : Map(row, fallbackMonths);
     }
 
     public async Task<List<string>> CustomersAsync(CancellationToken ct)
@@ -132,7 +135,11 @@ public class PasstestRepository(
                 "SUBSTRING_INDEX(GROUP_CONCAT(" +
                 "  CONCAT_WS(', ', NULLIF(TRIM(Address1), ''), NULLIF(TRIM(Address2), '')) " +
                 "  ORDER BY (CONCAT_WS('', TRIM(Address1), TRIM(Address2)) <> '') DESC, InvDate DESC " +
-                "  SEPARATOR '~|~'), '~|~', 1) AS addr " +
+                "  SEPARATOR '~|~'), '~|~', 1) AS addr, " +
+                "SUBSTRING_INDEX(GROUP_CONCAT(" +
+                "  IFNULL(TRIM(Warranty), '') " +
+                "  ORDER BY (TRIM(IFNULL(Warranty, '')) <> '') DESC, InvDate DESC " +
+                "  SEPARATOR '~|~'), '~|~', 1) AS warr " +
                 "FROM passtestdata " +
                 "WHERE Customer IS NOT NULL AND TRIM(Customer) <> '' " +
                 "GROUP BY TRIM(Customer) ORDER BY machines DESC";
@@ -143,8 +150,10 @@ public class PasstestRepository(
             {
                 if (reader.IsDBNull(0)) continue;
                 var addr = reader.IsDBNull(2) ? null : reader.GetString(2).Trim();
+                var warr = reader.IsDBNull(3) ? null : reader.GetString(3).Trim();
                 list.Add(new LegacyCustomerRow(
-                    reader.GetString(0), reader.GetInt32(1), addr?.Length > 0 ? addr : null));
+                    reader.GetString(0), reader.GetInt32(1),
+                    addr?.Length > 0 ? addr : null, warr?.Length > 0 ? warr : null));
             }
             return list;
         }
@@ -172,7 +181,15 @@ public class PasstestRepository(
 
             var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             for (var i = 0; i < reader.FieldCount; i++)
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? "" : reader.GetValue(i)?.ToString() ?? "";
+            {
+                if (reader.IsDBNull(i)) { row[reader.GetName(i)] = ""; continue; }
+                var value = reader.GetValue(i);
+                // Dates go in ISO, not the host's culture: a DATE stringified as "01/02/2024" is
+                // unreadable — 1 Feb or 2 Jan depending on where the container happens to run.
+                row[reader.GetName(i)] = value is DateTime dt
+                    ? dt.ToString("yyyy-MM-dd")
+                    : value?.ToString() ?? "";
+            }
 
             row["__matchedField"] = SerialColumns.FirstOrDefault(c =>
                 row.TryGetValue(c, out var v) && string.Equals(v.Trim(), sn, StringComparison.OrdinalIgnoreCase)) ?? "";
@@ -192,11 +209,11 @@ public class PasstestRepository(
         return conn;
     }
 
-    private static MachineTestDto Map(Dictionary<string, string> row, int? warrantyMonths)
+    private static MachineTestDto Map(Dictionary<string, string> row, int? fallbackMonths)
     {
         string? Get(string k) => row.TryGetValue(k, out var v) && v.Trim().Length > 0 ? v.Trim() : null;
 
-        var invDate = DateTime.TryParse(Get("InvDate"), out var d) ? d : (DateTime?)null;
+        var invDate = ParseLegacyDate(Get("InvDate"));
         var matched = Get("__matchedField");
 
         var components = ComponentMap
@@ -207,18 +224,65 @@ public class PasstestRepository(
 
         var addr = string.Join(", ", new[] { Get("Address1"), Get("Address2") }.Where(s => s is not null));
 
+        // The machine's own term wins: it is what was sold with this unit. The dealer term (or the
+        // house default) only answers for units whose row has no warranty figure.
+        var machineMonths = ParseWarrantyMonths(Get("Warranty"));
+        var months = machineMonths ?? fallbackMonths;
+        var source = machineMonths is not null ? "machine" : months is not null ? "dealer" : null;
+
         string status = "UNKNOWN";
         DateTime? expiry = null;
-        if (invDate is { } inv && warrantyMonths is { } months && months > 0)
+        if (invDate is { } inv && months is { } m && m > 0)
         {
-            expiry = inv.AddMonths(months);
-            status = DateTime.UtcNow.Date <= expiry.Value.Date ? "IN" : "OUT";
+            expiry = inv.AddMonths(m);
+            // Whole months elapsed, matching the legacy dialog: the anniversary of the invoice is the
+            // first day OUT, not the last day IN.
+            var today = DateTime.UtcNow.Date;
+            var elapsed = ((today.Year - inv.Year) * 12) + (today.Month - inv.Month);
+            if (today.Day < inv.Day) elapsed--;
+            status = elapsed < m ? "IN" : "OUT";
         }
 
         return new MachineTestDto(
             Get("m_model"), Get("m_ser_no"),
             matched, matched is null ? null : ComponentMap.FirstOrDefault(c => c.Field == matched).Label ?? "Machine",
             invDate, Get("Customer"), addr.Length > 0 ? addr : null,
-            status, expiry, warrantyMonths, components);
+            status, expiry, months, source, components);
+    }
+
+    /// <summary>Warranty months out of the legacy free-text <c>Warranty</c> column. It is a VARCHAR
+    /// filled in by hand, so it holds "24", "12 months" and "15/r" alike — the "/r" suffix marks a
+    /// replacement unit and the months are the part before the slash. Mirrors the old app's parse so
+    /// the same row yields the same verdict in both.</summary>
+    public static int? ParseWarrantyMonths(string? raw)
+    {
+        var s = raw?.Trim();
+        if (string.IsNullOrEmpty(s)) return null;
+
+        if (s.Contains('/'))
+            return int.TryParse(s.Split('/')[0].Trim(), out var slashed) && slashed > 0 ? slashed : null;
+
+        var digits = System.Text.RegularExpressions.Regex.Match(s, @"\d+");
+        return digits.Success && int.TryParse(digits.Value, out var n) && n > 0 ? n : null;
+    }
+
+    /// <summary>Invoice (purchase) date. A real DATE column arrives ISO from FetchRowAsync, but the
+    /// field has held free text too, so read it the way the old app did: four leading digits mean
+    /// y-m-d, anything else is the Indian d-m-y it was typed in. Deliberately not DateTime.TryParse —
+    /// that reads "01/02/2024" as 2 January under the invariant culture, and this data means
+    /// 1 February. Guessing the wrong way round moves a warranty verdict by months.</summary>
+    public static DateTime? ParseLegacyDate(string? raw)
+    {
+        var s = raw?.Trim();
+        if (string.IsNullOrEmpty(s)) return null;
+
+        var parts = s.Split(' ')[0].Split('/', '-');   // drop any time component
+        if (parts.Length != 3) return null;
+        if (!int.TryParse(parts[0], out var p0) || !int.TryParse(parts[1], out var p1)
+            || !int.TryParse(parts[2], out var p2)) return null;
+
+        var (year, month, day) = parts[0].Length == 4 ? (p0, p1, p2) : (p2, p1, p0);
+        try { return new DateTime(year, month, day); }
+        catch (ArgumentOutOfRangeException) { return null; }
     }
 }

@@ -74,3 +74,47 @@ public class SpareSaleLineConfiguration : IEntityTypeConfiguration<SpareSaleLine
         b.HasIndex(x => x.PartId);
     }
 }
+
+public class SpareSaleReturnConfiguration : IEntityTypeConfiguration<SpareSaleReturn>
+{
+    public void Configure(EntityTypeBuilder<SpareSaleReturn> b)
+    {
+        b.ToTable("spare_sale_returns");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.SpareSaleId).HasColumnName("spare_sale_id");
+        b.Property(x => x.ReturnNo).HasColumnName("return_no").HasMaxLength(40).IsRequired();
+        b.HasIndex(x => x.ReturnNo).IsUnique();
+        b.Property(x => x.ReturnDate).HasColumnName("return_date");
+        b.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(500).IsRequired();
+        b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+        b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+
+        // Restrict, not Cascade: an invoiced sale cannot be deleted anyway, and a return that
+        // disappeared with its sale would leave the stock it put back unexplained.
+        b.HasOne<SpareSale>().WithMany().HasForeignKey(x => x.SpareSaleId).OnDelete(DeleteBehavior.Restrict);
+        b.HasMany(x => x.Lines).WithOne(l => l.Return).HasForeignKey(l => l.SpareSaleReturnId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        b.HasIndex(x => x.SpareSaleId);
+    }
+}
+
+public class SpareSaleReturnLineConfiguration : IEntityTypeConfiguration<SpareSaleReturnLine>
+{
+    public void Configure(EntityTypeBuilder<SpareSaleReturnLine> b)
+    {
+        b.ToTable("spare_sale_return_lines");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.SpareSaleReturnId).HasColumnName("spare_sale_return_id");
+        b.Property(x => x.PartId).HasColumnName("part_id");
+        b.Property(x => x.ItemCode).HasColumnName("item_code").HasMaxLength(50).IsRequired();
+        b.Property(x => x.Qty).HasColumnName("qty");
+
+        b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+        b.HasIndex(x => x.SpareSaleReturnId);
+        b.HasIndex(x => x.PartId);
+    }
+}

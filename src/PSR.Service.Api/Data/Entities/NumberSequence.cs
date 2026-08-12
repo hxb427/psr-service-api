@@ -24,6 +24,7 @@ public static class SequenceKeys
 
     // Counter/spare sales of warehouse stock (legacy sparesales).
     public const string SpareSale = "SPARE_SALE";
+    public const string SpareSaleReturn = "SPARE_SALE_RETURN";
 
     // Phase 5 — year-scoped document numbers (clean sequential, reset each year).
     public const string ProformaInvoice = "PI";

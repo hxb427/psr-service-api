@@ -140,15 +140,21 @@ public static class DealersEndpoints
         {
             var key = DealerNameKey.Normalize(row.Name);
             if (key.Length == 0 || existingKeys.ContainsKey(key)) continue;
+            // The term this buyer's machines were last sold on — a real figure, so it beats the house
+            // default. dealer_warranty still wins where it has one: that is the negotiated term.
+            var machineMonths = PasstestRepository.ParseWarrantyMonths(row.WarrantyText);
+
             byKey[key] = byKey.TryGetValue(key, out var hit)
                 ? hit with
                 {
                     Source = "both",
                     MachineCount = hit.MachineCount + row.MachineCount,
                     Address = hit.Address ?? row.Address,
+                    WarrantyMonths = hit.WarrantyMonths ?? machineMonths,
                 }
                 : new DealerImportCandidateDto(
-                    DealerNameKey.Clean(row.Name), null, row.Address, null, "passtestdata", row.MachineCount, null);
+                    DealerNameKey.Clean(row.Name), machineMonths, row.Address, null,
+                    "passtestdata", row.MachineCount, null);
         }
 
         // passtestdata carries no warranty term, so fall back to the admin's default rather than
