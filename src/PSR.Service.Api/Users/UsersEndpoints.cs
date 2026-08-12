@@ -13,7 +13,9 @@ public static class UsersEndpoints
 {
     public static IEndpointRouteBuilder MapUserEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/users").WithTags("users").RequireAuthorization("Admin");
+        // Admin, manager and supervisor all get in; UserHierarchy decides per target what each of
+        // them may see and change. Every handler below asks — the policy alone is not the answer.
+        var group = app.MapGroup("/users").WithTags("users").RequireAuthorization("UserManage");
 
         group.MapGet("/", ListAsync);
         group.MapGet("/{id:long}", GetAsync);
@@ -28,7 +30,7 @@ public static class UsersEndpoints
     }
 
     private static async Task<Ok<List<UserListItemDto>>> ListAsync(
-        AppDbContext db, string? role, CancellationToken ct)
+        ClaimsPrincipal principal, AppDbContext db, string? role, CancellationToken ct)
     {
         var query = db.Users
             .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
@@ -43,14 +45,24 @@ public static class UsersEndpoints
             users = users.Where(u => u.UserRoles.Any(ur =>
                 string.Equals(ur.Role.Name, role, StringComparison.OrdinalIgnoreCase))).ToList();
 
-        return TypedResults.Ok(users.Select(ToListItem).ToList());
+        // A supervisor's list simply does not contain managers or other supervisors.
+        var actorRank = UserHierarchy.RankOf(principal);
+        users = users.Where(u => UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(u))).ToList();
+
+        return TypedResults.Ok(users.Select(u => ToListItem(u, actorRank)).ToList());
     }
 
     private static async Task<Results<Ok<UserDetailDto>, NotFound>> GetAsync(
-        long id, AppDbContext db, CancellationToken ct)
+        long id, ClaimsPrincipal principal, AppDbContext db, CancellationToken ct)
     {
         var user = await LoadAsync(db, id, ct);
-        return user is null ? TypedResults.NotFound() : TypedResults.Ok(ToDetail(user));
+        if (user is null) return TypedResults.NotFound();
+
+        // 404 rather than 403: an account a supervisor may not see should not be confirmed to exist.
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+
+        return TypedResults.Ok(ToDetail(user, actorRank));
     }
 
     private static async Task<Results<Created<UserDetailDto>, Conflict<string>, BadRequest<string>, ValidationProblem>>
@@ -67,6 +79,11 @@ public static class UsersEndpoints
             return TypedResults.BadRequest("One or more roles are invalid.");
         if (roles.Count == 0)
             return TypedResults.BadRequest("At least one role is required.");
+
+        // Creating is granting: without this a supervisor could mint an admin account and log into it.
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (roles.FirstOrDefault(r => !UserHierarchy.CanGrant(actorRank, r.Name)) is { } tooHigh)
+            return TypedResults.BadRequest($"You cannot grant the '{tooHigh.Name}' role.");
 
         var username = req.Username.Trim();
         if (await db.Users.AnyAsync(u => u.Username == username, ct))
@@ -94,10 +111,10 @@ public static class UsersEndpoints
         await db.SaveChangesAsync(ct);
 
         var created = await LoadAsync(db, user.Id, ct);
-        return TypedResults.Created($"/users/{user.Id}", ToDetail(created!));
+        return TypedResults.Created($"/users/{user.Id}", ToDetail(created!, actorRank));
     }
 
-    private static async Task<Results<Ok<UserDetailDto>, NotFound, ValidationProblem>> UpdateAsync(
+    private static async Task<Results<Ok<UserDetailDto>, NotFound, ForbidHttpResult, ValidationProblem>> UpdateAsync(
         long id,
         [FromBody] UpdateUserRequest req,
         ClaimsPrincipal principal,
@@ -109,6 +126,10 @@ public static class UsersEndpoints
         var user = await LoadAsync(db, id, ct);
         if (user is null) return TypedResults.NotFound();
 
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+        if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
+
         user.FullName = req.FullName?.Trim();
         user.Email = req.Email?.Trim();
         user.IsFieldTechnician = req.IsFieldTechnician;
@@ -117,10 +138,10 @@ public static class UsersEndpoints
         audit.Log(actorId, "user.update", "user", id, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
-        return TypedResults.Ok(ToDetail(user));
+        return TypedResults.Ok(ToDetail(user, actorRank));
     }
 
-    private static async Task<Results<NoContent, NotFound, ValidationProblem>> ResetPasswordAsync(
+    private static async Task<Results<NoContent, NotFound, ForbidHttpResult, ValidationProblem>> ResetPasswordAsync(
         long id,
         [FromBody] ResetPasswordRequest req,
         ClaimsPrincipal principal,
@@ -130,8 +151,14 @@ public static class UsersEndpoints
         HttpContext http,
         CancellationToken ct)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
+        // Loaded with roles: resetting someone's password is taking their account, so it needs the
+        // same rank check as deactivating them.
+        var user = await LoadAsync(db, id, ct);
         if (user is null) return TypedResults.NotFound();
+
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+        if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
 
         user.PasswordHash = PasswordHasher.Hash(req.NewPassword);
         user.MustChangePassword = true;
@@ -146,12 +173,16 @@ public static class UsersEndpoints
         return TypedResults.NoContent();
     }
 
-    private static async Task<Results<NoContent, NotFound>> ActivateAsync(
+    private static async Task<Results<NoContent, NotFound, ForbidHttpResult>> ActivateAsync(
         long id, ClaimsPrincipal principal, AppDbContext db, IAuditService audit,
         HttpContext http, CancellationToken ct)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
+        var user = await LoadAsync(db, id, ct);
         if (user is null) return TypedResults.NotFound();
+
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+        if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
 
         user.IsActive = true;
         principal.TryGetUserId(out var actorId);
@@ -161,17 +192,22 @@ public static class UsersEndpoints
         return TypedResults.NoContent();
     }
 
-    private static async Task<Results<NoContent, NotFound, BadRequest<string>>> DeactivateAsync(
+    private static async Task<Results<NoContent, NotFound, ForbidHttpResult, BadRequest<string>>> DeactivateAsync(
         long id, ClaimsPrincipal principal, AppDbContext db, IAuditService audit,
         UserTokenVersionCache tvCache, HttpContext http, CancellationToken ct)
     {
         var user = await LoadAsync(db, id, ct);
         if (user is null) return TypedResults.NotFound();
 
+        // The rule this whole hierarchy exists for: a manager must not be able to disable an admin.
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+        if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
+
         principal.TryGetUserId(out var actorId);
         if (actorId == id)
             return TypedResults.BadRequest("You cannot deactivate your own account.");
- 
+
         if (IsAdmin(user) && !await OtherActiveAdminExistsAsync(db, id, ct))
             return TypedResults.BadRequest("Cannot deactivate the last active admin.");
 
@@ -184,7 +220,7 @@ public static class UsersEndpoints
         return TypedResults.NoContent();
     }
 
-    private static async Task<Results<Ok<UserDetailDto>, NotFound, BadRequest<string>>> ReplaceRolesAsync(
+    private static async Task<Results<Ok<UserDetailDto>, NotFound, ForbidHttpResult, BadRequest<string>>> ReplaceRolesAsync(
         long id,
         [FromBody] AssignRolesRequest req,
         ClaimsPrincipal principal,
@@ -196,11 +232,19 @@ public static class UsersEndpoints
         var user = await LoadAsync(db, id, ct);
         if (user is null) return TypedResults.NotFound();
 
+        var actorRank = UserHierarchy.RankOf(principal);
+        if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
+        if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
+
         var roles = await ResolveRolesAsync(db, req.Roles, ct);
         if (roles is null)
             return TypedResults.BadRequest("One or more roles are invalid.");
         if (roles.Count == 0)
             return TypedResults.BadRequest("At least one role is required.");
+
+        // Two separate ceilings: outranking the target is not permission to promote them past yourself.
+        if (roles.FirstOrDefault(r => !UserHierarchy.CanGrant(actorRank, r.Name)) is { } tooHigh)
+            return TypedResults.BadRequest($"You cannot grant the '{tooHigh.Name}' role.");
 
         var willBeAdmin = roles.Any(r => r.Name == RoleNames.Admin);
         if (IsAdmin(user) && !willBeAdmin && !await OtherActiveAdminExistsAsync(db, id, ct))
@@ -218,7 +262,7 @@ public static class UsersEndpoints
         await db.SaveChangesAsync(ct);
 
         var reloaded = await LoadAsync(db, id, ct);
-        return TypedResults.Ok(ToDetail(reloaded!));
+        return TypedResults.Ok(ToDetail(reloaded!, actorRank));
     }
 
     // ---- helpers ----
@@ -254,11 +298,13 @@ public static class UsersEndpoints
         return matched.Count == names.Count ? matched : null;
     }
 
-    private static UserListItemDto ToListItem(User u) => new(
+    private static UserListItemDto ToListItem(User u, int actorRank) => new(
         u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.IsFieldTechnician, u.MustChangePassword, u.LastLoginAt,
-        u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray());
+        u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray(),
+        UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(u)));
 
-    private static UserDetailDto ToDetail(User u) => new(
+    private static UserDetailDto ToDetail(User u, int actorRank) => new(
         u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.IsFieldTechnician, u.MustChangePassword, u.LastLoginAt, u.CreatedAt,
-        u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray());
+        u.UserRoles.Select(ur => ur.Role.Name).OrderBy(n => n).ToArray(),
+        UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(u)));
 }

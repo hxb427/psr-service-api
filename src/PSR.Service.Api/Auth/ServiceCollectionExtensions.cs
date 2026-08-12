@@ -40,6 +40,10 @@ public static class ServiceCollectionExtensions
         services.AddAuthorization(options =>
         {
             options.AddPolicy("Admin", p => p.RequireRole(RoleNames.Admin));
+            // Reaches the user-management pages. Which accounts each of these may actually see or
+            // change is decided per target by UserHierarchy — this policy is only the front door.
+            options.AddPolicy("UserManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("StockView", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.StoreManager));
             options.AddPolicy("StockManage", p => p.RequireRole(

@@ -11,7 +11,10 @@ public record UserListItemDto(
     bool IsFieldTechnician,
     bool MustChangePassword,
     DateTime? LastLoginAt,
-    string[] Roles);
+    string[] Roles,
+    /// <summary>Whether the caller outranks this account. The desktop app greys its row actions off
+    /// this instead of re-deriving the hierarchy client-side and drifting from the server.</summary>
+    bool CanManage);
 
 public record UserDetailDto(
     long Id,
@@ -23,7 +26,8 @@ public record UserDetailDto(
     bool MustChangePassword,
     DateTime? LastLoginAt,
     DateTime CreatedAt,
-    string[] Roles);
+    string[] Roles,
+    bool CanManage);
 
 public record CreateUserRequest(
     [Required, StringLength(50, MinimumLength = 3)] string Username,
