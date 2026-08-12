@@ -44,3 +44,36 @@ public record LegacyDealerRow(string Name, int? WarrantyMonths, string? Remarks)
 /// (many units) from one-off direct customers (usually 1); the warranty text is the machine term
 /// this buyer was last sold on, which beats the house default as an import suggestion.</summary>
 public record LegacyCustomerRow(string Name, int MachineCount, string? Address, string? WarrantyText);
+
+/// <summary>One passtestdata row exactly as stored — every column, in column order, stringified.
+/// Backs the SN Info page, which shows the whole row rather than the curated warranty subset.</summary>
+public record MachineRawRow(List<KeyValuePair<string, string>> Cells)
+{
+    public string? Get(string column)
+    {
+        foreach (var c in Cells)
+            if (string.Equals(c.Key, column, StringComparison.OrdinalIgnoreCase))
+                return c.Value.Trim() is { Length: > 0 } v ? v : null;
+        return null;
+    }
+}
+
+/// <summary>One column of a passtestdata row, ready to display.</summary>
+public record MachineFieldDto(string Column, string Label, string? Value);
+
+/// <summary>A passtestdata row for the SN Info page: a few fields lifted out so a result list can be
+/// rendered, the computed warranty, and then the complete row in column order.</summary>
+public record MachineRecordDto(
+    string? MachineSerial,
+    string? Model,
+    string? Customer,
+    DateTime? InvoiceDate,
+    string? MatchedField,
+    string? MatchedLabel,
+    string? MatchedValue,
+    int? WarrantyMonths,
+    DateTime? WarrantyExpiry,
+    string WarrantyStatus,          // IN | OUT | UNKNOWN
+    List<MachineFieldDto> Fields);
+
+public record MachineSearchDto(List<MachineRecordDto> Records, int Limit, bool Truncated);

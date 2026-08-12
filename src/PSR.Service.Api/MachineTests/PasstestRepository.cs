@@ -164,6 +164,62 @@ public class PasstestRepository(
         }
     }
 
+    /// <summary>Rows whose serial, customer or model contains <paramref name="term"/>, newest invoice
+    /// first. Backs the SN Info page, so it returns whole rows in column order — a partial match can
+    /// land on any of the eighteen serial columns and the point of the page is to show which.
+    /// Uncached: a search is expected to reflect the server as it is now. Null on failure.</summary>
+    public async Task<List<MachineRawRow>?> SearchAsync(string term, int limit, CancellationToken ct)
+    {
+        var q = term.Trim();
+        if (q.Length == 0 || !Configured) return null;
+
+        try
+        {
+            await using var conn = await OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandTimeout = _opt.ScanTimeoutSeconds;
+
+            // Column list is a fixed allowlist; only the term is user input, and it is parameterised.
+            var cols = SerialColumns.Concat(["Customer", "m_model"]);
+            var where = string.Join(" OR ", cols.Select(c => $"`{c}` LIKE @q"));
+            cmd.CommandText = $"SELECT * FROM passtestdata WHERE {where} ORDER BY InvDate DESC LIMIT {limit}";
+            cmd.Parameters.AddWithValue("@q", $"%{Escape(q)}%");
+
+            var rows = new List<MachineRawRow>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) rows.Add(new MachineRawRow(ReadCells(reader)));
+            return rows;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Passtest search failed for {Term}", q);
+            return null;
+        }
+    }
+
+    /// <summary>LIKE wildcards typed into the search box are literal characters, not operators — a
+    /// bare "%" would otherwise match every row in the table.</summary>
+    private static string Escape(string s) =>
+        s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+    /// <summary>Every column of the current row, in column order. Dates go in ISO rather than the
+    /// host's culture: a DATE stringified as "01/02/2024" is unreadable — 1 Feb or 2 Jan depending
+    /// on where the container happens to run.</summary>
+    private static List<KeyValuePair<string, string>> ReadCells(System.Data.Common.DbDataReader reader)
+    {
+        var cells = new List<KeyValuePair<string, string>>(reader.FieldCount);
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            var value = reader.IsDBNull(i) ? "" : reader.GetValue(i) switch
+            {
+                DateTime dt => dt.ToString("yyyy-MM-dd"),
+                var v => v?.ToString() ?? "",
+            };
+            cells.Add(new KeyValuePair<string, string>(reader.GetName(i), value));
+        }
+        return cells;
+    }
+
     private async Task<Dictionary<string, string>?> FetchRowAsync(string sn, CancellationToken ct)
     {
         try
@@ -180,16 +236,7 @@ public class PasstestRepository(
             if (!await reader.ReadAsync(ct)) return null;
 
             var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                if (reader.IsDBNull(i)) { row[reader.GetName(i)] = ""; continue; }
-                var value = reader.GetValue(i);
-                // Dates go in ISO, not the host's culture: a DATE stringified as "01/02/2024" is
-                // unreadable — 1 Feb or 2 Jan depending on where the container happens to run.
-                row[reader.GetName(i)] = value is DateTime dt
-                    ? dt.ToString("yyyy-MM-dd")
-                    : value?.ToString() ?? "";
-            }
+            foreach (var cell in ReadCells(reader)) row[cell.Key] = cell.Value;
 
             row["__matchedField"] = SerialColumns.FirstOrDefault(c =>
                 row.TryGetValue(c, out var v) && string.Equals(v.Trim(), sn, StringComparison.OrdinalIgnoreCase)) ?? "";

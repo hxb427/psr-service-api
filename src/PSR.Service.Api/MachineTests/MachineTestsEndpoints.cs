@@ -16,8 +16,31 @@ public static class MachineTestsEndpoints
 
         group.MapGet("/by-serial/{serial}", BySerialAsync);
         group.MapGet("/customers", CustomersAsync);
+        group.MapGet("/search", SearchAsync);
 
         return app;
+    }
+
+    /// <summary>Partial search over passtestdata for the SN Info page: matches any serial column, the
+    /// customer or the model, and returns the whole row for each hit so the page can show every field
+    /// without a second round trip. 503 when the passtest source is unreachable.</summary>
+    private static async Task<Results<Ok<MachineSearchDto>, BadRequest<string>, StatusCodeHttpResult>> SearchAsync(
+        string? q, int? limit, PasstestRepository passtest, CancellationToken ct)
+    {
+        if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var term = q?.Trim() ?? "";
+        // Two characters would match a large slice of the table and the page would be unusable.
+        if (term.Length < 3) return TypedResults.BadRequest("Enter at least 3 characters to search.");
+
+        var take = Math.Clamp(limit ?? 50, 1, 200);
+        // One extra row is fetched purely to know whether the cap hid anything.
+        var rows = await passtest.SearchAsync(term, take + 1, ct);
+        if (rows is null) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var truncated = rows.Count > take;
+        var records = rows.Take(take).Select(r => MachineRecordMapper.Map(r, term)).ToList();
+        return TypedResults.Ok(new MachineSearchDto(records, take, truncated));
     }
 
     /// <summary>Resolve a unit by any of its serials. Warranty is InvDate + warranty months; the months
