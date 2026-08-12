@@ -10,7 +10,14 @@ public class AppSetting
 
 public static class SettingKeys
 {
+    /// <summary>Whether a tax invoice may be raised against SERVICE jobs. Kept under its original key
+    /// so an existing setting keeps its meaning.</summary>
     public const string InvoiceGenerationEnabled = "invoice_generation_enabled";
+
+    /// <summary>Whether a tax invoice may be raised against SPARE SALES. Separate from the service
+    /// switch because the two are different books — stopping counter-sale billing while service billing
+    /// continues (or the reverse) is the whole point of having a switch.</summary>
+    public const string SaleInvoiceGenerationEnabled = "sale_invoice_generation_enabled";
 
     /// <summary>Oldest WPF client version allowed to talk to this API. Clients below it get
     /// 426 Upgrade Required on everything except /health and /app-version, which is what makes a

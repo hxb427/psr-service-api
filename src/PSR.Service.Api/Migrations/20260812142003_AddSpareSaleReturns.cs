@@ -70,6 +70,13 @@ namespace PSR.Service.Api.Migrations
                 })
                 .Annotation("MySql:CharSet", "utf8mb4");
 
+            // Without this row NumberSequenceService throws on the first return — the tables exist but
+            // nothing can be numbered, which surfaces as a 500.
+            migrationBuilder.InsertData(
+                table: "number_sequences",
+                columns: new[] { "key", "next_value", "prefix", "year" },
+                values: new object[] { "SPARE_SALE_RETURN", 1L, "SRT", null });
+
             migrationBuilder.CreateIndex(
                 name: "IX_spare_sale_return_lines_part_id",
                 table: "spare_sale_return_lines",
@@ -100,6 +107,11 @@ namespace PSR.Service.Api.Migrations
 
             migrationBuilder.DropTable(
                 name: "spare_sale_returns");
+
+            migrationBuilder.DeleteData(
+                table: "number_sequences",
+                keyColumn: "key",
+                keyValue: "SPARE_SALE_RETURN");
         }
     }
 }

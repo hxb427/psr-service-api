@@ -14,7 +14,9 @@ public class AppSettingConfiguration : IEntityTypeConfiguration<AppSetting>
         b.Property(x => x.Value).HasColumnName("value").HasMaxLength(255).IsRequired();
 
         // Invoice generation is allowed by default; an admin can switch it off.
-        b.HasData(new AppSetting { Key = SettingKeys.InvoiceGenerationEnabled, Value = "true" });
+        b.HasData(
+            new AppSetting { Key = SettingKeys.InvoiceGenerationEnabled, Value = "true" },
+            new AppSetting { Key = SettingKeys.SaleInvoiceGenerationEnabled, Value = "true" });
 
         // No version floor until an admin sets one — 0.0.0 lets every client through.
         b.HasData(new AppSetting { Key = SettingKeys.MinClientVersion, Value = "0.0.0" });

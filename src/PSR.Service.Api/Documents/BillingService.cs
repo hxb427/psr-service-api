@@ -195,8 +195,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             throw new BillingException($"Unknown document type '{req.DocType}'. Use PI or Invoice.");
         if (docType == DocumentType.DC)
             throw new BillingException("A delivery challan is not issued for a spare sale — generate the PI or the tax invoice.");
-        if (docType == DocumentType.Invoice && !await settings.InvoiceGenerationEnabledAsync(ct))
-            throw new BillingException("Invoice generation is currently disabled by an administrator.");
+        // The SALE switch, not the service one — the two books are gated independently.
+        if (docType == DocumentType.Invoice && !await settings.SaleInvoiceGenerationEnabledAsync(ct))
+            throw new BillingException("Sale invoice generation is currently disabled by an administrator.");
 
         // Tracked, not AsNoTracking — GenerateSaleAsync stamps the document number back onto this row.
         var sale = await db.SpareSales.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == req.SaleId && !s.IsDeleted, ct)

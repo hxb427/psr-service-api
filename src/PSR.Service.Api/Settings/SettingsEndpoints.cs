@@ -10,8 +10,17 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Settings;
 
-public record AppSettingsDto(bool InvoiceGenerationEnabled, string MinClientVersion, int DefaultWarrantyMonths);
-public record UpdateAppSettingsRequest(bool InvoiceGenerationEnabled, string? MinClientVersion, int? DefaultWarrantyMonths);
+/// <summary><paramref name="InvoiceGenerationEnabled"/> governs SERVICE invoices and keeps its original
+/// name so an older client reading this payload still gates the right thing.</summary>
+public record AppSettingsDto(
+    bool InvoiceGenerationEnabled, bool SaleInvoiceGenerationEnabled,
+    string MinClientVersion, int DefaultWarrantyMonths);
+
+/// <summary>Null fields are left untouched, which is what lets an older client that does not know about
+/// the sale switch save the settings it does know without silently turning the other one off.</summary>
+public record UpdateAppSettingsRequest(
+    bool InvoiceGenerationEnabled, bool? SaleInvoiceGenerationEnabled,
+    string? MinClientVersion, int? DefaultWarrantyMonths);
 
 /// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
 /// floor. Served on /app-version, which the version gate exempts.</summary>
@@ -47,6 +56,9 @@ public class AppSettingsService(AppDbContext db)
     public Task<bool> InvoiceGenerationEnabledAsync(CancellationToken ct)
         => GetBoolAsync(SettingKeys.InvoiceGenerationEnabled, true, ct);
 
+    public Task<bool> SaleInvoiceGenerationEnabledAsync(CancellationToken ct)
+        => GetBoolAsync(SettingKeys.SaleInvoiceGenerationEnabled, true, ct);
+
     public Task<string> MinClientVersionAsync(CancellationToken ct)
         => GetStringAsync(SettingKeys.MinClientVersion, "0.0.0", ct);
 
@@ -80,6 +92,7 @@ public static class SettingsEndpoints
     private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
         => TypedResults.Ok(new AppSettingsDto(
             await settings.InvoiceGenerationEnabledAsync(ct),
+            await settings.SaleInvoiceGenerationEnabledAsync(ct),
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct)));
 
@@ -106,6 +119,8 @@ public static class SettingsEndpoints
             return TypedResults.BadRequest("Default warranty months must be between 0 and 600 (0 = no fallback).");
 
         await settings.SetBoolAsync(SettingKeys.InvoiceGenerationEnabled, req.InvoiceGenerationEnabled, ct);
+        if (req.SaleInvoiceGenerationEnabled is { } saleFlag)
+            await settings.SetBoolAsync(SettingKeys.SaleInvoiceGenerationEnabled, saleFlag, ct);
         if (req.DefaultWarrantyMonths is { } months)
             await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
         if (minToStore is not null)
@@ -118,6 +133,7 @@ public static class SettingsEndpoints
         user.TryGetUserId(out var uid);
         audit.Log(uid, "settings.update", "app_settings", null,
             details: $"{SettingKeys.InvoiceGenerationEnabled}={req.InvoiceGenerationEnabled}"
+                   + (req.SaleInvoiceGenerationEnabled is { } sf ? $", {SettingKeys.SaleInvoiceGenerationEnabled}={sf}" : "")
                    + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : "")
                    + (req.DefaultWarrantyMonths is { } d ? $", {SettingKeys.DefaultWarrantyMonths}={d}" : ""),
             ip: http.GetIp());
@@ -125,6 +141,7 @@ public static class SettingsEndpoints
 
         return TypedResults.Ok(new AppSettingsDto(
             req.InvoiceGenerationEnabled,
+            await settings.SaleInvoiceGenerationEnabledAsync(ct),
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct)));
     }

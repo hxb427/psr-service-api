@@ -308,34 +308,45 @@ public static class SpareSalesEndpoints
 
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-
-        var ret = new SpareSaleReturn
+        SpareSaleReturn ret;
+        try
         {
-            SpareSaleId = sale.Id,
-            ReturnNo = await seq.NextAsync(SequenceKeys.SpareSaleReturn, ct),
-            ReturnDate = req.ReturnDate ?? DateTime.UtcNow,
-            Reason = req.Reason.Trim(),
-            CreatedByUserId = uid,
-        };
-        foreach (var (partId, qty) in asked)
-            ret.Lines.Add(new SpareSaleReturnLine
+            ret = new SpareSaleReturn
             {
-                PartId = partId,
-                ItemCode = sale.Lines.First(l => l.PartId == partId).ItemCode,
-                Qty = qty,
-            });
-        db.SpareSaleReturns.Add(ret);
+                SpareSaleId = sale.Id,
+                ReturnDate = req.ReturnDate ?? DateTime.UtcNow,
+                Reason = req.Reason.Trim(),
+                CreatedByUserId = uid,
+                // Throws when the SPARE_SALE_RETURN sequence row is missing, which is a deployment
+                // problem rather than a bad request — caught below so it reads as a message instead
+                // of a 500 with nothing in it for the user.
+                ReturnNo = await seq.NextAsync(SequenceKeys.SpareSaleReturn, ct),
+            };
+            foreach (var (partId, qty) in asked)
+                ret.Lines.Add(new SpareSaleReturnLine
+                {
+                    PartId = partId,
+                    ItemCode = sale.Lines.First(l => l.PartId == partId).ItemCode,
+                    Qty = qty,
+                });
+            db.SpareSaleReturns.Add(ret);
 
-        // Needs the id for the ledger's reference, and the stock move belongs to the same transaction.
-        await db.SaveChangesAsync(ct);
-        foreach (var l in ret.Lines)
-            await ledger.SaleReturnInAsync(l.PartId, l.Qty, uid, ret.Id, $"{ret.ReturnNo} ({sale.SaleNo})", ct);
+            // Needs the id for the ledger's reference, and the stock move belongs to the same transaction.
+            await db.SaveChangesAsync(ct);
+            foreach (var l in ret.Lines)
+                await ledger.SaleReturnInAsync(l.PartId, l.Qty, uid, ret.Id, $"{ret.ReturnNo} ({sale.SaleNo})", ct);
 
-        audit.Log(uid, "spare-sale.return", "spare_sale", sale.Id,
-            details: $"{sale.SaleNo} — {ret.ReturnNo}, {ret.Lines.Sum(l => l.Qty)} unit(s) back: {ret.Reason}",
-            ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+            audit.Log(uid, "spare-sale.return", "spare_sale", sale.Id,
+                details: $"{sale.SaleNo} — {ret.ReturnNo}, {ret.Lines.Sum(l => l.Qty)} unit(s) back: {ret.Reason}",
+                ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex)
+        {
+            await tx.RollbackAsync(ct);
+            return TypedResults.BadRequest(ex.Message);
+        }
 
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
     }
