@@ -44,6 +44,9 @@ public static class ServiceCollectionExtensions
             // change is decided per target by UserHierarchy — this policy is only the front door.
             options.AddPolicy("UserManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            // Reaches the settings console. Managers get the invoice switches; the version floor and
+            // the warranty default stay admin-only and are checked inside the handler.
+            options.AddPolicy("SettingsManage", p => p.RequireRole(RoleNames.Admin, RoleNames.Manager));
             options.AddPolicy("StockView", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.StoreManager));
             options.AddPolicy("StockManage", p => p.RequireRole(

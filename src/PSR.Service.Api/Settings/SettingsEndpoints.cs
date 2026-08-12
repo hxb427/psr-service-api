@@ -78,7 +78,7 @@ public static class SettingsEndpoints
     {
         var group = app.MapGroup("/settings").WithTags("settings").RequireAuthorization();
         group.MapGet("/", GetAsync);
-        group.MapPut("/", UpdateAsync).RequireAuthorization("Admin");
+        group.MapPut("/", UpdateAsync).RequireAuthorization("SettingsManage");
 
         // Anonymous on purpose: a client below the floor can't authenticate (login is gated too),
         // yet still needs to learn which version it must update to.
@@ -118,12 +118,26 @@ public static class SettingsEndpoints
         if (req.DefaultWarrantyMonths is { } dwm && (dwm < 0 || dwm > 600))
             return TypedResults.BadRequest("Default warranty months must be between 0 and 600 (0 = no fallback).");
 
+        // Managers may work the invoice switches, not the two settings that reach past billing: the
+        // version floor can lock every client out of the API, and the warranty default silently
+        // changes what the whole estate calls in-warranty. Compared against what is stored rather
+        // than rejected on presence — the console posts every field on each save, so a manager
+        // re-sending today's values must not be treated as an attempt to change them.
+        var isAdmin = user.IsInRole(RoleNames.Admin);
+        if (!isAdmin)
+        {
+            if (minToStore is not null && minToStore != await settings.MinClientVersionAsync(ct))
+                return TypedResults.BadRequest("Only an admin can change the minimum allowed app version.");
+            if (req.DefaultWarrantyMonths is { } wanted && wanted != await settings.DefaultWarrantyMonthsAsync(ct))
+                return TypedResults.BadRequest("Only an admin can change the default warranty length.");
+        }
+
         await settings.SetBoolAsync(SettingKeys.InvoiceGenerationEnabled, req.InvoiceGenerationEnabled, ct);
         if (req.SaleInvoiceGenerationEnabled is { } saleFlag)
             await settings.SetBoolAsync(SettingKeys.SaleInvoiceGenerationEnabled, saleFlag, ct);
-        if (req.DefaultWarrantyMonths is { } months)
+        if (req.DefaultWarrantyMonths is { } months && isAdmin)
             await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
-        if (minToStore is not null)
+        if (minToStore is not null && isAdmin)
         {
             await settings.SetStringAsync(SettingKeys.MinClientVersion, minToStore, ct);
             // The gate caches the floor for 60s; evicting makes a raise bite immediately.
