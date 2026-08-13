@@ -29,4 +29,10 @@ public static class SettingKeys
     /// 0 = no fallback, which leaves the verdict UNKNOWN exactly as before. Same convention as
     /// Dealer.WarrantyMonths, where 0 also means "not known".</summary>
     public const string DefaultWarrantyMonths = "default_warranty_months";
+
+    /// <summary>Whether the Global Search page may edit a booked job's descriptive fields directly
+    /// (the legacy app's "Edit Service Record"). Off unless an admin turns it on: it rewrites what a
+    /// record says about a machine without the workflow having moved, so it is a correction tool for
+    /// mis-typed inward entries, not a normal way to work.</summary>
+    public const string ServiceRecordEditEnabled = "service_record_edit_enabled";
 }

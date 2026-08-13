@@ -21,14 +21,39 @@ public class JwtTokenService
             throw new InvalidOperationException(
                 "Jwt:Signing must be configured and at least 32 characters long.");
 
+        if (_options.DailyCutoffLocalHour is < 0 or > 23)
+            throw new InvalidOperationException(
+                "Jwt:DailyCutoffLocalHour must be an hour of the day (0-23).");
+
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.Signing));
         _signingCredentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+    }
+
+    /// <summary>The instant every session ends: the next occurrence of the configured local cutoff
+    /// hour, expressed in UTC. Exposed so the refresh endpoint and tests can reason about the same
+    /// boundary the issuer applies.</summary>
+    public DateTime NextCutoffUtc(DateTime nowUtc)
+    {
+        var offset = TimeSpan.FromHours(_options.LocalUtcOffsetHours);
+        var localNow = nowUtc + offset;
+
+        var cutoffLocal = localNow.Date.AddHours(_options.DailyCutoffLocalHour);
+        if (cutoffLocal <= localNow)
+            cutoffLocal = cutoffLocal.AddDays(1);
+
+        return cutoffLocal - offset;
     }
 
     public (string Token, DateTime ExpiresAt) Issue(User user, IReadOnlyCollection<string> roles)
     {
         var now = DateTime.UtcNow;
+
+        // Whichever comes first. Signing in shortly before the cutoff therefore buys a short session
+        // that ends at the cutoff like everyone else's — the boundary is a wall-clock time, not a
+        // per-user countdown, which is exactly what keeps it out of working hours.
         var expires = now.AddHours(_options.ExpiryHours);
+        var cutoff = NextCutoffUtc(now);
+        if (cutoff < expires) expires = cutoff;
 
         var claims = new List<Claim>
         {

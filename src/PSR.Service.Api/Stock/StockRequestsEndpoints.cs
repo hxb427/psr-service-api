@@ -39,9 +39,12 @@ public static class StockRequestsEndpoints
                 join p in db.Parts on r.PartId equals p.Id
                 join u in db.Users on r.RequestedByUserId equals u.Id into ug
                 from u in ug.DefaultIfEmpty()
+                join iu in db.Users on r.IssuedByUserId equals iu.Id into iug
+                from iu in iug.DefaultIfEmpty()
                 select new { r, p.ItemCode, p.Name, p.IsSerialTracked,
                     Username = u != null ? u.Username : null,
-                    RequesterIsField = u != null && u.IsFieldTechnician };
+                    RequesterIsField = u != null && u.IsFieldTechnician,
+                    IssuedByUsername = iu != null ? iu.Username : null };
 
         if (!manage) q = q.Where(x => x.r.RequestedByUserId == uid);
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<StockRequestStatus>(status, true, out var st))
@@ -52,7 +55,7 @@ public static class StockRequestsEndpoints
             x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
             x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued,
             x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks, x.r.Courier, x.r.TrackingNo,
-            x.IsSerialTracked, x.RequesterIsField)).ToList();
+            x.IsSerialTracked, x.RequesterIsField, x.r.IssuedByUserId, x.IssuedByUsername)).ToList();
         return TypedResults.Ok(items);
     }
 
@@ -209,14 +212,18 @@ public static class StockRequestsEndpoints
                        join p in db.Parts on r.PartId equals p.Id
                        join u in db.Users on r.RequestedByUserId equals u.Id into ug
                        from u in ug.DefaultIfEmpty()
+                       join iu in db.Users on r.IssuedByUserId equals iu.Id into iug
+                       from iu in iug.DefaultIfEmpty()
                        where r.Id == id
                        select new { r, p.ItemCode, p.Name, p.IsSerialTracked,
                            Username = u != null ? u.Username : null,
-                           RequesterIsField = u != null && u.IsFieldTechnician })
+                           RequesterIsField = u != null && u.IsFieldTechnician,
+                           IssuedByUsername = iu != null ? iu.Username : null })
             .FirstAsync(ct);
         return new StockRequestDto(x.r.Id, x.r.RequestNo, x.r.RequestedByUserId, x.Username, x.r.RequestDate,
             x.r.PartId, x.ItemCode, x.Name, x.r.QtyRequested, x.r.QtyIssued, x.r.Status.ToString(), x.r.IssuedDate, x.r.Remarks,
-            x.r.Courier, x.r.TrackingNo, x.IsSerialTracked, x.RequesterIsField);
+            x.r.Courier, x.r.TrackingNo, x.IsSerialTracked, x.RequesterIsField,
+            x.r.IssuedByUserId, x.IssuedByUsername);
     }
 
     private static async Task<Results<NoContent, NotFound, BadRequest<string>, ForbidHttpResult>> DeleteAsync(

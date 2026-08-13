@@ -15,6 +15,7 @@ public static class AuthEndpoints
         var group = app.MapGroup("/auth").WithTags("auth");
 
         group.MapPost("/login", LoginAsync).AllowAnonymous();
+        group.MapPost("/refresh", RefreshAsync).RequireAuthorization();
         group.MapPost("/change-password", ChangePasswordAsync).RequireAuthorization();
         group.MapPost("/logout", LogoutAsync).RequireAuthorization();
         group.MapGet("/me", MeAsync).RequireAuthorization();
@@ -55,6 +56,41 @@ public static class AuthEndpoints
         return TypedResults.Ok(new LoginResponse(
             token, expires, user.Id, user.Username, user.FullName, roles, user.MustChangePassword,
             user.IsFieldTechnician));
+    }
+
+    /// <summary>Re-issues the caller's token so a session that is still in use does not fall off the
+    /// 24-hour cliff mid-shift. These machines stay logged in all day, and the only previous way past
+    /// the cliff was to sign out and back in — which is what made "your session has expired" a routine
+    /// interruption rather than an exception.
+    ///
+    /// This is NOT a refresh token, and deliberately so: it requires a live, still-valid access token,
+    /// and it leaves <c>token_version</c> alone. Single-session-per-user therefore still means exactly
+    /// what it meant before — a login elsewhere, a password reset or a deactivation kills this session
+    /// on its next call, and no amount of renewing brings it back.</summary>
+    private static async Task<Results<Ok<ChangePasswordResponse>, UnauthorizedHttpResult>> RefreshAsync(
+        ClaimsPrincipal principal,
+        AppDbContext db,
+        JwtTokenService jwt,
+        CancellationToken ct)
+    {
+        if (!principal.TryGetUserId(out var userId))
+            return TypedResults.Unauthorized();
+
+        var user = await db.Users
+            .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
+            .FirstOrDefaultAsync(u => u.Id == userId, ct);
+
+        if (user is null || !user.IsActive)
+            return TypedResults.Unauthorized();
+
+        // The token-version middleware has already matched the caller's tv against the database, so
+        // reaching here means this session is current. Re-issue on the same version.
+        var roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray();
+        var (token, expires) = jwt.Issue(user, roles);
+
+        // Not audited: a renewal is not a security event, and one row per user per renewal interval
+        // would bury the logins that do matter.
+        return TypedResults.Ok(new ChangePasswordResponse(token, expires));
     }
 
     private static async Task<Results<Ok<ChangePasswordResponse>, UnauthorizedHttpResult, BadRequest<string>>>

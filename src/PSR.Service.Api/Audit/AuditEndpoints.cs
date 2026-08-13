@@ -22,7 +22,9 @@ public static class AuditEndpoints
     private static async Task<Ok<PagedResult<AuditLogItemDto>>> ListAsync(
         AppDbContext db,
         long? userId,
+        string? username,
         string? action,
+        string? entity,
         DateTime? from,
         DateTime? to,
         int? page,
@@ -34,11 +36,23 @@ public static class AuditEndpoints
 
         var query = db.AuditLog.AsNoTracking().AsQueryable();
 
+        // The three questions this log exists to answer: by whom (userId / username), what (action),
+        // where (entity — which kind of record, and the id column pins down which one).
         if (userId is not null) query = query.Where(a => a.UserId == userId);
+        if (!string.IsNullOrWhiteSpace(username))
+        {
+            var who = username.Trim();
+            query = query.Where(a => db.Users.Any(u => u.Id == a.UserId && u.Username.Contains(who)));
+        }
         if (!string.IsNullOrWhiteSpace(action))
         {
             var term = action.Trim();
             query = query.Where(a => a.Action.Contains(term));
+        }
+        if (!string.IsNullOrWhiteSpace(entity))
+        {
+            var ent = entity.Trim();
+            query = query.Where(a => a.Entity != null && a.Entity.Contains(ent));
         }
         if (from is not null) query = query.Where(a => a.CreatedAt >= from);
         if (to is not null) query = query.Where(a => a.CreatedAt <= to);

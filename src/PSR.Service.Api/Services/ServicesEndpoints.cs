@@ -5,6 +5,7 @@ namespace PSR.Service.Api.Services;
 //   ServicesEndpoints.Inward.cs    — create + multi-item batch + customer resolve
 //   ServicesEndpoints.Workflow.cs  — state transitions (assign → ... → dispatch/replace)
 //   ServicesEndpoints.Lines.cs     — add / delete service lines
+//   ServicesEndpoints.Edit.cs      — correct a booked job's descriptive fields (admin-switched)
 //   ServicesEndpoints.Mapping.cs   — shared helpers (detail/line mapping, transition write)
 public static partial class ServicesEndpoints
 {
@@ -38,6 +39,9 @@ public static partial class ServicesEndpoints
         // Manual stamps that do NOT move the workflow (legacy "Set Outward Reference" / "Set Invoice No").
         group.MapPost("/{id:long}/outward-reference", SetOutwardReferenceAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/invoice-no", SetInvoiceNoAsync).RequireAuthorization("DocumentManage");
+        // Legacy Global Search "Edit Service Record" — descriptive fields only, and only while the
+        // admin switch is on (checked in the handler, since the answer is a message not a 403).
+        group.MapPut("/{id:long}/record", UpdateRecordAsync).RequireAuthorization("ServiceRecordEdit");
         group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
         return app;

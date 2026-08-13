@@ -58,9 +58,12 @@ public static class CustomersEndpoints
             Address = req.Address?.Trim(),
         };
         db.Customers.Add(c);
+        // Saved first so the audit row can carry the id of the customer it created.
+        await db.SaveChangesAsync(ct);
 
         user.TryGetUserId(out var uid);
-        audit.Log(uid, "customer.create", "customer", null, details: c.Name, ip: http.GetIp());
+        audit.Log(uid, "customer.create", "customer", c.Id,
+            details: $"'{c.Name}'" + (c.Phone is { Length: > 0 } ? $" {c.Phone}" : ""), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Created($"/customers/{c.Id}", ToDto(c));

@@ -103,10 +103,14 @@ public static class UsersEndpoints
             user.UserRoles.Add(new UserRole { Role = r });
 
         db.Users.Add(user);
+        // Saved first so the audit row carries the new account's id — the one thing that still
+        // identifies it after a later rename.
+        await db.SaveChangesAsync(ct);
 
         principal.TryGetUserId(out var actorId);
-        audit.Log(actorId, "user.create", "user", null,
-            details: $"{username} roles=[{string.Join(',', roles.Select(r => r.Name))}]", ip: http.GetIp());
+        audit.Log(actorId, "user.create", "user", user.Id,
+            details: $"{username} roles=[{string.Join(',', roles.Select(r => r.Name))}]"
+                   + (req.IsFieldTechnician ? ", field technician" : ""), ip: http.GetIp());
 
         await db.SaveChangesAsync(ct);
 
@@ -130,12 +134,15 @@ public static class UsersEndpoints
         if (!UserHierarchy.CanView(actorRank, UserHierarchy.RankOf(user))) return TypedResults.NotFound();
         if (!UserHierarchy.CanManage(actorRank, UserHierarchy.RankOf(user))) return TypedResults.Forbid();
 
-        user.FullName = req.FullName?.Trim();
-        user.Email = req.Email?.Trim();
-        user.IsFieldTechnician = req.IsFieldTechnician;
+        // The field-technician flag decides who may hold stock off-site, so a silent flip is exactly
+        // the kind of change this log exists to answer for.
+        var diff = new AuditDiff();
+        diff.Set("full name", user.FullName, req.FullName, v => user.FullName = v);
+        diff.Set("email", user.Email, req.Email, v => user.Email = v);
+        diff.Set("field technician", user.IsFieldTechnician, req.IsFieldTechnician, v => user.IsFieldTechnician = v);
 
         principal.TryGetUserId(out var actorId);
-        audit.Log(actorId, "user.update", "user", id, ip: http.GetIp());
+        audit.Log(actorId, "user.update", "user", id, details: diff.Describe(user.Username), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(ToDetail(user, actorRank));

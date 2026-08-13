@@ -24,11 +24,11 @@ public static class PartsEndpoints
         group.MapGet("/", ListAsync);
         group.MapGet("/{id:long}", GetAsync);
         group.MapGet("/by-code/{code}", GetByCodeAsync);
-        group.MapPost("/", CreateAsync).RequireAuthorization("Admin");
-        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("Admin");
-        group.MapPost("/{id:long}/activate", ActivateAsync).RequireAuthorization("Admin");
-        group.MapPost("/{id:long}/deactivate", DeactivateAsync).RequireAuthorization("Admin");
-        group.MapPost("/{id:long}/serial-tracking", SetSerialTrackingAsync).RequireAuthorization("Admin");
+        group.MapPost("/", CreateAsync).RequireAuthorization("CatalogueManage");
+        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("CatalogueManage");
+        group.MapPost("/{id:long}/activate", ActivateAsync).RequireAuthorization("CatalogueManage");
+        group.MapPost("/{id:long}/deactivate", DeactivateAsync).RequireAuthorization("CatalogueManage");
+        group.MapPost("/{id:long}/serial-tracking", SetSerialTrackingAsync).RequireAuthorization("SerialTrackingManage");
 
         return app;
     }
@@ -97,8 +97,13 @@ public static class PartsEndpoints
         };
         db.Parts.Add(part);
 
+        // Saved first so the audit row can name the part it created — an entry with no id leaves the
+        // reader guessing which of two same-day parts it meant.
+        await db.SaveChangesAsync(ct);
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "part.create", "part", null, details: code, ip: http.GetIp());
+        audit.Log(actor, "part.create", "part", part.Id,
+            details: $"{code} '{part.Name}' dealer {part.DealerRate:0.##} / customer {part.CustomerRate:0.##}",
+            ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Created($"/parts/{part.Id}", ToDto(part, true));
@@ -111,19 +116,22 @@ public static class PartsEndpoints
         var p = await db.Parts.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (p is null) return TypedResults.NotFound();
 
-        p.Name = req.Name.Trim();
-        p.Category = req.Category?.Trim();
-        p.Unit = req.Unit?.Trim();
-        p.PurchaseRate = req.PurchaseRate;
-        p.DealerRate = req.DealerRate;
-        p.CustomerRate = req.CustomerRate;
-        p.HsnCode = req.HsnCode?.Trim();
-        p.GstPercent = req.GstPercent;
-        p.IsSerialTracked = req.IsSerialTracked;
-        p.Remarks = req.Remarks?.Trim();
+        // Rates are what this audit line exists for: a changed price is invisible in the record itself
+        // once saved, and nothing else in the system remembers what it used to be.
+        var diff = new AuditDiff();
+        diff.Set("name", p.Name, req.Name, v => p.Name = v ?? p.Name);
+        diff.Set("category", p.Category, req.Category, v => p.Category = v);
+        diff.Set("unit", p.Unit, req.Unit, v => p.Unit = v);
+        diff.Set("purchase rate", p.PurchaseRate, req.PurchaseRate, v => p.PurchaseRate = v);
+        diff.Set("dealer rate", p.DealerRate, req.DealerRate, v => p.DealerRate = v);
+        diff.Set("customer rate", p.CustomerRate, req.CustomerRate, v => p.CustomerRate = v);
+        diff.Set("HSN", p.HsnCode, req.HsnCode, v => p.HsnCode = v);
+        diff.Set("GST %", p.GstPercent, req.GstPercent, v => p.GstPercent = v);
+        diff.Set("serial tracked", p.IsSerialTracked, req.IsSerialTracked, v => p.IsSerialTracked = v);
+        diff.Set("remarks", p.Remarks, req.Remarks, v => p.Remarks = v);
 
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "part.update", "part", id, ip: http.GetIp());
+        audit.Log(actor, "part.update", "part", id, details: diff.Describe(p.ItemCode), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(ToDto(p, true));

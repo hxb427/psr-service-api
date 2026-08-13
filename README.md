@@ -69,6 +69,29 @@ Required settings:
 - `Jwt:Signing` — random 32+ char string for signing JWTs (generate one with `openssl rand -base64 48`)
 - `Jwt:Issuer` — defaults to `psr-service`
 - `Jwt:Audience` — defaults to `psr-service-wpf`
+- `Jwt:ExpiryHours` — ceiling on an issued token's lifetime, defaults to 24. Rarely the setting that
+  decides anything, because the nightly cutoff below is nearer.
+- `Jwt:DailyCutoffLocalHour` / `Jwt:LocalUtcOffsetHours` — defaults `3` and `5.5` (03:00 IST). **No
+  token is issued that outlives the next occurrence of this hour.** A session therefore cannot
+  survive the night: sign in at 09:00 and it ends at 03:00 the following morning, so every working
+  day starts with a fresh sign-in and nobody is signed out mid-shift. The WPF client renews in the
+  background (`POST /auth/refresh`) to carry a session across a working day, but the server will not
+  renew past the cutoff — renewal extends a session, it does not make one immortal.
+
+  A fixed lifetime alone cannot do this: 24h from login comes due at whatever time the user logged
+  in, which is by definition during working hours. That is what made "your session has expired" a
+  routine interruption. A session also ends early on sign-out, app close, a sign-in to the same
+  account elsewhere, or an admin resetting the password / deactivating the account.
+
+### Diagnosing a 401
+
+Both ways a token can be rejected are logged at `Information`, and they mean different things:
+
+| Log line | Meaning |
+| --- | --- |
+| `Rejecting request on {path}: token expired at …` | Ordinary lifetime expiry — the session outlived `Jwt:ExpiryHours` without renewing (app closed, machine asleep, or renewal could not reach the server). |
+| `Rejecting authenticated request: token version mismatch for user N …` | The session was deliberately ended: a login elsewhere on the same account, a password change/reset, a logout, or a deactivation. Single-session-per-user working as designed. |
+| `Rejecting request on {path}: invalid signature …` | `Jwt:Signing` differs from what issued the token — a deployment problem, not a user problem. |
 
 ## Deployment
 

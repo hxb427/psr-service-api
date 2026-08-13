@@ -17,12 +17,12 @@ public static class ServiceChargesEndpoints
 
         group.MapGet("/", ListAsync);
         group.MapGet("/{id:long}", GetAsync);
-        group.MapPost("/", CreateAsync).RequireAuthorization("Admin");
-        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("Admin");
+        group.MapPost("/", CreateAsync).RequireAuthorization("CatalogueManage");
+        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("CatalogueManage");
         group.MapPost("/{id:long}/activate", (long id, ClaimsPrincipal u, AppDbContext db, IAuditService a, HttpContext h, CancellationToken ct)
-            => SetActiveAsync(id, true, u, db, a, h, ct)).RequireAuthorization("Admin");
+            => SetActiveAsync(id, true, u, db, a, h, ct)).RequireAuthorization("CatalogueManage");
         group.MapPost("/{id:long}/deactivate", (long id, ClaimsPrincipal u, AppDbContext db, IAuditService a, HttpContext h, CancellationToken ct)
-            => SetActiveAsync(id, false, u, db, a, h, ct)).RequireAuthorization("Admin");
+            => SetActiveAsync(id, false, u, db, a, h, ct)).RequireAuthorization("CatalogueManage");
 
         return app;
     }
@@ -53,8 +53,11 @@ public static class ServiceChargesEndpoints
             Remarks = req.Remarks?.Trim(),
         };
         db.ServiceCharges.Add(sc);
+        // Saved first so the audit row can carry the id of the charge it created.
+        await db.SaveChangesAsync(ct);
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "service-charge.create", "service_charge", null, details: sc.Name, ip: http.GetIp());
+        audit.Log(actor, "service-charge.create", "service_charge", sc.Id,
+            details: $"'{sc.Name}' {sc.Charge:0.##} + {sc.TaxPercent:0.##}% tax", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.Created($"/service-charges/{sc.Id}", ToDto(sc));
     }
@@ -65,12 +68,15 @@ public static class ServiceChargesEndpoints
     {
         var sc = await db.ServiceCharges.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (sc is null) return TypedResults.NotFound();
-        sc.Name = req.Name.Trim();
-        sc.Charge = req.Charge;
-        sc.TaxPercent = req.TaxPercent;
-        sc.Remarks = req.Remarks?.Trim();
+        var name = sc.Name;
+        var diff = new AuditDiff();
+        diff.Set("name", sc.Name, req.Name, v => sc.Name = v ?? sc.Name);
+        diff.Set("charge", sc.Charge, req.Charge, v => sc.Charge = v);
+        diff.Set("tax %", sc.TaxPercent, req.TaxPercent, v => sc.TaxPercent = v);
+        diff.Set("remarks", sc.Remarks, req.Remarks, v => sc.Remarks = v);
+
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "service-charge.update", "service_charge", id, ip: http.GetIp());
+        audit.Log(actor, "service-charge.update", "service_charge", id, details: diff.Describe(name), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.Ok(ToDto(sc));
     }

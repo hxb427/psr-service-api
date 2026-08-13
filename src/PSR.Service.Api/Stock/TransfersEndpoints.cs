@@ -104,7 +104,10 @@ public static class TransfersEndpoints
                 }
             }
 
-            audit.Log(uid, "transfer.create", "technician_transfer", null, details: transfer.TransferNo, ip: http.GetIp());
+            // Inside the transaction, so save once to get the transfer's id onto the audit row before
+            // the row itself is written — a transfer number alone cannot be joined back to the record.
+            await db.SaveChangesAsync(ct);
+            audit.Log(uid, "transfer.create", "technician_transfer", transfer.Id, details: transfer.TransferNo, ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }

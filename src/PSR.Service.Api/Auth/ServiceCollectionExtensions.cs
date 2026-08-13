@@ -35,6 +35,29 @@ public static class ServiceCollectionExtensions
                     NameClaimType = "unique_name",
                     RoleClaimType = ClaimTypes.Role,
                 };
+
+                // An expired token never reaches TokenVersionValidationMiddleware — it fails here and
+                // leaves the client with a bare 401 that is indistinguishable from a token-version
+                // kick. Both show the user "your session has expired", so without this line there is
+                // no way to tell an ordinary 24-hour timeout from a session being killed elsewhere.
+                opts.Events = new JwtBearerEvents
+                {
+                    OnAuthenticationFailed = ctx =>
+                    {
+                        var reason = ctx.Exception switch
+                        {
+                            SecurityTokenExpiredException e => $"token expired at {e.Expires:u}",
+                            SecurityTokenInvalidSignatureException => "invalid signature (signing key mismatch)",
+                            _ => ctx.Exception.GetType().Name,
+                        };
+                        ctx.HttpContext.RequestServices
+                            .GetRequiredService<ILoggerFactory>()
+                            .CreateLogger("PSR.Service.Api.Auth.JwtBearer")
+                            .LogInformation("Rejecting request on {Path}: {Reason}",
+                                ctx.HttpContext.Request.Path, reason);
+                        return Task.CompletedTask;
+                    },
+                };
             });
 
         services.AddAuthorization(options =>
@@ -47,6 +70,13 @@ public static class ServiceCollectionExtensions
             // Reaches the settings console. Managers get the invoice switches; the version floor and
             // the warranty default stay admin-only and are checked inside the handler.
             options.AddPolicy("SettingsManage", p => p.RequireRole(RoleNames.Admin, RoleNames.Manager));
+            // The priced catalogue — parts and service charges. Adding an item or changing a rate is a
+            // commercial decision, so it stops at manager; supervisors and below read it only.
+            options.AddPolicy("CatalogueManage", p => p.RequireRole(RoleNames.Admin, RoleNames.Manager));
+            // Flipping serial tracking on a part changes what the shop floor is asked to record, not
+            // what anything costs, so it reaches one role further down than the rest of the catalogue.
+            options.AddPolicy("SerialTrackingManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("StockView", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.StoreManager));
             options.AddPolicy("StockManage", p => p.RequireRole(
@@ -64,6 +94,11 @@ public static class ServiceCollectionExtensions
             options.AddPolicy("ServiceManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("ServiceDelete", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            // Correcting a booked job's descriptive fields from Global Search. Same roles as
+            // ServiceManage, but the endpoint ALSO checks the ServiceRecordEditEnabled switch — the
+            // role decides who may, the switch decides whether anyone may.
+            options.AddPolicy("ServiceRecordEdit", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             options.AddPolicy("DispatchManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));

@@ -131,7 +131,10 @@ public static class SpareSalesEndpoints
             await sales.ApplyAsync(sale, req, uid, audit, http.GetIp(), ct);
             db.SpareSales.Add(sale);
 
-            audit.Log(uid, "spare-sale.create", "spare_sale", null,
+            // Saved once inside the transaction so the audit row can carry the sale's id, not just
+            // its number.
+            await db.SaveChangesAsync(ct);
+            audit.Log(uid, "spare-sale.create", "spare_sale", sale.Id,
                 details: $"{sale.SaleNo} — {sale.Lines.Count} item(s)", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);

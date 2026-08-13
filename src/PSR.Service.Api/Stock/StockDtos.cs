@@ -20,7 +20,9 @@ public record StockRequestDto(
     DateTime RequestDate, long PartId, string ItemCode, string PartName,
     int QtyRequested, int QtyIssued, string Status, DateTime? IssuedDate, string? Remarks,
     string? Courier, string? TrackingNo,
-    bool IsSerialTracked, bool RequesterIsFieldTechnician);
+    bool IsSerialTracked, bool RequesterIsFieldTechnician,
+    // Who handed the stock over. Null until the first issue; the desktop filters the register by it.
+    long? IssuedByUserId = null, string? IssuedByUsername = null);
 
 // Serials is required (count == issued qty) only when a serial-tracked part is issued to a field technician.
 public record IssueRequest([Range(1, 1_000_000)] int Qty, [StringLength(80)] string? Courier = null, [StringLength(80)] string? TrackingNo = null,

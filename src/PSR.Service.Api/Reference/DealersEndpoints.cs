@@ -61,8 +61,11 @@ public static class DealersEndpoints
             Remarks = req.Remarks?.Trim(),
         };
         db.Dealers.Add(d);
+        // Saved first so the audit row can carry the id of the dealer it created.
+        await db.SaveChangesAsync(ct);
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "dealer.create", "dealer", null, details: name, ip: http.GetIp());
+        audit.Log(actor, "dealer.create", "dealer", d.Id,
+            details: $"'{name}' warranty {d.WarrantyMonths} month(s)", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.Created($"/dealers/{d.Id}", ToDto(d));
     }
@@ -73,15 +76,20 @@ public static class DealersEndpoints
     {
         var d = await db.Dealers.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (d is null) return TypedResults.NotFound();
-        d.Name = req.Name.Trim();
-        d.WarrantyMonths = req.WarrantyMonths;
-        d.Address = req.Address?.Trim();
-        d.Gstin = req.Gstin?.Trim();
-        d.State = req.State?.Trim();
-        d.StateCode = req.StateCode?.Trim();
-        d.Remarks = req.Remarks?.Trim();
+        // Warranty months and GSTIN are the two that change money and paperwork downstream, so the
+        // audit line has to name them rather than just say the dealer was saved.
+        var name = d.Name;
+        var diff = new AuditDiff();
+        diff.Set("name", d.Name, req.Name, v => d.Name = v ?? d.Name);
+        diff.Set("warranty months", d.WarrantyMonths, req.WarrantyMonths, v => d.WarrantyMonths = v);
+        diff.Set("address", d.Address, req.Address, v => d.Address = v);
+        diff.Set("GSTIN", d.Gstin, req.Gstin, v => d.Gstin = v);
+        diff.Set("state", d.State, req.State, v => d.State = v);
+        diff.Set("state code", d.StateCode, req.StateCode, v => d.StateCode = v);
+        diff.Set("remarks", d.Remarks, req.Remarks, v => d.Remarks = v);
+
         user.TryGetUserId(out var actor);
-        audit.Log(actor, "dealer.update", "dealer", id, ip: http.GetIp());
+        audit.Log(actor, "dealer.update", "dealer", id, details: diff.Describe(name), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         return TypedResults.Ok(ToDto(d));
     }

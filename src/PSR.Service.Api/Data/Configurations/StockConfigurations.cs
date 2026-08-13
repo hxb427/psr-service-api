@@ -129,6 +129,11 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
             new NumberSequence { Key = SequenceKeys.Transfer, Prefix = "TRF", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldService, Prefix = "FSV", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldSale, Prefix = "FSL", NextValue = 1 },
-            new NumberSequence { Key = SequenceKeys.SpareSale, Prefix = "SAL", NextValue = 1 });
+            new NumberSequence { Key = SequenceKeys.SpareSale, Prefix = "SAL", NextValue = 1 },
+            // The row itself was added by the AddSpareSaleReturns migration but never declared here.
+            // Every key a NextAsync caller uses MUST appear in this list: the model snapshot is built
+            // from it, so a key that is missing looks to EF like a row that should not exist, and the
+            // next generated migration deletes it — taking spare-sale returns down with it.
+            new NumberSequence { Key = SequenceKeys.SpareSaleReturn, Prefix = "SRT", NextValue = 1 });
     }
 }

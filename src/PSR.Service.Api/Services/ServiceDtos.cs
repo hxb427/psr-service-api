@@ -98,6 +98,23 @@ public record PaymentRequest([Required] string Status);
 public record OutwardReferenceRequest(
     [Required, StringLength(80)] string ReferenceNo,
     [StringLength(50)] string? OutwardDcNo);
+/// <summary>Correct a booked job's descriptive fields (legacy Global Search "Edit Service Record").
+/// Every field is sent on every save, so a blank optional field clears it — the dialog shows the
+/// current values, which makes "what I see is what is stored" the only safe reading of a blank box.
+/// Nothing here moves the workflow; status, technician, payment and lines are untouched.</summary>
+public record UpdateServiceRecordRequest(
+    [StringLength(200)] string? CustomerName,
+    [StringLength(50)] string? InwardDcNo,
+    [Required, StringLength(100)] string SerialNo,
+    [StringLength(50)] string? PsCode,
+    [StringLength(500)] string? Description,
+    [StringLength(100)] string? ModelName,
+    [StringLength(1000)] string? ReportedProblem,
+    string? WarrantyStatus,
+    [StringLength(50)] string? PiNo,
+    [StringLength(50)] string? OutwardDcNo,
+    [StringLength(50)] string? InvNo);
+
 // Record an invoice number raised outside the app (legacy "Set Invoice No").
 public record InvoiceNoRequest(
     [Required, StringLength(50)] string InvNo,

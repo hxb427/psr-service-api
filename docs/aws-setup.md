@@ -220,6 +220,9 @@ Jwt__Signing=<32+_CHAR_RANDOM_STRING>
 Jwt__Issuer=psr-service
 Jwt__Audience=psr-service-wpf
 Jwt__ExpiryHours=24
+# Nightly session cutoff — 03:00 IST. Sessions die overnight, not mid-shift.
+Jwt__DailyCutoffLocalHour=3
+Jwt__LocalUtcOffsetHours=5.5
 
 # Cert password from generate-cert.sh output
 Kestrel__Endpoints__Https__Certificate__Password=<PASSWORD_FROM_STEP_6>
