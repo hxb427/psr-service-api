@@ -49,6 +49,24 @@ public static partial class ServicesEndpoints
                 var err = await serial.ValidateFittedSerialAsync(part.Id, line.ReplacementSerialNo!, techId, ct);
                 if (err is not null) return TypedResults.BadRequest(err);
             }
+
+            // The line has to be one the technician can actually cover, because completing the job is
+            // what consumes it — and that consume is guarded. Until now nothing checked here at all:
+            // the desk app only ever offered the technician's own holdings, so a quantity above what
+            // they held (or any part at all, from anything but the desk app) was accepted, and the job
+            // then refused to complete until someone worked out which line to delete.
+            if (job.TechnicianId is { } holder)
+            {
+                var onHand = await db.StockBalances.AsNoTracking()
+                    .Where(b => b.PartId == part.Id && b.TechnicianId == holder)
+                    .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
+                var booked = await BookedQtyQuery(db, part.Id, holder).SumAsync(ct);
+                if (onHand - booked < qty)
+                    return TypedResults.BadRequest(booked > 0
+                        ? $"You hold {onHand} × {part.ItemCode}, and {booked} of those are already on jobs in service. "
+                          + $"{onHand - booked} left to book, not {qty}."
+                        : $"You hold {onHand} × {part.ItemCode} — not enough for {qty}.");
+            }
         }
         else // ServiceCharge
         {
@@ -69,6 +87,23 @@ public static partial class ServicesEndpoints
 
         return TypedResults.Ok(await LineToDtoAsync(db, line.Id, ServiceRoles.CanSeePricing(user), ct));
     }
+
+    /// <summary>How much of one part a technician already has committed but not yet consumed.
+    ///
+    /// Consumption happens at completion, never at add-line, so anything still uncommitted sits on a
+    /// job that is IN SERVICE: earlier states cannot carry lines (they can only be added in service),
+    /// and later ones have already had their stock taken. A revert returns the stock and puts the job
+    /// back in service, so it lands back in this sum.
+    ///
+    /// Exposed rather than inlined so the translation test can call ToQueryString on it — a join and a
+    /// SUM the provider failed to translate would otherwise surface only against the real database.</summary>
+    public static IQueryable<int> BookedQtyQuery(AppDbContext db, long partId, long technicianId) =>
+        from l in db.ServiceLines.AsNoTracking()
+        join s in db.Services on l.ServiceId equals s.Id
+        where l.PartId == partId && s.TechnicianId == technicianId && !s.IsDeleted
+              && s.ServiceStatus == ServiceStatus.InService
+              && (l.LineType == ServiceLineType.Component || l.LineType == ServiceLineType.Replacement)
+        select l.Qty;
 
     private static async Task<Results<NoContent, NotFound, BadRequest<string>, ForbidHttpResult>> DeleteLineAsync(
         long id, long lineId, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
