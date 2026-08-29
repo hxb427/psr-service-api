@@ -14,7 +14,8 @@ public static partial class ServicesEndpoints
 
     private static async Task<Ok<PagedResult<ServiceListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
-        string? status, string? section, long? technicianId, string? search, DateTime? fromDate, DateTime? toDate,
+        string? status, string? section, long? technicianId, string? search,
+        string? itemName, string? psCode, DateTime? fromDate, DateTime? toDate,
         string? warranty, string? payment, string? sort, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
@@ -78,6 +79,18 @@ public static partial class ServicesEndpoints
                           || (x.s.PsCode != null && x.s.PsCode.Contains(term))
                           || (x.s.Description != null && x.s.Description.Contains(term))
                           || (x.CustomerName != null && x.CustomerName.Contains(term)));
+        }
+        // Single-field narrowings, alongside (not instead of) the wide search: the desk knows which
+        // item or which PS code it is chasing, and the wide term drags in every other column with it.
+        if (!string.IsNullOrWhiteSpace(itemName))
+        {
+            var item = itemName.Trim();
+            q = q.Where(x => x.s.Description != null && x.s.Description.Contains(item));
+        }
+        if (!string.IsNullOrWhiteSpace(psCode))
+        {
+            var code = psCode.Trim();
+            q = q.Where(x => x.s.PsCode != null && x.s.PsCode.Contains(code));
         }
 
         var ordered = sort switch
