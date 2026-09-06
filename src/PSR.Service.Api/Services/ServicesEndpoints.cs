@@ -26,6 +26,8 @@ public static partial class ServicesEndpoints
         group.MapPost("/{id:long}/acknowledge", AcknowledgeAsync);   // assigned technician only
         group.MapPost("/{id:long}/start", StartAsync);               // assigned technician only
         group.MapPost("/{id:long}/lines", AddLineAsync);
+        // Same rules as the single-line route, applied to a whole selection in one transaction.
+        group.MapPost("/{id:long}/lines/batch", AddLinesAsync);
         group.MapDelete("/{id:long}/lines/{lineId:long}", DeleteLineAsync);
         group.MapPost("/{id:long}/total-loss", MarkTotalLossAsync);
         group.MapPost("/{id:long}/complete", CompleteAsync);

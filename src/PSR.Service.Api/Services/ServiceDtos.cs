@@ -84,10 +84,21 @@ public record AddLineRequest(
     [StringLength(100)] string? ReplacementSerialNo = null);
 public record CompleteRequest([StringLength(1000)] string? TechnicianRemarks);
 // Reference number is mandatory at dispatch; the outward DC number is optional.
+/// <summary>Every field is optional and every one of them means "overwrite this". Dispatch is normally
+/// pressed on a job that already carries its outward reference and DC number — set when the reference
+/// was stamped, or when the DC document was generated — so the desk sends an empty body and the job
+/// keeps what it has. A caller that does have new values (the field app, capturing a courier docket at
+/// hand-over) can still send them.</summary>
+/// <summary>Several lines added in one go — the technician picks quantities against their whole holding
+/// and the charges list, then saves once. Applied as a unit: a batch that cannot be covered in full adds
+/// nothing, rather than leaving the job with the first three of five lines and an error about the
+/// fourth.</summary>
+public record AddLinesRequest([Required, MinLength(1)] List<AddLineRequest> Lines);
+
 public record DispatchRequest(
-    [Required, StringLength(80)] string ReferenceNo,
-    [StringLength(50)] string? OutwardDcNo,
-    DateTime? DcDate);
+    [StringLength(80)] string? ReferenceNo = null,
+    [StringLength(50)] string? OutwardDcNo = null,
+    DateTime? DcDate = null);
 public record ReplaceRequest(
     [Required, StringLength(100)] string ReplacementSerialNo,
     long? ReplacementPartId,
@@ -125,8 +136,10 @@ public record ServiceListItemDto(
     long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, long? DealerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName, string? Description,
     string ServiceStatus, string AckStatus, string PaymentStatus, string Priority, string WarrantyStatus,
     long? TechnicianId, string? TechnicianName, DateTime DateReceived, DateTime? PromisedDate,
-    // Document refs drive the gated PI → Invoice → DC chain on the dispatch screen.
-    string? PiNo, string? InvNo, string? OutwardDcNo);
+    // Document refs drive the gated PI → Invoice → DC chain on the dispatch screen. OutwardReferenceNo
+    // is here so a bulk dispatch can tell, without opening each job, which rows carry a number the
+    // goods can be traced by — dispatch refuses a job with none of PI / DC / outward reference.
+    string? PiNo, string? InvNo, string? OutwardDcNo, string? OutwardReferenceNo = null);
 
 // UnitPrice/Amount are null for non-pricing roles (technician/store/etc).
 public record ServiceLineDto(

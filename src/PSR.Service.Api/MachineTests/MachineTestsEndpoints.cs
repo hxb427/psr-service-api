@@ -15,6 +15,7 @@ public static class MachineTestsEndpoints
         var group = app.MapGroup("/machine-tests").WithTags("machine-tests").RequireAuthorization();
 
         group.MapGet("/by-serial/{serial}", BySerialAsync);
+        group.MapGet("/matches/{serial}", MatchesBySerialAsync);
         group.MapGet("/customers", CustomersAsync);
         group.MapGet("/search", SearchAsync);
 
@@ -55,6 +56,28 @@ public static class MachineTestsEndpoints
         var months = await ResolveWarrantyMonthsAsync(serial, dealerId, db, settings, ct);
         var dto = await passtest.FindBySerialAsync(serial, months, ct);
         return dto is null ? TypedResults.NotFound() : TypedResults.Ok(dto);
+    }
+
+    /// <summary>Every factory record carrying this serial, newest invoice first — the set the inward
+    /// form picks from when a serial resolves to more than one machine. Same warranty resolution as
+    /// the single-record route, so a match chosen here reads exactly as it would there. An empty list
+    /// (not a 404) when nothing matched: the caller is filling a form and has a "no record" message of
+    /// its own. 503 when passtest is unreachable.</summary>
+    private static async Task<Results<Ok<MachineTestMatchesDto>, StatusCodeHttpResult>> MatchesBySerialAsync(
+        string serial, long? dealerId, int? limit, AppDbContext db, PasstestRepository passtest,
+        AppSettingsService settings, CancellationToken ct)
+    {
+        if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        // Capped below the repository's own limit of 50, so the extra row fetched to detect
+        // truncation is never the one the clamp swallows.
+        var take = Math.Clamp(limit ?? 20, 1, 40);
+        var months = await ResolveWarrantyMonthsAsync(serial, dealerId, db, settings, ct);
+        // One extra row is fetched purely to know whether the cap hid anything.
+        var matches = await passtest.FindMatchesBySerialAsync(serial, months, take + 1, ct);
+
+        var truncated = matches.Count > take;
+        return TypedResults.Ok(new MachineTestMatchesDto(matches.Take(take).ToList(), truncated));
     }
 
     /// <summary>Warranty months when the machine's own passtestdata row carries none. Best source first.

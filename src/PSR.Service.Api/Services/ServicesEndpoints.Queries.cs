@@ -109,7 +109,7 @@ public static partial class ServicesEndpoints
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate,
-            x.s.PiNo, x.s.InvNo, x.s.OutwardDcNo)).ToList();
+            x.s.PiNo, x.s.InvNo, x.s.OutwardDcNo, x.s.OutwardReferenceNo)).ToList();
 
         return TypedResults.Ok(new PagedResult<ServiceListItemDto>(items, pageNum, size, total));
     }

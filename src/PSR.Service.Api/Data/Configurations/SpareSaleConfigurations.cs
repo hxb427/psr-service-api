@@ -26,6 +26,8 @@ public class SpareSaleConfiguration : IEntityTypeConfiguration<SpareSale>
         b.Property(x => x.PiDate).HasColumnName("pi_date");
         b.Property(x => x.InvNo).HasColumnName("inv_no").HasMaxLength(40);
         b.Property(x => x.InvDate).HasColumnName("inv_date");
+        b.Property(x => x.SoldAt).HasColumnName("sold_at");
+        b.Property(x => x.SoldByUserId).HasColumnName("sold_by_user_id");
 
         b.Property(x => x.TaxableAmount).HasColumnName("taxable_amount").HasPrecision(14, 2);
         b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(14, 2);
@@ -43,6 +45,8 @@ public class SpareSaleConfiguration : IEntityTypeConfiguration<SpareSale>
 
         b.HasIndex(x => x.Status);
         b.HasIndex(x => x.SaleDate);
+        // Every availability check filters on it — an unsold sale is a claim on the warehouse.
+        b.HasIndex(x => x.SoldAt);
     }
 }
 

@@ -20,7 +20,7 @@ internal sealed record PartySnapshot(string Name, string? Address, string? Gstin
 /// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
 /// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
 public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company,
-    AppSettingsService settings, StockLedgerService ledger)
+    AppSettingsService settings)
 {
     /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
     public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
@@ -187,8 +187,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
 
     // ================================================================ spare sales
 
-    /// <summary>Validate + compute the PI or tax invoice for a direct spare sale. Nothing is persisted, no
-    /// number is allocated and — importantly — no stock moves; that is <see cref="GenerateSaleAsync"/>'s job.</summary>
+    /// <summary>Validate + compute the PI or tax invoice for a direct spare sale. Nothing is persisted and
+    /// no number is allocated; <see cref="GenerateSaleAsync"/> does that. Neither of them moves stock —
+    /// the sale's Mark as sold action is the only thing that does.</summary>
     public async Task<BuiltSaleDocument> BuildSaleAsync(GenerateSaleDocumentRequest req, long userId, CancellationToken ct)
     {
         if (!Enum.TryParse<DocumentType>(req.DocType, true, out var docType))
@@ -221,27 +222,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             if (!string.IsNullOrWhiteSpace(sale.InvNo))
                 throw new BillingException($"Invoice {sale.InvNo} has already been generated for this sale.");
 
-            // The goods leave on this document, so re-check availability up front and name the item.
-            // Stock can have moved since the sale was entered — a PI is not a reservation. The guarded
-            // decrement in GenerateSaleAsync is still the authority; this only gives a better message
-            // (and reaches the user at preview time, before they confirm).
-            // One query for the whole sale, not one per line.
-            var partIds = sale.Lines.Select(l => l.PartId).Distinct().ToList();
-            var onHand = await db.StockBalances.AsNoTracking()
-                .Where(b => b.TechnicianId == StockBalance.Warehouse && partIds.Contains(b.PartId))
-                .ToDictionaryAsync(b => b.PartId, b => b.OnHand, ct);
-
-            // Grouped by part: the same part can appear on two lines (list price and a discounted one),
-            // and each line passing on its own would still overdraw the balance between them.
-            foreach (var g in sale.Lines.GroupBy(l => l.PartId))
-            {
-                var need = g.Sum(l => l.Qty);
-                var have = onHand.GetValueOrDefault(g.Key);
-                if (have < need)
-                    throw new BillingException(
-                        $"{g.First().ItemCode} is down to {have} in warehouse stock but this sale needs {need}. " +
-                        "Receive stock or edit the sale before invoicing.");
-            }
+            // No stock check here. Invoicing bills the customer; it does not move goods — Mark as sold
+            // does, and that is where availability is enforced. A sale can therefore be invoiced before
+            // the goods are picked, or after they were handed over, without either order being wrong.
         }
 
         var party = await ResolvePartyAsync(sale.DealerId, sale.CustomerId, req.PartyName, req.PartyAddress,
@@ -277,10 +260,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         return new BuiltSaleDocument(doc, sale);
     }
 
-    /// <summary>Persist a sale document: allocate the number and stamp it onto the sale. Generating the
-    /// INVOICE is also the moment the goods leave — each line draws its part down from the warehouse via a
-    /// guarded decrement, so an item that sold out since the sale was entered fails the whole transaction
-    /// rather than driving the balance negative.</summary>
+    /// <summary>Persist a sale document: allocate the number and stamp it onto the sale. Nothing here
+    /// touches stock — the warehouse moves only when the sale is marked sold, which is a separate action
+    /// on the sale and the single place that draws goods out.</summary>
     public async Task<long> GenerateSaleAsync(GenerateSaleDocumentRequest req, long userId, CancellationToken ct)
     {
         var (doc, sale) = await BuildSaleAsync(req, userId, ct);
@@ -300,9 +282,6 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             sale.InvNo = doc.DocNo;
             sale.InvDate = doc.DocDate;
             sale.Status = SpareSaleStatus.Invoiced;
-            foreach (var l in sale.Lines)
-                await ledger.SaleOutAsync(l.PartId, l.ItemCode, l.Qty, userId, sale.Id,
-                    $"{doc.DocNo} ({sale.SaleNo})", ct);
         }
 
         await db.SaveChangesAsync(ct);

@@ -33,21 +33,40 @@ public class PasstestRepository(
 
     public bool Configured => !string.IsNullOrWhiteSpace(_opt.ConnectionString);
 
-    /// <summary><paramref name="fallbackMonths"/> is only used when the machine's own row carries no
-    /// warranty term. passtestdata.Warranty is per-machine — what was actually sold — so it outranks
-    /// the dealer's blanket term and the house default.</summary>
+    /// <summary>The most recent record for a serial, or null. Callers that only want one answer — the
+    /// dashboard's warranty check, the global-search serial panel — use this; inward autofill asks for
+    /// every match instead, because picking the wrong one there fills a form with another unit's
+    /// details.
+    ///
+    /// <paramref name="fallbackMonths"/> is only used when the machine's own row carries no warranty
+    /// term. passtestdata.Warranty is per-machine — what was actually sold — so it outranks the
+    /// dealer's blanket term and the house default.</summary>
     public async Task<MachineTestDto?> FindBySerialAsync(string serial, int? fallbackMonths, CancellationToken ct)
+        => (await FindMatchesBySerialAsync(serial, fallbackMonths, 1, ct)).FirstOrDefault();
+
+    /// <summary>Every passtestdata row carrying this serial in any of its serial columns, newest
+    /// invoice first.
+    ///
+    /// More than one is normal rather than exceptional: a unit that came back through the factory is
+    /// tested again and gets a second row, and a component serial is reused across the machines it
+    /// was fitted to. The old lookup took whichever row the server happened to return first, so an
+    /// inward form could be autofilled from a five-year-old test of the same unit.</summary>
+    public async Task<List<MachineTestDto>> FindMatchesBySerialAsync(
+        string serial, int? fallbackMonths, int limit, CancellationToken ct)
     {
         var sn = serial.Trim();
-        if (sn.Length == 0 || !Configured) return null;
+        if (sn.Length == 0 || !Configured) return [];
 
-        var cacheKey = $"passtest:sn:{sn.ToLowerInvariant()}";
-        if (!cache.TryGetValue(cacheKey, out Dictionary<string, string>? row) || row is null)
+        // The cache is keyed by serial AND row cap: a one-row hit must not answer a request for all
+        // of them. Both keys hold the same rows for the same serial, so the extra entry is cheap.
+        var take = Math.Clamp(limit, 1, 50);
+        var cacheKey = $"passtest:sn:{take}:{sn.ToLowerInvariant()}";
+        if (!cache.TryGetValue(cacheKey, out List<Dictionary<string, string>>? rows) || rows is null)
         {
-            row = await FetchRowAsync(sn, ct);
-            if (row is not null) cache.Set(cacheKey, row, TimeSpan.FromMinutes(_opt.SerialCacheMinutes));
+            rows = await FetchRowsAsync(sn, take, ct);
+            if (rows is not null) cache.Set(cacheKey, rows, TimeSpan.FromMinutes(_opt.SerialCacheMinutes));
         }
-        return row is null ? null : Map(row, fallbackMonths);
+        return rows is null ? [] : rows.Select(r => Map(r, fallbackMonths)).ToList();
     }
 
     public async Task<List<string>> CustomersAsync(CancellationToken ct)
@@ -220,7 +239,10 @@ public class PasstestRepository(
         return cells;
     }
 
-    private async Task<Dictionary<string, string>?> FetchRowAsync(string sn, CancellationToken ct)
+    /// <summary>Rows whose serial columns hold <paramref name="sn"/> exactly, newest invoice first.
+    /// Null (not an empty list) when the query itself failed, so the caller can tell "source down"
+    /// apart from "no such serial".</summary>
+    private async Task<List<Dictionary<string, string>>?> FetchRowsAsync(string sn, int limit, CancellationToken ct)
     {
         try
         {
@@ -228,19 +250,23 @@ public class PasstestRepository(
             await using var cmd = conn.CreateCommand();
             cmd.CommandTimeout = _opt.CommandTimeoutSeconds;
             // One query: OR across every serial column (case-insensitive exact — MySQL collation is CI).
+            // Ordered so the newest test of a re-worked unit is the one a single-row caller sees.
             var where = string.Join(" OR ", SerialColumns.Select(c => $"TRIM(`{c}`) = @sn"));
-            cmd.CommandText = $"SELECT * FROM passtestdata WHERE {where} LIMIT 1";
+            cmd.CommandText = $"SELECT * FROM passtestdata WHERE {where} ORDER BY InvDate DESC LIMIT {limit}";
             cmd.Parameters.AddWithValue("@sn", sn);
 
+            var rows = new List<Dictionary<string, string>>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
-            if (!await reader.ReadAsync(ct)) return null;
+            while (await reader.ReadAsync(ct))
+            {
+                var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var cell in ReadCells(reader)) row[cell.Key] = cell.Value;
 
-            var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var cell in ReadCells(reader)) row[cell.Key] = cell.Value;
-
-            row["__matchedField"] = SerialColumns.FirstOrDefault(c =>
-                row.TryGetValue(c, out var v) && string.Equals(v.Trim(), sn, StringComparison.OrdinalIgnoreCase)) ?? "";
-            return row;
+                row["__matchedField"] = SerialColumns.FirstOrDefault(c =>
+                    row.TryGetValue(c, out var v) && string.Equals(v.Trim(), sn, StringComparison.OrdinalIgnoreCase)) ?? "";
+                rows.Add(row);
+            }
+            return rows;
         }
         catch (Exception ex)
         {

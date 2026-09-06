@@ -58,10 +58,12 @@ public record SaleReturnDto(
     long Id, string ReturnNo, DateTime ReturnDate, string Reason,
     string? CreatedByUsername, DateTime CreatedAt, List<SaleReturnLineDto> Lines);
 
+/// <summary><paramref name="SoldAt"/> is the stock axis and the only one of these that says whether the
+/// goods have left the warehouse — status, payment and the document numbers say nothing about it.</summary>
 public record SpareSaleListItemDto(
     long Id, string SaleNo, DateTime SaleDate, string CustomerType, string PartyName,
     string Status, string PaymentStatus, string? PiNo, string? InvNo,
-    int LineCount, decimal? TotalAmount);
+    int LineCount, decimal? TotalAmount, DateTime? SoldAt);
 
 public record SpareSaleDetailDto(
     long Id, string SaleNo, DateTime SaleDate, string CustomerType,
@@ -72,4 +74,6 @@ public record SpareSaleDetailDto(
     decimal? TaxableAmount, decimal? TaxAmount, decimal? TotalAmount,
     string? Remarks, string? CreatedByUsername, DateTime CreatedAt,
     List<SpareSaleLineDto> Lines,
-    List<SaleReturnDto> Returns);
+    List<SaleReturnDto> Returns,
+    // Stock: null until someone marks the sale sold. Nothing else on this record moves the warehouse.
+    DateTime? SoldAt = null, string? SoldByUsername = null);

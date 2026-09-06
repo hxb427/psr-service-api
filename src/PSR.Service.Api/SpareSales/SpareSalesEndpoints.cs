@@ -23,8 +23,13 @@ internal static class SaleRoles
 }
 
 /// <summary>Direct (counter) sales of warehouse stock to a dealer or a walk-in customer — the legacy
-/// "Generate Sale PI" page. A sale is entered and priced here; the PI / tax invoice for it is produced by
-/// the documents module, and the warehouse is only drawn down when that invoice is generated.</summary>
+/// "Generate Sale PI" page. A sale is entered and priced here and the PI / tax invoice for it is produced
+/// by the documents module.
+///
+/// Stock is a separate axis from paperwork: nothing on the document or payment chain touches the
+/// warehouse, and the goods leave on <c>mark-sold</c> alone. Everything below that talks about stock —
+/// what may still be edited, what may be cancelled, what may be returned — reads
+/// <see cref="Data.Entities.SpareSale.SoldAt"/> and not the status.</summary>
 public static class SpareSalesEndpoints
 {
     private const int MaxPageSize = 200;
@@ -40,6 +45,11 @@ public static class SpareSalesEndpoints
         group.MapPost("/{id:long}/cancel", CancelAsync).RequireAuthorization("SaleManage");
         group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("SaleManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
+        // The one action that moves warehouse stock on a sale. Gated on StockManage rather than
+        // SaleManage: it is a warehouse movement, and the store manager who hands the goods over is
+        // the person who knows they went out.
+        group.MapPost("/{id:long}/mark-sold", MarkSoldAsync).RequireAuthorization("StockManage");
+        group.MapPost("/{id:long}/unmark-sold", UnmarkSoldAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/clear-pi", ClearPiAsync).RequireAuthorization("SaleManage");
         group.MapPost("/{id:long}/returns", CreateReturnAsync).RequireAuthorization("SaleManage");
         // Asked per row by the sale form as the user types, so it stays a single-part lookup.
@@ -78,7 +88,13 @@ public static class SpareSalesEndpoints
                     LineCount = db.SpareSaleLines.Count(l => l.SpareSaleId == s.Id),
                 };
 
-        if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<SpareSaleStatus>(status, true, out var st))
+        // "Sold" / "Unsold" are stock filters rather than statuses, so they are read off SoldAt. The
+        // register mixes the two axes in one drop-down because that is how the counter thinks about it.
+        if (string.Equals(status, "Sold", StringComparison.OrdinalIgnoreCase))
+            q = q.Where(x => x.Sale.SoldAt != null);
+        else if (string.Equals(status, "Unsold", StringComparison.OrdinalIgnoreCase))
+            q = q.Where(x => x.Sale.SoldAt == null && x.Sale.Status != SpareSaleStatus.Cancelled);
+        else if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<SpareSaleStatus>(status, true, out var st))
             q = q.Where(x => x.Sale.Status == st);
         if (!string.IsNullOrWhiteSpace(payment) && Enum.TryParse<PaymentStatus>(payment, true, out var pay))
             q = q.Where(x => x.Sale.PaymentStatus == pay);
@@ -102,7 +118,7 @@ public static class SpareSalesEndpoints
         var items = rows.Select(x => new SpareSaleListItemDto(
             x.Sale.Id, x.Sale.SaleNo, x.Sale.SaleDate, x.Sale.CustomerType, x.PartyName,
             x.Sale.Status.ToString(), x.Sale.PaymentStatus.ToString(), x.Sale.PiNo, x.Sale.InvNo,
-            x.LineCount, pricing ? x.Sale.TotalAmount : null)).ToList();
+            x.LineCount, pricing ? x.Sale.TotalAmount : null, x.Sale.SoldAt)).ToList();
 
         return TypedResults.Ok(new PagedResult<SpareSaleListItemDto>(items, pageNum, size, total));
     }
@@ -153,9 +169,16 @@ public static class SpareSalesEndpoints
         var sale = await db.SpareSales.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
         if (sale is null) return TypedResults.NotFound();
 
-        // Once a PI exists the figures have been sent to the customer, and once invoiced the stock has moved.
-        if (sale.Status != SpareSaleStatus.Pending)
-            return TypedResults.BadRequest($"This sale is {sale.Status.ToString().ToLowerInvariant()} and can no longer be edited.");
+        // Once the goods have gone out, the lines are a record of what left the shelf — rewriting them
+        // would leave the ledger describing a sale that no longer exists. Un-mark it first.
+        if (sale.SoldAt is not null)
+            return TypedResults.BadRequest(
+                "This sale is marked sold and the goods have left the warehouse — un-mark it before editing.");
+        if (sale.Status == SpareSaleStatus.Cancelled)
+            return TypedResults.BadRequest("This sale is cancelled and can no longer be edited.");
+        // Once a PI exists the figures have been sent to the customer, and an invoice is a tax document.
+        if (!string.IsNullOrWhiteSpace(sale.InvNo))
+            return TypedResults.BadRequest($"Invoice {sale.InvNo} has been raised for this sale.");
         if (!string.IsNullOrWhiteSpace(sale.PiNo))
             return TypedResults.BadRequest($"A PI ({sale.PiNo}) has already been generated for this sale.");
 
@@ -181,9 +204,12 @@ public static class SpareSalesEndpoints
         var sale = await db.SpareSales.FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
         if (sale is null) return TypedResults.NotFound();
         if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is already cancelled.");
-        if (sale.Status == SpareSaleStatus.Invoiced)
+        if (sale.SoldAt is not null)
             return TypedResults.BadRequest(
-                $"Invoice {sale.InvNo} has been raised and the goods have left the warehouse — book a stock adjustment instead.");
+                "The goods on this sale have left the warehouse — un-mark it as sold first, or record a return.");
+        // Splitting stock off the document chain does not make a raised tax invoice cancellable.
+        if (!string.IsNullOrWhiteSpace(sale.InvNo))
+            return TypedResults.BadRequest($"Invoice {sale.InvNo} has been raised — this sale can no longer be cancelled.");
 
         sale.Status = SpareSaleStatus.Cancelled;
         user.TryGetUserId(out var uid);
@@ -198,6 +224,8 @@ public static class SpareSalesEndpoints
     {
         var sale = await db.SpareSales.FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
         if (sale is null) return TypedResults.NotFound();
+        if (sale.SoldAt is not null)
+            return TypedResults.BadRequest("The goods on this sale have left the warehouse — un-mark it as sold first.");
         if (sale.Status == SpareSaleStatus.Invoiced)
             return TypedResults.BadRequest($"Invoice {sale.InvNo} has been raised — an invoiced sale cannot be removed.");
 
@@ -232,6 +260,86 @@ public static class SpareSalesEndpoints
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
     }
 
+    /// <summary>Hand the goods over: draw every line down from the warehouse and stamp the sale sold.
+    ///
+    /// This is the only path on a spare sale that moves stock. It is deliberately independent of the
+    /// PI, the invoice and the payment status — a counter sale is often handed over and settled in cash
+    /// with no paperwork at all, and a sale invoiced in advance should not empty the shelf before anyone
+    /// has picked it.
+    ///
+    /// The decrement is guarded per line, so a part that sold out since the sale was entered fails the
+    /// whole transaction rather than driving a balance negative. Quantities are grouped by part first:
+    /// the same part can sit on two lines (list price and a discounted one) and each passing on its own
+    /// would still overdraw the balance between them.</summary>
+    private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> MarkSoldAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var sale = await db.SpareSales.Include(s => s.Lines)
+            .FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
+        if (sale is null) return TypedResults.NotFound();
+        if (sale.SoldAt is not null) return TypedResults.BadRequest("This sale is already marked sold.");
+        if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
+        if (sale.Lines.Count == 0) return TypedResults.BadRequest("This sale has no items on it.");
+
+        user.TryGetUserId(out var uid);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var g in sale.Lines.GroupBy(l => l.PartId))
+                await ledger.SaleOutAsync(g.Key, g.First().ItemCode, g.Sum(l => l.Qty), uid, sale.Id,
+                    $"Sold ({sale.SaleNo})", ct);
+
+            sale.SoldAt = DateTime.UtcNow;
+            sale.SoldByUserId = uid;
+            audit.Log(uid, "spare-sale.mark-sold", "spare_sale", sale.Id,
+                details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) out of the warehouse",
+                ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex)
+        {
+            await tx.RollbackAsync(ct);
+            return TypedResults.BadRequest(ex.Message);
+        }
+
+        return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
+    /// <summary>Undo a Mark as sold that should not have happened, putting the units back on the shelf.
+    ///
+    /// Not a return: nothing reached the customer, so the sale keeps no return record and the ledger
+    /// carries a SaleUnsold movement instead. Blocked once anything HAS come back as a return — at that
+    /// point the two would fight over the same units, and the return is the record that describes what
+    /// physically happened.</summary>
+    private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> UnmarkSoldAsync(
+        long id, ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var sale = await db.SpareSales.Include(s => s.Lines)
+            .FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
+        if (sale is null) return TypedResults.NotFound();
+        if (sale.SoldAt is null) return TypedResults.BadRequest("This sale is not marked sold.");
+        if (await db.SpareSaleReturns.AnyAsync(r => r.SpareSaleId == sale.Id, ct))
+            return TypedResults.BadRequest(
+                "Items have already been returned against this sale — it can no longer be un-marked.");
+
+        user.TryGetUserId(out var uid);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        foreach (var g in sale.Lines.GroupBy(l => l.PartId))
+            await ledger.SaleUnsoldInAsync(g.Key, g.Sum(l => l.Qty), uid, sale.Id, $"Un-marked ({sale.SaleNo})", ct);
+
+        sale.SoldAt = null;
+        sale.SoldByUserId = null;
+        audit.Log(uid, "spare-sale.unmark-sold", "spare_sale", sale.Id,
+            details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) back in the warehouse", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+
+        return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
     /// <summary>Un-stamp a PI so the sale can be corrected and re-quoted.
     ///
     /// The issued PI document is deliberately NOT deleted — it was sent to the customer, and a quote
@@ -259,9 +367,9 @@ public static class SpareSalesEndpoints
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
     }
 
-    /// <summary>Record goods coming back from an invoiced sale and put them back in the warehouse.
+    /// <summary>Record goods coming back from a sale and put them back in the warehouse.
     ///
-    /// Only an invoiced sale can be returned against, because that is the only state in which stock
+    /// Only a sale marked sold can be returned against, because that is the only state in which stock
     /// actually left. Quantities are capped at what was sold minus what has already come back, so
     /// repeated returns cannot inflate the warehouse past what went out.</summary>
     private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> CreateReturnAsync(
@@ -272,9 +380,9 @@ public static class SpareSalesEndpoints
         var sale = await db.SpareSales.Include(s => s.Lines)
             .FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
         if (sale is null) return TypedResults.NotFound();
-        if (sale.Status != SpareSaleStatus.Invoiced)
+        if (sale.SoldAt is null)
             return TypedResults.BadRequest(
-                "Only an invoiced sale can be returned against — nothing has left the warehouse yet.");
+                "This sale has not been marked sold — nothing has left the warehouse to come back.");
         if (string.IsNullOrWhiteSpace(req.Reason))
             return TypedResults.BadRequest("Give a reason for the return.");
 
@@ -382,6 +490,10 @@ public static class SpareSalesEndpoints
 
         var createdBy = await db.Users.AsNoTracking().Where(u => u.Id == sale.CreatedByUserId)
             .Select(u => (string?)(u.FullName ?? u.Username)).FirstOrDefaultAsync(ct);
+        var soldBy = sale.SoldByUserId is { } sbid
+            ? await db.Users.AsNoTracking().Where(u => u.Id == sbid)
+                .Select(u => (string?)(u.FullName ?? u.Username)).FirstOrDefaultAsync(ct)
+            : null;
 
         // Stock and returns are fetched for the whole sale at once. Asking per line meant a round trip
         // per row every time a sale was opened.
@@ -421,6 +533,6 @@ public static class SpareSalesEndpoints
             sale.Status.ToString(), sale.PaymentStatus.ToString(),
             sale.PiNo, sale.PiDate, sale.InvNo, sale.InvDate,
             pricing ? sale.TaxableAmount : null, pricing ? sale.TaxAmount : null, pricing ? sale.TotalAmount : null,
-            sale.Remarks, createdBy, sale.CreatedAt, lines, returnDtos);
+            sale.Remarks, createdBy, sale.CreatedAt, lines, returnDtos, sale.SoldAt, soldBy);
     }
 }

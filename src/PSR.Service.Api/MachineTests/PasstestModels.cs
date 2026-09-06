@@ -33,6 +33,12 @@ public record MachineTestDto(
 
 public record MachineComponentDto(string Field, string Label, string Serial);
 
+/// <summary>Every factory record carrying a serial, newest first. Inward autofill asks for this rather
+/// than for a single record: a re-tested unit has more than one row, and a component serial belongs to
+/// every machine it was fitted to, so which row is the right one is the operator's call, not the
+/// database's.</summary>
+public record MachineTestMatchesDto(List<MachineTestDto> Matches, bool Truncated);
+
 public record MachineCustomersDto(List<string> Customers);
 
 /// <summary>One row of the legacy <c>dealer_warranty</c> master (the curated dealer list the old app

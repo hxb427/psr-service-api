@@ -143,9 +143,9 @@ public class SpareSaleService(AppDbContext db)
 
     /// <summary>What a part's warehouse balance looks like to a sale being written.
     ///
-    /// Stock only leaves on the invoice, so a pending sale holds nothing — but the units on it are
-    /// already promised to someone, and selling them twice is how a customer pays for goods that are
-    /// not there. Available treats every other pending sale as a claim. The sale being edited is
+    /// Stock only leaves when a sale is marked sold, so an unsold sale holds nothing — but the units on
+    /// it are already promised to someone, and selling them twice is how a customer pays for goods that
+    /// are not there. Available treats every other unsold sale as a claim. The sale being edited is
     /// excluded so its own lines do not count against it (pass 0 for a sale not yet saved).</summary>
     public async Task<PartAvailability> AvailabilityAsync(long partId, long excludeSaleId, CancellationToken ct)
     {
@@ -171,17 +171,22 @@ public class SpareSaleService(AppDbContext db)
             id => new PartAvailability(id, onHand.GetValueOrDefault(id), committed.GetValueOrDefault(id)));
     }
 
-    /// <summary>Units of each part already claimed by other pending sales. Grouped in SQL — pulling the
-    /// lines back to sum them in memory would drag every pending sale line across for one lookup.
-    /// Exposed so a test can force the provider to translate it. Cancelled and invoiced sales are
-    /// excluded: the first never ships, the second has already taken its stock.</summary>
+    /// <summary>Units of each part already claimed by other sales that have not taken their stock yet.
+    /// Grouped in SQL — pulling the lines back to sum them in memory would drag every open sale line
+    /// across for one lookup. Exposed so a test can force the provider to translate it.
+    ///
+    /// The filter is SoldAt, not Status: a sale that has been marked sold has already drawn its units
+    /// out of the balance and must not be counted a second time, while one that has been invoiced but
+    /// not yet marked still owes the warehouse those units. Cancelled sales never ship, so they claim
+    /// nothing either way.</summary>
     public static IQueryable<PartCommitment> CommittedQuery(
         AppDbContext db, IReadOnlyCollection<long> partIds, long excludeSaleId) =>
         from l in db.SpareSaleLines.AsNoTracking()
         join s in db.SpareSales.AsNoTracking() on l.SpareSaleId equals s.Id
         where partIds.Contains(l.PartId)
               && !s.IsDeleted
-              && s.Status == SpareSaleStatus.Pending
+              && s.SoldAt == null
+              && s.Status != SpareSaleStatus.Cancelled
               && s.Id != excludeSaleId
         group l by l.PartId into g
         select new PartCommitment(g.Key, g.Sum(x => x.Qty));

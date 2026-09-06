@@ -14,8 +14,14 @@ public enum SpareSaleStatus { Pending, Invoiced, Cancelled }
 /// as goods rather than fitted as parts on a service job (legacy `sparesales` + generate_sale_pi_page).
 ///
 /// The document chain mirrors the service side: generate a PI, mark payment received, then generate the
-/// tax invoice. <b>Stock leaves the warehouse when the INVOICE is generated</b>, not when the sale is
-/// saved — so a sale sitting at Pending reserves nothing.</summary>
+/// tax invoice. <b>None of it touches stock.</b> The goods leave on one explicit action — Mark as sold,
+/// which stamps <see cref="SoldAt"/> and books the warehouse movement. Paperwork and stock were welded
+/// together before: the invoice both billed the customer and emptied the shelf, so a sale invoiced for
+/// goods handed over last week moved the stock a week late, and a sale settled in cash with no invoice
+/// never moved it at all. Splitting them lets the two happen in either order, or only one of them.
+///
+/// A sale that has not been marked sold reserves nothing, but it does count as a claim on the stock
+/// (see SpareSaleService.CommittedQuery) so the same units are not sold twice over.</summary>
 public class SpareSale : ITimestamps
 {
     public long Id { get; set; }
@@ -35,6 +41,12 @@ public class SpareSale : ITimestamps
     public DateTime? PiDate { get; set; }
     public string? InvNo { get; set; }
     public DateTime? InvDate { get; set; }
+
+    /// <summary>When the goods actually left the warehouse. Null until someone marks the sale sold;
+    /// set is the ONLY state in which this sale has moved stock, and it is what the edit, cancel and
+    /// return rules read. Nothing else — payment, PI, invoice — writes it.</summary>
+    public DateTime? SoldAt { get; set; }
+    public long? SoldByUserId { get; set; }
 
     // Line totals, excluding courier (courier is a per-document charge, entered at generation).
     public decimal TaxableAmount { get; set; }

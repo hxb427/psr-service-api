@@ -121,8 +121,8 @@ public class StockLedgerService(AppDbContext db)
     }
 
     /// <summary>Ship a spare out of the warehouse against a direct sale. Called once per sale line when the
-    /// tax invoice is generated — that is the point the goods actually leave, so a Pending sale reserves
-    /// nothing and an over-sold item fails here rather than silently going negative.</summary>
+    /// sale is marked sold — that one action is the point the goods actually leave, so a sale that has not
+    /// been marked reserves nothing and an over-sold item fails here rather than silently going negative.</summary>
     public async Task SaleOutAsync(long partId, string itemCode, int qty, long byUser, long saleId,
         string? remarks, CancellationToken ct)
     {
@@ -137,7 +137,23 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>Goods coming back from an invoiced sale go straight to the warehouse. No guard is needed
+    /// <summary>Undo a Mark as sold: the units go back on the shelf. Distinct from a sale return — nothing
+    /// ever reached the customer, the sale is simply not sold any more — so it carries its own movement
+    /// type and the ledger keeps the two apart. No guard: putting stock back cannot drive a balance
+    /// negative.</summary>
+    public async Task SaleUnsoldInAsync(long partId, int qty, long byUser, long saleId,
+        string? remarks, CancellationToken ct)
+    {
+        await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.SaleUnsold, Quantity = qty,
+            PerformedByUserId = byUser, ReferenceType = "SPARE_SALE", ReferenceId = saleId,
+            Remarks = remarks,
+        });
+    }
+
+    /// <summary>Goods coming back from a sold sale go straight to the warehouse. No guard is needed
     /// the way SaleOutAsync needs one — putting stock back cannot drive a balance negative — but it still
     /// goes through the ledger so the movement carries a SALE_RETURN reference and shows up in the audit
     /// trail as a return rather than an unexplained adjustment.</summary>

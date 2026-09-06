@@ -37,17 +37,33 @@ public class SpareSaleAvailabilityTests
     }
 
     [Fact]
-    public void Committed_query_counts_only_live_pending_sales()
+    public void Committed_query_counts_only_sales_that_have_not_taken_their_stock()
     {
         using var db = NewContext();
 
         var sql = SpareSaleService.CommittedQuery(db, [1L], excludeSaleId: 7).ToQueryString();
 
-        // An invoiced sale has already taken its stock and a cancelled one never will, so counting
-        // either would hide units that are genuinely on the shelf.
-        sql.Should().Contain("Pending");
+        // The stock axis is sold_at, not the status: a sale marked sold has already drawn its units out
+        // of the balance and counting it again would hide stock that is genuinely on the shelf, while a
+        // sale invoiced but not yet marked still owes the warehouse those units and must count.
+        sql.Should().Contain("sold_at");
+        // Cancelled sales never ship, so they claim nothing either way.
+        sql.Should().Contain("Cancelled");
         sql.Should().Contain("is_deleted");
         // The sale being edited must not count against itself.
         sql.Should().Contain("7");
+    }
+
+    /// <summary>The status is deliberately NOT what decides a claim any more. An invoiced sale whose
+    /// goods have not been handed over still holds its units, and pinning the filter back to
+    /// Status == Pending would quietly release them to the next sale.</summary>
+    [Fact]
+    public void Committed_query_does_not_filter_on_pending_status()
+    {
+        using var db = NewContext();
+
+        var sql = SpareSaleService.CommittedQuery(db, [1L], excludeSaleId: 7).ToQueryString();
+
+        sql.Should().NotContain("Pending");
     }
 }

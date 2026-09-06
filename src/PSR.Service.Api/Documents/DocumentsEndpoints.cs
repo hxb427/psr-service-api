@@ -100,7 +100,9 @@ public static class DocumentsEndpoints
             docId = await billing.GenerateSaleAsync(req, uid, ct);
         }
         catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
-        // Raised by the guarded warehouse decrement when an item sold out after the sale was entered.
+        // Generating a sale document no longer moves stock, so nothing here should raise this. Kept
+        // because the ledger is one throw away from any billing path that grows a movement later, and a
+        // stock message reaching the user beats a 500 with nothing in it.
         catch (StockException ex) { return TypedResults.BadRequest(ex.Message); }
 
         var dto = await BuildDtoAsync(db, docId, ct);

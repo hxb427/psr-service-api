@@ -149,20 +149,42 @@ public static partial class ServicesEndpoints
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> DispatchAsync(
         long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
     {
-        // Reference number is mandatory; the outward DC number is optional.
-        if (string.IsNullOrWhiteSpace(req.ReferenceNo)) return TypedResults.BadRequest("Reference number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
         if (job.ServiceStatus is not ServiceStatus.Completed)
             return TypedResults.BadRequest($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
 
         user.TryGetUserId(out var uid);
-        job.OutwardReferenceNo = req.ReferenceNo.Trim();
-        job.OutwardDcNo = string.IsNullOrWhiteSpace(req.OutwardDcNo) ? null : req.OutwardDcNo.Trim();
-        job.DcDate = req.DcDate ?? DateTime.UtcNow;
-        var note = $"Dispatched (ref {job.OutwardReferenceNo}" + (job.OutwardDcNo is null ? ")" : $", DC {job.OutwardDcNo})");
+
+        // Blank means "leave it alone", never "clear it". The reference is stamped by its own action and
+        // the DC number by generating the DC document, so by the time anything is dispatched both are
+        // usually already on the job — asking for them again at this point only risked overwriting a
+        // generated DC number with an empty box, which is what this used to do.
+        if (!string.IsNullOrWhiteSpace(req.ReferenceNo)) job.OutwardReferenceNo = req.ReferenceNo.Trim();
+        if (!string.IsNullOrWhiteSpace(req.OutwardDcNo)) job.OutwardDcNo = req.OutwardDcNo.Trim();
+        // Only stamp a dispatch date when the job has none: a DC generated last week dated the movement,
+        // and re-dating it to now would misreport the turnaround.
+        job.DcDate = req.DcDate ?? job.DcDate ?? DateTime.UtcNow;
+
+        // A dispatched unit has to be traceable to a document. The dialog that used to demand a
+        // reference number is gone, so the requirement is enforced here against what the job actually
+        // carries — any one of the PI, the delivery challan or the outward reference will do, because
+        // each of them is a number the goods can be followed by. Checked after the assignments above so
+        // a request that supplies one of them satisfies it in the same call.
+        if (string.IsNullOrWhiteSpace(job.PiNo)
+            && string.IsNullOrWhiteSpace(job.OutwardDcNo)
+            && string.IsNullOrWhiteSpace(job.OutwardReferenceNo))
+            return TypedResults.BadRequest(
+                "This job has no PI, delivery challan or outward reference — generate one, or set the "
+                + "outward reference, before dispatching it.");
+
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(job.OutwardReferenceNo)) parts.Add($"ref {job.OutwardReferenceNo}");
+        if (!string.IsNullOrWhiteSpace(job.OutwardDcNo)) parts.Add($"DC {job.OutwardDcNo}");
+        if (parts.Count == 0 && !string.IsNullOrWhiteSpace(job.PiNo)) parts.Add($"PI {job.PiNo}");
+        var note = $"Dispatched ({string.Join(", ", parts)})";
         WriteTransition(db, job, ServiceStatus.Dispatched, uid, note);
-        audit.Log(uid, "service.dispatch", "service", job.Id, details: job.OutwardReferenceNo, ip: http.GetIp());
+        audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));

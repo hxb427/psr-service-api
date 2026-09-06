@@ -8,8 +8,9 @@ public enum MovementType
     Consumption,  // technician -= qty (parts used while servicing; applied on service complete)
     ConsumptionReversal, // technician += qty (a completed service was reverted — parts returned to the tech)
     Replacement,  // warehouse -= qty (a whole replacement unit shipped out for a Replaced service)
-    Sale,         // warehouse -= qty (spare sold directly to a dealer/customer; applied on invoice)
-    SaleReturn,   // warehouse += qty (invoiced spare sale sent back; applied on the return)
+    Sale,         // warehouse -= qty (spare sold directly to a dealer/customer; applied on Mark as sold)
+    SaleReturn,   // warehouse += qty (sold spare sale sent back; applied on the return)
+    SaleUnsold,   // warehouse += qty (a sale marked sold in error was un-marked; the exact reversal of Sale)
     Adjustment,   // warehouse += qty (qty may be negative)
     Transfer,     // sender technician -= qty ; receiver technician += qty (peer transfer at acknowledgement)
 }
