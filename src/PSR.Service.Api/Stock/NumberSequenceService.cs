@@ -11,6 +11,19 @@ public class NumberSequenceService(AppDbContext db)
 {
     public async Task<string> NextAsync(string key, CancellationToken ct)
     {
+        // The FOR UPDATE below is the entire concurrency guarantee, and it only holds for as long as
+        // the enclosing transaction does. Called outside one, MySQL autocommits the SELECT, the lock is
+        // released before the row is written back, and two people saving at the same moment are handed
+        // the same number — which then fails on the unique index, or worse, does not.
+        //
+        // Nothing in the type system says "call me in a transaction", so it is asserted here. Every
+        // current caller already opens one; this is what stops the next one from quietly not.
+        if (db.Database.CurrentTransaction is null)
+            throw new InvalidOperationException(
+                $"NextAsync('{key}') was called outside a transaction. The sequence row lock only holds "
+                + "inside one, so the number it returns would not be unique under concurrent use. "
+                + "Wrap the call in db.Database.BeginTransactionAsync().");
+
         var row = await db.NumberSequences
             .FromSqlInterpolated($"SELECT * FROM `number_sequences` WHERE `key` = {key} FOR UPDATE")
             .FirstOrDefaultAsync(ct)

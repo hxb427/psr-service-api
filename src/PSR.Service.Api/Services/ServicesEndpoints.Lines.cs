@@ -142,12 +142,9 @@ public static partial class ServicesEndpoints
                     .Select(b => b.OnHand).FirstOrDefaultAsync(ct);
                 var booked = await BookedQtyQuery(db, part.Id, holder).SumAsync(ct);
                 var pending = asked.GetValueOrDefault(part.Id);
-                var free = onHand - booked - pending;
-                if (free < qty)
-                    return (null, booked + pending > 0
-                        ? $"You hold {onHand} × {part.ItemCode}, and {booked + pending} of those are already spoken for. "
-                          + $"{Math.Max(free, 0)} left to book, not {qty}."
-                        : $"You hold {onHand} × {part.ItemCode} — not enough for {qty}.");
+                var free = Math.Max(onHand - booked - pending, 0);
+                if (onHand - booked - pending < qty)
+                    return (null, ShortfallMessage(part.ItemCode, qty, onHand, booked, pending, free));
                 asked[part.Id] = pending + qty;
             }
         }
@@ -163,6 +160,32 @@ public static partial class ServicesEndpoints
 
         line.Amount = line.UnitPrice * qty;
         return (line, null);
+    }
+
+    /// <summary>Why a component line will not fit, in the order the technician needs to hear it: which
+    /// part, what they asked for, and what is actually left.
+    ///
+    /// The old wording led with the holding and then said the rest were "already spoken for", which
+    /// reads as an accusation and never said WHERE they had gone. Each sentence here answers one
+    /// question, and the parts that do not apply are left out rather than printed as zeroes — a
+    /// technician who simply asked for more than they carry should not have to read about batches and
+    /// other jobs to work that out.</summary>
+    private static string ShortfallMessage(
+        string itemCode, int qty, int onHand, int booked, int pending, int free)
+    {
+        if (onHand == 0)
+            return $"{itemCode} — you are not carrying any of this part, so {qty} cannot be added. "
+                   + "Request or collect stock first.";
+
+        if (booked == 0 && pending == 0)
+            return $"{itemCode} — you asked for {qty} but you are only carrying {onHand}.";
+
+        var where = new List<string>();
+        if (booked > 0) where.Add($"{booked} on your other jobs in service");
+        if (pending > 0) where.Add($"{pending} elsewhere in what you are saving now");
+
+        return $"{itemCode} — you asked for {qty} but only {free} can be added. "
+               + $"You are carrying {onHand}: {string.Join(" and ", where)}.";
     }
 
     /// <summary>How much of one part a technician already has committed but not yet consumed.
