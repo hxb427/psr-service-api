@@ -92,9 +92,15 @@ jobs:
           # The EC2 box must authenticate its Docker daemon to ECR before pulling.
           # Its instance role (psr-ec2-ecr-read) supplies the credentials for
           # `aws ecr get-login-password`; the token it returns is good for 12h.
+          # The bind-mounted logs dir must be writable by the container's non-root user
+          # (APP_UID=1654 in the aspnet base image). Created by hand it lands as ec2-user:ec2-user
+          # (1000), Serilog's file sink fails silently, and the only surviving log is docker's
+          # json-file — which rotates away at 10MB x 5. `install -d` is idempotent: it creates the
+          # directory when missing and re-applies the ownership when it already exists.
           ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
             "aws ecr get-login-password --region ${{ env.AWS_REGION }} \
                | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+             && sudo install -d -o 1654 -g 1654 /opt/psr/service-api/logs \
              && cd /opt/psr/service-api \
              && docker compose pull \
              && docker compose up -d --remove-orphans \

@@ -10,6 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The bulk workflow helpers (ServicesEndpoints.Bulk.cs / .Workflow.cs) are internal rather than
+         public: they are implementation detail of the endpoints, but their per-job guards and the
+         idempotency that makes every bulk action safe to replay are worth testing directly. -->
+    <InternalsVisibleTo Include="PSR.Service.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="ClosedXML" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />

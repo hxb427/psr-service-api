@@ -19,6 +19,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Needed to stand up a WebApplication in-process so the endpoint routes can be built, which is
+         what validates minimal-API parameter binding. No server is started and no database is touched. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\PSR.Service.Api\PSR.Service.Api.csproj" />
   </ItemGroup>
 

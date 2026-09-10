@@ -131,6 +131,42 @@ public record InvoiceNoRequest(
     [Required, StringLength(50)] string InvNo,
     DateTime? InvDate);
 
+// ----- bulk transitions -----
+// One request for a whole selection, replacing the client-side loop that fired one POST per job.
+// Each request carries the ids plus whatever its single-job counterpart needs. Ids are capped at
+// MaxBulkIds server-side, which matches the list page size — a selection cannot exceed one page.
+
+public record BulkIdsRequest([Required, MinLength(1)] long[] Ids);
+public record BulkNoteRequest([Required, MinLength(1)] long[] Ids, [StringLength(500)] string? Note);
+public record BulkAssignRequest(
+    [Required, MinLength(1)] long[] Ids,
+    [Required] long TechnicianId,
+    string? Priority,
+    DateTime? PromisedDate);
+public record BulkPaymentRequest([Required, MinLength(1)] long[] Ids, [Required] string Status);
+public record BulkDispatchRequest(
+    [Required, MinLength(1)] long[] Ids,
+    [StringLength(80)] string? ReferenceNo = null,
+    [StringLength(50)] string? OutwardDcNo = null,
+    DateTime? DcDate = null);
+public record BulkOutwardReferenceRequest(
+    [Required, MinLength(1)] long[] Ids,
+    [Required, StringLength(80)] string ReferenceNo,
+    [StringLength(50)] string? OutwardDcNo);
+public record BulkInvoiceNoRequest(
+    [Required, MinLength(1)] long[] Ids,
+    [Required, StringLength(50)] string InvNo,
+    DateTime? InvDate);
+
+/// <summary>Per-job reason a bulk action could not be applied. ServiceNo is blank when the id did not
+/// resolve to a job at all, which is the only case where the client has no number to show.</summary>
+public record BulkFailureDto(long Id, string ServiceNo, string Error);
+
+/// <summary>What a bulk action actually did. Jobs already in the requested state count as succeeded —
+/// every bulk action is idempotent, so replaying one after a lost response reports the truth rather
+/// than inventing failures.</summary>
+public record BulkActionResultDto(IReadOnlyList<long> Succeeded, IReadOnlyList<BulkFailureDto> Failed);
+
 // ----- read -----
 public record ServiceListItemDto(
     long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, long? CustomerId, long? DealerId, string? CustomerName, string SerialNo, string? PsCode, string? ModelName, string? Description,

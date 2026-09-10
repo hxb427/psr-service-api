@@ -46,6 +46,21 @@ public static partial class ServicesEndpoints
         group.MapPut("/{id:long}/record", UpdateRecordAsync).RequireAuthorization("ServiceRecordEdit");
         group.MapDelete("/{id:long}", SoftDeleteAsync).RequireAuthorization("ServiceDelete");
 
+        // Bulk counterparts (ServicesEndpoints.Bulk.cs). The desk applies these to a whole page of
+        // jobs at a time; as N sequential POSTs that was N chances for one lost packet to strand the
+        // run. Same authorization as the single-job route each one mirrors, and the per-job rules are
+        // literally the same code — both call the shared Apply* helpers.
+        var bulk = group.MapGroup("/bulk");
+        bulk.MapPost("/assign", BulkAssignAsync).RequireAuthorization("ServiceAssign");
+        bulk.MapPost("/acknowledge", BulkAcknowledgeAsync);   // assigned technician only, per job
+        bulk.MapPost("/start", BulkStartAsync);               // assigned technician only, per job
+        bulk.MapPost("/dispatch", BulkDispatchAsync).RequireAuthorization("DispatchManage");
+        bulk.MapPost("/stock", BulkStockAsync).RequireAuthorization("DispatchManage");
+        bulk.MapPost("/payment", BulkPaymentAsync).RequireAuthorization("PaymentManage");
+        bulk.MapPost("/outward-reference", BulkOutwardReferenceAsync).RequireAuthorization("DispatchManage");
+        bulk.MapPost("/invoice-no", BulkInvoiceNoAsync).RequireAuthorization("DocumentManage");
+        bulk.MapPost("/delete", BulkDeleteAsync).RequireAuthorization("ServiceDelete");
+
         return app;
     }
 }

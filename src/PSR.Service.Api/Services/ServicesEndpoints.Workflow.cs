@@ -21,14 +21,32 @@ public static partial class ServicesEndpoints
 
     // ---------------------------------------------------------------- assignment + acknowledgement
 
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> AssignAsync(
+    /// <summary>Assign at inward; re-assign is allowed only while still Assigned (before the technician
+    /// acknowledges). Idempotent: re-assigning a job to the technician it already has is a no-op success,
+    /// so a replayed request cannot turn into a spurious failure.</summary>
+    internal static ApplyResult ApplyAssign(ServiceJob job, AssignRequest req, string techUsername,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        if (job.ServiceStatus == ServiceStatus.Assigned && job.TechnicianId == req.TechnicianId)
+            return ApplyResult.Applied;
+        if (job.ServiceStatus is not (ServiceStatus.Inward or ServiceStatus.Assigned))
+            return ApplyResult.Invalid($"A technician can only be (re)assigned before acknowledgement (currently {job.ServiceStatus}).");
+
+        var reassign = job.ServiceStatus == ServiceStatus.Assigned;
+        job.TechnicianId = req.TechnicianId;
+        if (!string.IsNullOrWhiteSpace(req.Priority) && Enum.TryParse<Priority>(req.Priority, true, out var pr))
+            job.Priority = pr;
+        if (req.PromisedDate is { } pd) job.PromisedDate = pd;
+        WriteTransition(db, job, ServiceStatus.Assigned, uid, $"{(reassign ? "Re-assigned" : "Assigned")} to {techUsername}");
+        audit.Log(uid, reassign ? "service.reassign" : "service.assign", "service", job.Id, details: techUsername, ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> AssignAsync(
         long id, [FromBody] AssignRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        // Assign at inward; re-assign is allowed only while still Assigned (before the technician acknowledges).
-        if (job.ServiceStatus is not (ServiceStatus.Inward or ServiceStatus.Assigned))
-            return TypedResults.BadRequest($"A technician can only be (re)assigned before acknowledgement (currently {job.ServiceStatus}).");
 
         var tech = await db.Users.FirstOrDefaultAsync(u => u.Id == req.TechnicianId, ct);
         if (tech is null || !tech.IsActive) return TypedResults.BadRequest("Technician not found or inactive.");
@@ -36,16 +54,29 @@ public static partial class ServicesEndpoints
             return TypedResults.BadRequest("Selected user is not a technician.");
 
         user.TryGetUserId(out var uid);
-        var reassign = job.ServiceStatus == ServiceStatus.Assigned;
-        job.TechnicianId = req.TechnicianId;
-        if (!string.IsNullOrWhiteSpace(req.Priority) && Enum.TryParse<Priority>(req.Priority, true, out var pr))
-            job.Priority = pr;
-        if (req.PromisedDate is { } pd) job.PromisedDate = pd;
-        WriteTransition(db, job, ServiceStatus.Assigned, uid, $"{(reassign ? "Re-assigned" : "Assigned")} to {tech.Username}");
-        audit.Log(uid, reassign ? "service.reassign" : "service.assign", "service", job.Id, details: tech.Username, ip: http.GetIp());
+        if (ApplyAssign(job, req, tech.Username, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    /// <summary>Acknowledge = the technician confirms receipt; it does NOT start the work (that's /start).
+    /// <see cref="AckStatus.Acknowledged"/> is set here and never cleared, so it doubles as the marker
+    /// that makes a replay a no-op success rather than a "currently InService" failure.</summary>
+    internal static ApplyResult ApplyAcknowledge(ServiceJob job, ClaimsPrincipal user, string? note,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        if (!ServiceRoles.IsAssignedTechnician(user, job))   // only the assigned technician
+            return ApplyResult.Forbidden("Only the assigned technician can acknowledge this job.");
+        if (job.AckStatus == AckStatus.Acknowledged) return ApplyResult.Applied;
+        if (job.ServiceStatus is not ServiceStatus.Assigned)
+            return ApplyResult.Invalid($"Only an assigned job can be acknowledged (currently {job.ServiceStatus}).");
+
+        job.AckStatus = AckStatus.Acknowledged;
+        WriteTransition(db, job, ServiceStatus.Acknowledged, uid, note ?? "Received by technician");
+        audit.Log(uid, "service.acknowledge", "service", job.Id, ip: ip);
+        return ApplyResult.Applied;
     }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> AcknowledgeAsync(
@@ -53,18 +84,30 @@ public static partial class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();   // only the assigned technician
-        if (job.ServiceStatus is not ServiceStatus.Assigned)
-            return TypedResults.BadRequest($"Only an assigned job can be acknowledged (currently {job.ServiceStatus}).");
 
-        // Acknowledge = the technician confirms receipt; it does NOT start the work (that's /start).
         user.TryGetUserId(out var uid);
-        job.AckStatus = AckStatus.Acknowledged;
-        WriteTransition(db, job, ServiceStatus.Acknowledged, uid, req?.Note ?? "Received by technician");
-        audit.Log(uid, "service.acknowledge", "service", job.Id, ip: http.GetIp());
+        if (ApplyAcknowledge(job, user, req?.Note, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    /// <summary>Idempotent against a job that has already moved to InService or beyond — a replayed
+    /// start must not report failure just because the first attempt landed.</summary>
+    internal static ApplyResult ApplyStart(ServiceJob job, ClaimsPrincipal user, string? note,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        if (!ServiceRoles.IsAssignedTechnician(user, job))
+            return ApplyResult.Forbidden("Only the assigned technician can start this job.");
+        if (job.ServiceStatus == ServiceStatus.InService || CompletedOrLater.Contains(job.ServiceStatus))
+            return ApplyResult.Applied;
+        if (job.ServiceStatus is not ServiceStatus.Acknowledged)
+            return ApplyResult.Invalid($"Acknowledge the job before starting service (currently {job.ServiceStatus}).");
+
+        WriteTransition(db, job, ServiceStatus.InService, uid, note ?? "Service started by technician");
+        audit.Log(uid, "service.start", "service", job.Id, ip: ip);
+        return ApplyResult.Applied;
     }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> StartAsync(
@@ -72,13 +115,10 @@ public static partial class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!ServiceRoles.IsAssignedTechnician(user, job)) return TypedResults.Forbid();
-        if (job.ServiceStatus is not ServiceStatus.Acknowledged)
-            return TypedResults.BadRequest($"Acknowledge the job before starting service (currently {job.ServiceStatus}).");
 
         user.TryGetUserId(out var uid);
-        WriteTransition(db, job, ServiceStatus.InService, uid, req?.Note ?? "Service started by technician");
-        audit.Log(uid, "service.start", "service", job.Id, ip: http.GetIp());
+        if (ApplyStart(job, user, req?.Note, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
@@ -146,15 +186,13 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> DispatchAsync(
-        long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    internal static ApplyResult ApplyDispatch(ServiceJob job, DispatchRequest req,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
     {
-        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
-        if (job is null) return TypedResults.NotFound();
+        // Idempotent: a job already dispatched is the state the caller asked for.
+        if (job.ServiceStatus is ServiceStatus.Dispatched) return ApplyResult.Applied;
         if (job.ServiceStatus is not ServiceStatus.Completed)
-            return TypedResults.BadRequest($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
-
-        user.TryGetUserId(out var uid);
+            return ApplyResult.Invalid($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
 
         // Blank means "leave it alone", never "clear it". The reference is stamped by its own action and
         // the DC number by generating the DC document, so by the time anything is dispatched both are
@@ -174,7 +212,7 @@ public static partial class ServicesEndpoints
         if (string.IsNullOrWhiteSpace(job.PiNo)
             && string.IsNullOrWhiteSpace(job.OutwardDcNo)
             && string.IsNullOrWhiteSpace(job.OutwardReferenceNo))
-            return TypedResults.BadRequest(
+            return ApplyResult.Invalid(
                 "This job has no PI, delivery challan or outward reference — generate one, or set the "
                 + "outward reference, before dispatching it.");
 
@@ -184,16 +222,49 @@ public static partial class ServicesEndpoints
         if (parts.Count == 0 && !string.IsNullOrWhiteSpace(job.PiNo)) parts.Add($"PI {job.PiNo}");
         var note = $"Dispatched ({string.Join(", ", parts)})";
         WriteTransition(db, job, ServiceStatus.Dispatched, uid, note);
-        audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: http.GetIp());
+        audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> DispatchAsync(
+        long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+
+        user.TryGetUserId(out var uid);
+        if (ApplyDispatch(job, req, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> StockJobAsync(
+    internal static ApplyResult ApplyStock(ServiceJob job, string? note,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        if (job.ServiceStatus is ServiceStatus.Stocked) return ApplyResult.Applied;
+        if (job.ServiceStatus is not ServiceStatus.Completed)
+            return ApplyResult.Invalid($"Cannot move a {job.ServiceStatus} job to {ServiceStatus.Stocked}.");
+
+        WriteTransition(db, job, ServiceStatus.Stocked, uid, note);
+        audit.Log(uid, "service.stock", "service", job.Id, ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> StockJobAsync(
         long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.Completed], ServiceStatus.Stocked, "service.stock",
-            null, req?.Note, user, db, audit, http, ct);
+    {
+        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        if (job is null) return TypedResults.NotFound();
+
+        user.TryGetUserId(out var uid);
+        if (ApplyStock(job, req?.Note, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
 
     // Dispatch role overrides a total-loss call: send the job back to normal Completed (dispatchable).
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> RejectReplacementAsync(
@@ -217,21 +288,33 @@ public static partial class ServicesEndpoints
         => SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss, "service.discard",
             null, req?.Note ?? "Discarded — total loss, no replacement", user, db, audit, http, ct);
 
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> PaymentAsync(
+    internal static ApplyResult ApplyPayment(ServiceJob job, PaymentStatus status,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        // Idempotent: already at the requested status means nothing to record — and re-recording it
+        // would add a meaningless "Paid → Paid" line to the job's history on every replay.
+        if (job.PaymentStatus == status) return ApplyResult.Applied;
+        if (!CompletedOrLater.Contains(job.ServiceStatus))
+            return ApplyResult.Invalid("Payment can only be set once the service is completed.");
+
+        var was = job.PaymentStatus;
+        job.PaymentStatus = status;
+        WriteNote(db, job, "Payment", uid, $"Payment {was} → {status}");
+        audit.Log(uid, "service.payment", "service", job.Id, details: status.ToString(), ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> PaymentAsync(
         long id, [FromBody] PaymentRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         if (!Enum.TryParse<PaymentStatus>(req.Status, true, out var ps))
             return TypedResults.BadRequest($"Unknown payment status '{req.Status}'.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!CompletedOrLater.Contains(job.ServiceStatus))
-            return TypedResults.BadRequest("Payment can only be set once the service is completed.");
 
         user.TryGetUserId(out var uid);
-        var was = job.PaymentStatus;
-        job.PaymentStatus = ps;
-        WriteNote(db, job, "Payment", uid, $"Payment {was} → {ps}");
-        audit.Log(uid, "service.payment", "service", job.Id, details: ps.ToString(), ip: http.GetIp());
+        if (ApplyPayment(job, ps, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
@@ -241,7 +324,30 @@ public static partial class ServicesEndpoints
 
     // Set the courier / gate-pass reference WITHOUT dispatching. The legacy Pending-Dispatch and
     // Global-Search pages both had this: the reference often arrives after the job has already moved on.
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> SetOutwardReferenceAsync(
+    internal static ApplyResult ApplyOutwardReference(ServiceJob job, OutwardReferenceRequest req,
+        long uid, AppDbContext db, IAuditService audit, string? ip)
+    {
+        var reference = req.ReferenceNo.Trim();
+        var dc = string.IsNullOrWhiteSpace(req.OutwardDcNo) ? null : req.OutwardDcNo.Trim();
+        // Idempotent: the job already carries exactly what was asked for, so there is nothing to stamp
+        // and no reason to add another identical history line.
+        if (job.OutwardReferenceNo == reference && (dc is null || job.OutwardDcNo == dc))
+            return ApplyResult.Applied;
+
+        job.OutwardReferenceNo = reference;
+        var note = $"Outward reference set to {job.OutwardReferenceNo}";
+        // Only overwrite the DC number when one was supplied — a blank field must not wipe a generated DC.
+        if (dc is not null)
+        {
+            job.OutwardDcNo = dc;
+            note += $", DC {job.OutwardDcNo}";
+        }
+        WriteNote(db, job, "OutwardRef", uid, note);
+        audit.Log(uid, "service.outward-reference", "service", job.Id, details: job.OutwardReferenceNo, ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> SetOutwardReferenceAsync(
         long id, [FromBody] OutwardReferenceRequest req, ClaimsPrincipal user, AppDbContext db,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
@@ -250,16 +356,8 @@ public static partial class ServicesEndpoints
         if (job is null) return TypedResults.NotFound();
 
         user.TryGetUserId(out var uid);
-        job.OutwardReferenceNo = req.ReferenceNo.Trim();
-        var note = $"Outward reference set to {job.OutwardReferenceNo}";
-        // Only overwrite the DC number when one was supplied — a blank field must not wipe a generated DC.
-        if (!string.IsNullOrWhiteSpace(req.OutwardDcNo))
-        {
-            job.OutwardDcNo = req.OutwardDcNo.Trim();
-            note += $", DC {job.OutwardDcNo}";
-        }
-        WriteNote(db, job, "OutwardRef", uid, note);
-        audit.Log(uid, "service.outward-reference", "service", job.Id, details: job.OutwardReferenceNo, ip: http.GetIp());
+        if (ApplyOutwardReference(job, req, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+            return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
@@ -267,32 +365,61 @@ public static partial class ServicesEndpoints
 
     // Record an invoice raised outside the app (legacy "Set Invoice No"). Generating an invoice here
     // stamps the same field, so refuse to silently overwrite one that a generated document owns.
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> SetInvoiceNoAsync(
+    internal static async Task<ApplyResult> ApplyInvoiceNoAsync(ServiceJob job, InvoiceNoRequest req,
+        long uid, AppDbContext db, IAuditService audit, string? ip, CancellationToken ct)
+    {
+        var invNo = req.InvNo.Trim();
+        if (job.InvNo == invNo) return ApplyResult.Applied;   // idempotent
+        if (!CompletedOrLater.Contains(job.ServiceStatus))
+            return ApplyResult.Invalid($"An invoice number can only be recorded once the service is completed (currently {job.ServiceStatus}).");
+        // Explicit join rather than the Document nav — the line's relationship is convention-mapped only.
+        var generatedInvoice = await (from l in db.ServiceDocumentLines
+                                      join d in db.ServiceDocuments on l.DocumentId equals d.Id
+                                      where l.ServiceJobId == job.Id && d.DocType == DocumentType.Invoice
+                                      select l.Id).AnyAsync(ct);
+        if (generatedInvoice) return ApplyResult.Invalid("This job is already covered by a generated invoice.");
+
+        var was = job.InvNo;
+        job.InvNo = invNo;
+        job.InvDate = req.InvDate ?? DateTime.UtcNow;
+        WriteNote(db, job, "InvoiceNo", uid,
+            was is null ? $"Invoice number set to {job.InvNo}" : $"Invoice number {was} → {job.InvNo}");
+        audit.Log(uid, "service.invoice-no", "service", job.Id, details: job.InvNo, ip: ip);
+        return ApplyResult.Applied;
+    }
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> SetInvoiceNoAsync(
         long id, [FromBody] InvoiceNoRequest req, ClaimsPrincipal user, AppDbContext db,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.InvNo)) return TypedResults.BadRequest("Invoice number is required.");
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (!CompletedOrLater.Contains(job.ServiceStatus))
-            return TypedResults.BadRequest($"An invoice number can only be recorded once the service is completed (currently {job.ServiceStatus}).");
-        // Explicit join rather than the Document nav — the line's relationship is convention-mapped only.
-        var generatedInvoice = await (from l in db.ServiceDocumentLines
-                                      join d in db.ServiceDocuments on l.DocumentId equals d.Id
-                                      where l.ServiceJobId == id && d.DocType == DocumentType.Invoice
-                                      select l.Id).AnyAsync(ct);
-        if (generatedInvoice) return TypedResults.BadRequest("This job is already covered by a generated invoice.");
 
         user.TryGetUserId(out var uid);
-        var was = job.InvNo;
-        job.InvNo = req.InvNo.Trim();
-        job.InvDate = req.InvDate ?? DateTime.UtcNow;
-        WriteNote(db, job, "InvoiceNo", uid,
-            was is null ? $"Invoice number set to {job.InvNo}" : $"Invoice number {was} → {job.InvNo}");
-        audit.Log(uid, "service.invoice-no", "service", job.Id, details: job.InvNo, ip: http.GetIp());
+        var result = await ApplyInvoiceNoAsync(job, req, uid, db, audit, http.GetIp(), ct);
+        if (result.ToProblem() is { } problem) return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
+    }
+
+    internal static async Task<ApplyResult> ApplyDeleteAsync(ServiceJob job,
+        long uid, AppDbContext db, IAuditService audit, string? ip, CancellationToken ct)
+    {
+        if (job.IsDeleted) return ApplyResult.Applied;   // idempotent
+        // A billed job must not vanish from underneath its paperwork — the document still references it,
+        // and every list filters IsDeleted out, so the invoice would lose its line.
+        if (await db.ServiceDocumentLines.AnyAsync(l => l.ServiceJobId == job.Id, ct))
+            return ApplyResult.Invalid("Cannot delete — a PI, invoice or delivery challan has already been generated for this job.");
+        if (!string.IsNullOrWhiteSpace(job.PiNo) || !string.IsNullOrWhiteSpace(job.InvNo)
+            || !string.IsNullOrWhiteSpace(job.OutwardDcNo))
+            return ApplyResult.Invalid("Cannot delete — this job already carries a PI, invoice or DC number.");
+
+        job.IsDeleted = true;
+        WriteNote(db, job, "Deleted", uid, "Job deleted (hidden from all lists)");
+        audit.Log(uid, "service.delete", "service", job.Id, details: job.ServiceNo, ip: ip);
+        return ApplyResult.Applied;
     }
 
     private static async Task<Results<NoContent, NotFound, BadRequest<string>>> SoftDeleteAsync(
@@ -300,18 +427,10 @@ public static partial class ServicesEndpoints
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        // A billed job must not vanish from underneath its paperwork — the document still references it,
-        // and every list filters IsDeleted out, so the invoice would lose its line.
-        if (await db.ServiceDocumentLines.AnyAsync(l => l.ServiceJobId == id, ct))
-            return TypedResults.BadRequest("Cannot delete — a PI, invoice or delivery challan has already been generated for this job.");
-        if (!string.IsNullOrWhiteSpace(job.PiNo) || !string.IsNullOrWhiteSpace(job.InvNo)
-            || !string.IsNullOrWhiteSpace(job.OutwardDcNo))
-            return TypedResults.BadRequest("Cannot delete — this job already carries a PI, invoice or DC number.");
 
         user.TryGetUserId(out var uid);
-        job.IsDeleted = true;
-        WriteNote(db, job, "Deleted", uid, "Job deleted (hidden from all lists)");
-        audit.Log(uid, "service.delete", "service", job.Id, details: job.ServiceNo, ip: http.GetIp());
+        var result = await ApplyDeleteAsync(job, uid, db, audit, http.GetIp(), ct);
+        if (result.Status != ApplyStatus.Applied) return TypedResults.BadRequest(result.Error!);
         await db.SaveChangesAsync(ct);
         return TypedResults.NoContent();
     }
