@@ -8,6 +8,8 @@ using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 using PSR.Service.Api.Stock;
 
+using PSR.Service.Api.Common;
+
 namespace PSR.Service.Api.Services;
 
 public static partial class ServicesEndpoints
@@ -53,7 +55,7 @@ public static partial class ServicesEndpoints
                 ReportedProblem = req.ReportedProblem?.Trim(),
                 WarrantyStatus = warranty,
                 InwardDcNo = req.InwardDcNo?.Trim(),
-                DateReceived = req.DateReceived ?? DateTime.UtcNow,
+                DateReceived = req.DateReceived ?? ShopClock.Today,
                 Priority = priority,
                 ServiceStatus = ServiceStatus.Inward,
                 AckStatus = AckStatus.Pending,
@@ -97,7 +99,7 @@ public static partial class ServicesEndpoints
 
         var priority = Priority.Normal;
         if (!string.IsNullOrWhiteSpace(req.Priority)) Enum.TryParse(req.Priority, true, out priority);
-        var received = req.DateReceived ?? DateTime.UtcNow;
+        var received = req.DateReceived ?? ShopClock.Today;
         user.TryGetUserId(out var uid);
 
         var created = new List<ServiceJob>();

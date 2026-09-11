@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Common;
 using PSR.Service.Api.Data;
@@ -225,7 +226,8 @@ public static class ReportsEndpoints
     // ---------------------------------------------------------------- serial ledger (deployed serial-tracked units)
 
     private static async Task<Results<Ok<List<SerialReportRow>>, FileContentHttpResult>> SerialLedgerAsync(
-        AppDbContext db, string? status, string? ownerType, long? technicianId, long? partId, string? search, string? format, CancellationToken ct)
+        AppDbContext db, IOptions<JwtOptions> shop, string? status, string? ownerType, long? technicianId,
+        long? partId, string? search, string? format, CancellationToken ct)
     {
         var q = from c in db.ComponentSerials.AsNoTracking()
                 join p in db.Parts on c.PartId equals p.Id
@@ -254,7 +256,7 @@ public static class ReportsEndpoints
             return TypedResults.File(XlsxBuilder.Build("Serial ledger",
                 new[] { "Serial", "Item code", "Part", "Status", "Owner type", "Owner", "Technician", "Last updated" },
                 rows.Select(x => (IReadOnlyList<object?>)new object?[] { x.SerialNumber, x.ItemCode, x.PartName, x.Status,
-                    x.OwnerType, x.OwnerRef, x.TechnicianName, x.LastUpdatedAt })),
+                    x.OwnerType, x.OwnerRef, x.TechnicianName, x.LastUpdatedAt }), shop.Value.LocalUtcOffsetHours),
                 XlsxMime, "serial-ledger.xlsx");
         return TypedResults.Ok(rows);
     }
@@ -262,7 +264,7 @@ public static class ReportsEndpoints
     // ---------------------------------------------------------------- service register (master export / global search)
 
     private static async Task<Results<Ok<PagedResult<ServiceRegisterRow>>, FileContentHttpResult>> ServiceRegisterAsync(
-        AppDbContext db,
+        AppDbContext db, IOptions<JwtOptions> shop,
         DateTime? from, DateTime? to, string? status, long? technicianId, string? customer, string? serial,
         string? challan, string? inwardDc, string? outwardDc, string? piNo, string? invNo,
         string? warranty, string? payment, string? search, int? page, int? pageSize, string? format, CancellationToken ct)
@@ -320,7 +322,7 @@ public static class ReportsEndpoints
                 mapped.Select(x => (IReadOnlyList<object?>)new object?[] { x.ServiceNo, x.ChallanNo, x.InwardDcNo, x.CustomerName,
                     x.CustomerType, x.SerialNo, x.PsCode, x.ModelName, x.Description, x.ReportedProblem, x.ServiceStatus,
                     x.WarrantyStatus, x.PaymentStatus, x.Priority, x.IsTotalLoss, x.PiNo, x.PiDate, x.InvNo, x.InvDate,
-                    x.OutwardDcNo, x.OutwardReferenceNo, x.DcDate, x.TechnicianName, x.DateReceived, x.TechnicianRemarks })),
+                    x.OutwardDcNo, x.OutwardReferenceNo, x.DcDate, x.TechnicianName, x.DateReceived, x.TechnicianRemarks }), shop.Value.LocalUtcOffsetHours),
                 XlsxMime, "service-register.xlsx");
         }
 
@@ -337,7 +339,7 @@ public static class ReportsEndpoints
     private static async Task<Ok<DailySummaryDto>> DailySummaryAsync(
         AppDbContext db, DateTime? date, CancellationToken ct)
     {
-        var day = (date ?? DateTime.UtcNow).Date;
+        var day = (date ?? ShopClock.Today).Date;
         var next = day.AddDays(1);
 
         // Faithful to the legacy page: the whole summary is scoped to jobs RECEIVED on the chosen day.

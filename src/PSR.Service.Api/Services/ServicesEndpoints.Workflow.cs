@@ -8,6 +8,8 @@ using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 using PSR.Service.Api.Stock;
 
+using PSR.Service.Api.Common;
+
 namespace PSR.Service.Api.Services;
 
 public static partial class ServicesEndpoints
@@ -202,7 +204,7 @@ public static partial class ServicesEndpoints
         if (!string.IsNullOrWhiteSpace(req.OutwardDcNo)) job.OutwardDcNo = req.OutwardDcNo.Trim();
         // Only stamp a dispatch date when the job has none: a DC generated last week dated the movement,
         // and re-dating it to now would misreport the turnaround.
-        job.DcDate = req.DcDate ?? job.DcDate ?? DateTime.UtcNow;
+        job.DcDate = req.DcDate ?? job.DcDate ?? ShopClock.Today;
 
         // A dispatched unit has to be traceable to a document. The dialog that used to demand a
         // reference number is gone, so the requirement is enforced here against what the job actually
@@ -381,7 +383,7 @@ public static partial class ServicesEndpoints
 
         var was = job.InvNo;
         job.InvNo = invNo;
-        job.InvDate = req.InvDate ?? DateTime.UtcNow;
+        job.InvDate = req.InvDate ?? ShopClock.Today;
         WriteNote(db, job, "InvoiceNo", uid,
             was is null ? $"Invoice number set to {job.InvNo}" : $"Invoice number {was} → {job.InvNo}");
         audit.Log(uid, "service.invoice-no", "service", job.Id, details: job.InvNo, ip: ip);

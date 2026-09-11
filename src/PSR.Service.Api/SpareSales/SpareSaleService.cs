@@ -3,6 +3,8 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 
+using PSR.Service.Api.Common;
+
 namespace PSR.Service.Api.SpareSales;
 
 /// <summary>A sale was rejected for a business reason (bad party, unpriced item, not enough stock).
@@ -20,7 +22,7 @@ public class SpareSaleService(AppDbContext db)
     {
         var isDealer = await ApplyPartyAsync(sale, req, userId, audit, ip, ct);
 
-        sale.SaleDate = req.SaleDate ?? DateTime.UtcNow;
+        sale.SaleDate = req.SaleDate ?? ShopClock.Today;
         sale.Remarks = req.Remarks?.Trim();
 
         sale.Lines.Clear();

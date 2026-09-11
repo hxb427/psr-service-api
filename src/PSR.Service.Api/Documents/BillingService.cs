@@ -4,6 +4,8 @@ using PSR.Service.Api.Data.Entities;
 using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 
+using PSR.Service.Api.Common;
+
 namespace PSR.Service.Api.Documents;
 
 /// <summary>A computed-but-unsaved document plus the jobs it covers (used by the preview path).</summary>
@@ -331,7 +333,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         new()
         {
             DocType = docType,
-            DocDate = docDate ?? DateTime.UtcNow,
+            DocDate = docDate ?? ShopClock.Today,
             PartyName = party.Name,
             PartyAddress = party.Address,
             // Consignee/delivery address — defaults to the billing address when not given separately.

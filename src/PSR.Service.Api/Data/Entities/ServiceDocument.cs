@@ -16,7 +16,7 @@ public class ServiceDocument
     public long Id { get; set; }
     public DocumentType DocType { get; set; }
     public string DocNo { get; set; } = string.Empty;   // unique per type (PI-2026-0001, INV-2026-0001, DC-2026-0001)
-    public DateTime DocDate { get; set; } = DateTime.UtcNow;
+    public DateTime DocDate { get; set; } = Common.ShopClock.Today;
 
     // A document covers one OR MORE service jobs of a single customer (old app: one PI lists many units).
     // The covered jobs are the distinct ServiceJobId values across Lines; ServiceId stays null for multi-job docs.

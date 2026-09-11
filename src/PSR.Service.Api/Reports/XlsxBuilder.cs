@@ -5,7 +5,12 @@ namespace PSR.Service.Api.Reports;
 /// <summary>Builds a simple one-sheet XLSX: bold frozen header row + string cells + auto width.</summary>
 public static class XlsxBuilder
 {
-    public static byte[] Build(string sheetName, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<object?>> rows)
+    /// <param name="localOffsetHours">Hours to add to every timestamp before it is written. The API
+    /// stores and works in UTC, but a spreadsheet has nowhere to record a zone — the cell is a bare
+    /// wall-clock number — so an unconverted export reads five and a half hours behind the shop that
+    /// asked for it. Zero for sheets carrying no dates.</param>
+    public static byte[] Build(string sheetName, IReadOnlyList<string> headers,
+        IEnumerable<IReadOnlyList<object?>> rows, double localOffsetHours = 0)
     {
         using var wb = new XLWorkbook();
         var ws = wb.Worksheets.Add(sheetName);
@@ -29,7 +34,10 @@ public static class XlsxBuilder
                     case long l: cell.Value = l; break;
                     case decimal d: cell.Value = d; break;
                     case double db: cell.Value = db; break;
-                    case DateTime dt: cell.Value = dt; cell.Style.DateFormat.Format = "yyyy-mm-dd hh:mm"; break;
+                    case DateTime dt:
+                        cell.Value = dt.AddHours(localOffsetHours);
+                        cell.Style.DateFormat.Format = "yyyy-mm-dd hh:mm";
+                        break;
                     case bool b: cell.Value = b ? "Yes" : "No"; break;
                     default: cell.Value = v.ToString(); break;
                 }

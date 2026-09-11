@@ -15,6 +15,10 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<UserTokenVersionCache>();
 
         var jwt = config.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+
+        // Fix the shop's wall clock before the first request. Business dates -- received, document,
+        // sale -- default from this; timestamps stay UTC and do not touch it.
+        PSR.Service.Api.Common.ShopClock.Configure(jwt.LocalUtcOffsetHours);
         if (string.IsNullOrWhiteSpace(jwt.Signing) || jwt.Signing.Length < 32)
             throw new InvalidOperationException(
                 "Jwt:Signing is missing or too short (must be at least 32 characters).");
