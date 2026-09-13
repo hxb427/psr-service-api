@@ -69,7 +69,8 @@ public static class SpareSalesEndpoints
 
     private static async Task<Ok<PagedResult<SpareSaleListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user, string? status, string? payment, string? search,
-        DateTime? fromDate, DateTime? toDate, int? page, int? pageSize, CancellationToken ct)
+        string? customer, DateTime? fromDate, DateTime? toDate, int? page, int? pageSize,
+        CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -100,6 +101,14 @@ public static class SpareSalesEndpoints
             q = q.Where(x => x.Sale.PaymentStatus == pay);
         if (fromDate is { } fd) q = q.Where(x => x.Sale.SaleDate >= fd.Date);
         if (toDate is { } td) q = q.Where(x => x.Sale.SaleDate < td.Date.AddDays(1));
+        // Narrows to the party on its own, where the wide search can only reach it together with the
+        // sale, PI and invoice numbers. Same contains-match, against the dealer or customer name the
+        // join above resolved.
+        if (!string.IsNullOrWhiteSpace(customer))
+        {
+            var name = customer.Trim();
+            q = q.Where(x => x.PartyName.Contains(name));
+        }
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim();
