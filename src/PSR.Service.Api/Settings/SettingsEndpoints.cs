@@ -15,14 +15,16 @@ namespace PSR.Service.Api.Settings;
 public record AppSettingsDto(
     bool InvoiceGenerationEnabled, bool SaleInvoiceGenerationEnabled,
     string MinClientVersion, int DefaultWarrantyMonths,
-    bool ServiceRecordEditEnabled = false);
+    bool ServiceRecordEditEnabled = false,
+    bool DocumentLineEditEnabled = true);
 
 /// <summary>Null fields are left untouched, which is what lets an older client that does not know about
 /// the sale switch save the settings it does know without silently turning the other one off.</summary>
 public record UpdateAppSettingsRequest(
     bool InvoiceGenerationEnabled, bool? SaleInvoiceGenerationEnabled,
     string? MinClientVersion, int? DefaultWarrantyMonths,
-    bool? ServiceRecordEditEnabled = null);
+    bool? ServiceRecordEditEnabled = null,
+    bool? DocumentLineEditEnabled = null);
 
 /// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
 /// floor. Served on /app-version, which the version gate exempts.</summary>
@@ -77,6 +79,12 @@ public class AppSettingsService(AppDbContext db)
     /// tool, so an estate that has never heard of it must not silently have it switched on.</summary>
     public Task<bool> ServiceRecordEditEnabledAsync(CancellationToken ct)
         => GetBoolAsync(SettingKeys.ServiceRecordEditEnabled, false, ct);
+
+    /// <summary>Defaults ON, unlike the record-edit switch: hand-pricing a unit on the generate form is
+    /// how the old app has always billed, so an estate that has not been told about this must keep
+    /// working exactly as it did. Turning it off is what tightens billing, not turning it on.</summary>
+    public Task<bool> DocumentLineEditEnabledAsync(CancellationToken ct)
+        => GetBoolAsync(SettingKeys.DocumentLineEditEnabled, true, ct);
 }
 
 public static class SettingsEndpoints
@@ -102,7 +110,8 @@ public static class SettingsEndpoints
             await settings.SaleInvoiceGenerationEnabledAsync(ct),
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct),
-            await settings.ServiceRecordEditEnabledAsync(ct)));
+            await settings.ServiceRecordEditEnabledAsync(ct),
+            await settings.DocumentLineEditEnabledAsync(ct)));
 
     private static async Task<Results<Ok<AppSettingsDto>, BadRequest<string>>> UpdateAsync(
         [FromBody] UpdateAppSettingsRequest req, ClaimsPrincipal user,
@@ -147,6 +156,10 @@ public static class SettingsEndpoints
         await settings.SetBoolAsync(SettingKeys.InvoiceGenerationEnabled, req.InvoiceGenerationEnabled, ct);
         if (req.SaleInvoiceGenerationEnabled is { } saleFlag)
             await settings.SetBoolAsync(SettingKeys.SaleInvoiceGenerationEnabled, saleFlag, ct);
+        // Same tier as the two invoice switches — a billing control a manager may work — and null from
+        // an older client leaves it alone rather than reading as "off".
+        if (req.DocumentLineEditEnabled is { } lineEditFlag)
+            await settings.SetBoolAsync(SettingKeys.DocumentLineEditEnabled, lineEditFlag, ct);
         if (req.DefaultWarrantyMonths is { } months && isAdmin)
             await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
         if (req.ServiceRecordEditEnabled is { } editFlag && isAdmin)
@@ -162,6 +175,7 @@ public static class SettingsEndpoints
         audit.Log(uid, "settings.update", "app_settings", null,
             details: $"{SettingKeys.InvoiceGenerationEnabled}={req.InvoiceGenerationEnabled}"
                    + (req.SaleInvoiceGenerationEnabled is { } sf ? $", {SettingKeys.SaleInvoiceGenerationEnabled}={sf}" : "")
+                   + (req.DocumentLineEditEnabled is { } le ? $", {SettingKeys.DocumentLineEditEnabled}={le}" : "")
                    + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : "")
                    + (req.DefaultWarrantyMonths is { } d ? $", {SettingKeys.DefaultWarrantyMonths}={d}" : "")
                    + (req.ServiceRecordEditEnabled is { } e ? $", {SettingKeys.ServiceRecordEditEnabled}={e}" : ""),
@@ -173,6 +187,7 @@ public static class SettingsEndpoints
             await settings.SaleInvoiceGenerationEnabledAsync(ct),
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct),
-            await settings.ServiceRecordEditEnabledAsync(ct)));
+            await settings.ServiceRecordEditEnabledAsync(ct),
+            await settings.DocumentLineEditEnabledAsync(ct)));
     }
 }

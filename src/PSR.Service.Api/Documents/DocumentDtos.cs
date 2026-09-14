@@ -45,10 +45,21 @@ public record GenerateSaleDocumentRequest(
     [Range(0, 10_000_000)] decimal? CourierCharges,
     [StringLength(500)] string? Remarks);
 
+// UnitRate is tax-INCLUSIVE on a service line (the old app's "Rate (incl. tax)") and tax-EXCLUSIVE on a
+// spare-sale line, which is the convention each kind of document prints. SerialNo is the serviced unit's
+// serial and is null on spare-sale lines.
 public record DocumentLineDto(
     long Id, long? ServiceJobId, string Description, string? Warranty, string? ServiceChallan, string? HsnCode,
     int Qty, decimal UnitRate, decimal TaxableAmount, decimal GstPercent, decimal TaxAmount, decimal LineTotal,
-    string? Remarks, long? PartId);
+    string? Remarks, long? PartId, string? SerialNo = null);
+
+// What the selected jobs will be billed if nobody edits anything — asked for by the generate form so the
+// rates are on screen before the document exists. UnitRate is tax-inclusive per unit, at quantity 1.
+public record DocumentQuoteRequest([Required, MinLength(1)] List<long> ServiceIds);
+
+public record DocumentQuoteLineDto(
+    long ServiceId, string ServiceNo, string SerialNo, string Description, string Warranty,
+    decimal GstPercent, decimal UnitRate, decimal TaxableAmount, decimal TaxAmount);
 
 public record DocumentDto(
     long Id, string DocType, string DocNo, DateTime DocDate, List<long> ServiceIds, List<string> ServiceNos,

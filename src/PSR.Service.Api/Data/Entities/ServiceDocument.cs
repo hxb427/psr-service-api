@@ -59,6 +59,11 @@ public class ServiceDocumentLine
     public long? ServiceJobId { get; set; }              // the serviced unit this line bills (null on spare-sale lines)
     public long? PartId { get; set; }                    // the catalogue item sold (spare-sale lines only)
     public string Description { get; set; } = string.Empty;
+    /// <summary>Serial number of the serviced unit this line bills, snapshotted at generation. What
+    /// identifies the machine to the customer, so it is printed in its own column rather than left to
+    /// whatever the description happens to say — a manager who retypes the description must not be able
+    /// to take the serial off the invoice with it. Null on spare-sale lines (catalogue goods).</summary>
+    public string? SerialNo { get; set; }
     public string? Warranty { get; set; }                // snapshot of the unit's warranty status (Active units bill at 0)
     public string? ServiceChallan { get; set; }          // the unit's inward challan no
     public string? HsnCode { get; set; }

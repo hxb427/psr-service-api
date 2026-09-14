@@ -18,6 +18,7 @@ public static class DocumentsEndpoints
     public static IEndpointRouteBuilder MapDocumentEndpoints(this IEndpointRouteBuilder app)
     {
         var docs = app.MapGroup("/documents").WithTags("documents").RequireAuthorization("DocumentView");
+        docs.MapPost("/quote", QuoteAsync).RequireAuthorization("DocumentManage");       // auto-pricing, nothing saved
         docs.MapPost("/preview", PreviewAsync).RequireAuthorization("DocumentManage");   // watermarked, NOT saved
         docs.MapPost("/", GenerateAsync).RequireAuthorization("DocumentManage");          // multi-job generate (saves)
         docs.MapPost("/sale/preview", PreviewSaleAsync).RequireAuthorization("DocumentManage");
@@ -36,6 +37,12 @@ public static class DocumentsEndpoints
 
         return app;
     }
+
+    /// <summary>What the selected jobs price to. No document, no number, nothing written — the generate
+    /// form calls this to fill in its rate column, so the figures on screen are the server's own.</summary>
+    private static async Task<Ok<List<DocumentQuoteLineDto>>> QuoteAsync(
+        [FromBody] DocumentQuoteRequest req, BillingService billing, CancellationToken ct)
+        => TypedResults.Ok(await billing.QuoteAsync(req.ServiceIds, ct));
 
     private static async Task<Results<FileContentHttpResult, BadRequest<string>>> PreviewAsync(
         [FromBody] GenerateDocumentRequest req, ClaimsPrincipal user,
@@ -202,7 +209,8 @@ public static class DocumentsEndpoints
         var doc = await db.ServiceDocuments.AsNoTracking().Include(d => d.Lines).FirstAsync(d => d.Id == id, ct);
         var lines = doc.Lines.OrderBy(l => l.Id).Select(l => new DocumentLineDto(
             l.Id, l.ServiceJobId, l.Description, l.Warranty, l.ServiceChallan, l.HsnCode,
-            l.Qty, l.UnitRate, l.TaxableAmount, l.GstPercent, l.TaxAmount, l.LineTotal, l.Remarks, l.PartId)).ToList();
+            l.Qty, l.UnitRate, l.TaxableAmount, l.GstPercent, l.TaxAmount, l.LineTotal, l.Remarks, l.PartId,
+            l.SerialNo)).ToList();
 
         // Join lines→services for the covered job numbers (no List.Contains — funcletizer bug).
         var jobs = await (from l in db.ServiceDocumentLines.AsNoTracking()
