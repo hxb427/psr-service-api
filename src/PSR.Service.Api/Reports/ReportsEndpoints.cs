@@ -27,6 +27,8 @@ public static class ReportsEndpoints
         group.MapGet("/service-register", ServiceRegisterAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/daily-summary", DailySummaryAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/tat", TatAsync).RequireAuthorization("ReportsFull");
+        group.MapGet("/stock-ledger", StockLedgerAsync).RequireAuthorization("ReportsFull");
+        group.MapGet("/stock-analysis", StockAnalysisAsync).RequireAuthorization("ReportsFull");
 
         return app;
     }
@@ -450,6 +452,206 @@ public static class ReportsEndpoints
         AddLeg("completed_to_dispatch", "Completed to dispatch", r => r.CompletedToDispatchHours);
 
         return TypedResults.Ok(new TatReportDto(legs, rows));
+    }
+
+    // ---------------------------------------------------------------- stock ledger
+
+    /// <summary>What the warehouse held, took in and let out over a window.
+    ///
+    /// Every figure is summed from the movement ledger, including the opening balance — which is the
+    /// whole ledger up to the start date rather than anything stored. The balance table only knows
+    /// "now", so it cannot answer what the shelf held last March, and a report that mixed a live
+    /// balance with historic movements would not add up. The cost is scanning the movements; the
+    /// benefit is that opening + in - out == closing on every row, by construction.
+    ///
+    /// A window ending today therefore closes on the same number the warehouse page shows. If it ever
+    /// does not, the ledger and the balance table have drifted, and the ledger is the one to trust.</summary>
+    private static async Task<Results<Ok<StockLedgerDto>, FileContentHttpResult>> StockLedgerAsync(
+        AppDbContext db, DateTime? from, DateTime? to, string? search, string? format, CancellationToken ct)
+    {
+        var fromInc = from?.Date;
+        var toEx = to?.Date.AddDays(1);
+
+        var partsQ = db.Parts.AsNoTracking().AsQueryable();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var v = search.Trim();
+            partsQ = partsQ.Where(p => p.ItemCode.Contains(v) || p.Name.Contains(v));
+        }
+        var parts = await partsQ
+            .Select(p => new { p.Id, p.ItemCode, p.Name, p.Unit })
+            .OrderBy(p => p.ItemCode)
+            .ToListAsync(ct);
+        var partIds = parts.Select(p => p.Id).ToHashSet();
+
+        // One pass over the movements, narrowed to the parts on screen. Grouped in memory rather than
+        // in SQL, the way the rest of this file does it, to stay clear of EF GroupBy translation.
+        var moves = await db.StockMovements.AsNoTracking()
+            .Where(m => toEx == null || m.CreatedAt < toEx)
+            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.CreatedAt })
+            .ToListAsync(ct);
+
+        var rows = new List<StockLedgerRow>(parts.Count);
+        var byPart = moves.Where(m => partIds.Contains(m.PartId)).GroupBy(m => m.PartId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var p in parts)
+        {
+            var mine = byPart.GetValueOrDefault(p.Id);
+            if (mine is null) { rows.Add(new StockLedgerRow(p.Id, p.ItemCode, p.Name, p.Unit, 0, 0, 0, 0, 0, 0, 0)); continue; }
+
+            var opening = 0;
+            int inward = 0, issued = 0, returned = 0, sold = 0, adjusted = 0;
+            foreach (var m in mine)
+            {
+                if (fromInc is { } f && m.CreatedAt < f) { opening += WarehouseDelta(m.MovementType, m.Quantity); continue; }
+
+                switch (m.MovementType)
+                {
+                    case MovementType.Receipt: inward += m.Quantity; break;
+                    case MovementType.Issue: issued += m.Quantity; break;
+                    // Stock coming back to the shelf, whoever is handing it over. A sale un-marked in
+                    // error is the exact reversal of the sale, so it belongs here rather than as a
+                    // negative sale that would read as a credit note.
+                    case MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold:
+                        returned += m.Quantity; break;
+                    case MovementType.Sale or MovementType.Replacement: sold += m.Quantity; break;
+                    case MovementType.Adjustment: adjusted += m.Quantity; break;   // already signed
+                    // Consumption, its reversal and peer transfers move stock between technicians and
+                    // never touch the warehouse, so they are not on this report at all.
+                }
+            }
+
+            rows.Add(new StockLedgerRow(p.Id, p.ItemCode, p.Name, p.Unit,
+                opening, inward, issued, returned, sold, adjusted,
+                opening + inward + returned + adjusted - issued - sold));
+        }
+
+        // Parts that never moved and hold nothing would otherwise pad the report with zero rows.
+        rows = rows.Where(r => r.Opening != 0 || r.Closing != 0
+                            || r.Inward != 0 || r.Issued != 0 || r.Returned != 0 || r.Sold != 0 || r.Adjusted != 0)
+            .ToList();
+
+        if (IsXlsx(format))
+            return TypedResults.File(XlsxBuilder.Build("Stock ledger",
+                new[] { "Item code", "Part", "Unit", "Opening", "Inward", "Issued", "Returned", "Sold", "Adjusted", "Closing" },
+                rows.Select(x => (IReadOnlyList<object?>)new object?[] { x.ItemCode, x.PartName, x.Unit,
+                    x.Opening, x.Inward, x.Issued, x.Returned, x.Sold, x.Adjusted, x.Closing })),
+                XlsxMime, "stock-ledger.xlsx");
+
+        return TypedResults.Ok(new StockLedgerDto(fromInc, to?.Date,
+            rows.Sum(r => r.Opening), rows.Sum(r => r.Inward), rows.Sum(r => r.Issued),
+            rows.Sum(r => r.Returned), rows.Sum(r => r.Sold), rows.Sum(r => r.Adjusted), rows.Sum(r => r.Closing),
+            rows));
+    }
+
+    /// <summary>How a movement type changes the WAREHOUSE balance. The technician side is deliberately
+    /// not modelled here — see StockAnalysisAsync for that.</summary>
+    private static int WarehouseDelta(MovementType type, int qty) => type switch
+    {
+        MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold => qty,
+        MovementType.Adjustment => qty,   // stored already signed; a shrinkage is a negative quantity
+        MovementType.Issue or MovementType.Replacement or MovementType.Sale => -qty,
+        _ => 0,                           // Consumption / ConsumptionReversal / Transfer are technician-side
+    };
+
+    // ---------------------------------------------------------------- detailed stock analysis
+
+    /// <summary>Where the stock went, in one answer: what the warehouse took in, what each technician
+    /// was given, what they actually fitted, and what is still on them.
+    ///
+    /// Issued and fitted are different numbers and the gap is the point — a technician carrying six
+    /// boards and fitting two is not a problem, a technician issued sixty and fitting two is. Consumed
+    /// nets off ConsumptionReversal, because a completed job that was reverted hands the parts back
+    /// and counting the original consumption alone reads as usage that never happened.</summary>
+    private static async Task<Results<Ok<StockAnalysisDto>, FileContentHttpResult>> StockAnalysisAsync(
+        AppDbContext db, DateTime? from, DateTime? to, long? technicianId, string? search, string? format,
+        CancellationToken ct)
+    {
+        var fromInc = from?.Date;
+        var toEx = to?.Date.AddDays(1);
+
+        var partsQ = db.Parts.AsNoTracking().AsQueryable();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var v = search.Trim();
+            partsQ = partsQ.Where(p => p.ItemCode.Contains(v) || p.Name.Contains(v));
+        }
+        var parts = await partsQ.Select(p => new { p.Id, p.ItemCode, p.Name, p.Unit }).ToListAsync(ct);
+        var partById = parts.ToDictionary(p => p.Id);
+
+        var movesQ = db.StockMovements.AsNoTracking().AsQueryable();
+        if (fromInc is { } f) movesQ = movesQ.Where(m => m.CreatedAt >= f);
+        if (toEx is { } t) movesQ = movesQ.Where(m => m.CreatedAt < t);
+        var moves = await movesQ
+            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.TechnicianId })
+            .ToListAsync(ct);
+
+        // What came onto the shelf over the window.
+        var inward = moves
+            .Where(m => m.MovementType == MovementType.Receipt && partById.ContainsKey(m.PartId))
+            .GroupBy(m => m.PartId)
+            .Select(g =>
+            {
+                var p = partById[g.Key];
+                return new StockInwardRow(p.Id, p.ItemCode, p.Name, p.Unit, g.Sum(x => x.Quantity));
+            })
+            .OrderBy(x => x.ItemCode, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Technician side. Transfers are left out: they move stock between two technicians without
+        // changing what the pair were issued or fitted, and attributing one would double-count it.
+        var techMoves = moves.Where(m => m.TechnicianId is > 0 && partById.ContainsKey(m.PartId)
+                                      && m.MovementType is MovementType.Issue or MovementType.Return
+                                          or MovementType.Consumption or MovementType.ConsumptionReversal);
+        if (technicianId is { } tid) techMoves = techMoves.Where(m => m.TechnicianId == tid);
+
+        var cells = techMoves.GroupBy(m => (Tech: m.TechnicianId!.Value, m.PartId))
+            .ToDictionary(g => g.Key, g => new
+            {
+                Issued = g.Where(x => x.MovementType == MovementType.Issue).Sum(x => x.Quantity),
+                Returned = g.Where(x => x.MovementType == MovementType.Return).Sum(x => x.Quantity),
+                Consumed = g.Where(x => x.MovementType == MovementType.Consumption).Sum(x => x.Quantity)
+                         - g.Where(x => x.MovementType == MovementType.ConsumptionReversal).Sum(x => x.Quantity),
+            });
+
+        // Current holdings, so a technician sitting on stock they were issued before the window still
+        // appears. The window bounds movement, not inventory: what someone is holding is a fact about
+        // now, and hiding it because it was issued in March is how it stops being counted at all.
+        var holdings = await db.StockBalances.AsNoTracking()
+            .Where(b => b.TechnicianId != StockBalance.Warehouse && b.OnHand != 0)
+            .Select(b => new { b.TechnicianId, b.PartId, b.OnHand })
+            .ToListAsync(ct);
+
+        var keys = cells.Keys.ToHashSet();
+        foreach (var h in holdings)
+            if (partById.ContainsKey(h.PartId) && (technicianId is null || h.TechnicianId == technicianId))
+                keys.Add((h.TechnicianId, h.PartId));
+
+        var onHand = holdings.ToDictionary(h => (h.TechnicianId, h.PartId), h => h.OnHand);
+        var techNames = await TechNamesAsync(db, ct);
+
+        var technicians = keys.Select(k =>
+            {
+                var p = partById[k.PartId];
+                var c = cells.GetValueOrDefault(k);
+                return new TechStockRow(
+                    k.Tech, techNames.GetValueOrDefault(k.Tech, $"#{k.Tech}"), p.Id, p.ItemCode, p.Name,
+                    c?.Issued ?? 0, c?.Returned ?? 0, c?.Consumed ?? 0, onHand.GetValueOrDefault(k, 0));
+            })
+            .Where(r => r.Issued != 0 || r.Returned != 0 || r.Consumed != 0 || r.OnHand != 0)
+            .OrderBy(r => r.TechnicianName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(r => r.ItemCode, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (IsXlsx(format))
+            return TypedResults.File(XlsxBuilder.Build("Stock analysis",
+                new[] { "Technician", "Item code", "Part", "Issued", "Returned", "Fitted", "On hand" },
+                technicians.Select(x => (IReadOnlyList<object?>)new object?[] { x.TechnicianName, x.ItemCode,
+                    x.PartName, x.Issued, x.Returned, x.Consumed, x.OnHand })),
+                XlsxMime, "stock-analysis.xlsx");
+
+        return TypedResults.Ok(new StockAnalysisDto(inward, technicians));
     }
 
     // ---------------------------------------------------------------- helpers

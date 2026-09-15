@@ -26,8 +26,10 @@ internal readonly record struct JobPrice(decimal BlendedGst, decimal UnitInclusi
 /// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter).
 /// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
 /// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
-public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyInfo company,
-    AppSettingsService settings)
+// CompanyInfo used to be injected here to compare the party's state against the company's; every
+// document now bills IGST, so there is nothing left to compare it with. The PDF still takes it, for
+// the letterhead.
+public class BillingService(AppDbContext db, NumberSequenceService seq, AppSettingsService settings)
 {
     /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
     public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
@@ -400,9 +402,11 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
             PartyGstin = party.Gstin,
             PartyState = party.State,
             PartyStateCode = party.StateCode,
-            // Out-of-state parties are billed IGST; anyone in the company's own state gets CGST + SGST.
-            IsInterState = !string.IsNullOrWhiteSpace(party.StateCode)
-                && !string.Equals(party.StateCode, company.StateCode, StringComparison.OrdinalIgnoreCase),
+            // Every document bills IGST, in or out of state — a business decision, not a derived one, so
+            // the state code no longer changes what the tax is called. The flag and the split stay on the
+            // record: documents raised before this still carry the CGST + SGST they were issued with, and
+            // a reprint has to show what the customer was actually given.
+            IsInterState = true,
             CourierMode = courierMode?.Trim(),
             CourierCharges = courierCharges ?? 0m,
             Remarks = remarks?.Trim(),

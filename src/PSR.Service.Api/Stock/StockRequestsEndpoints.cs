@@ -228,16 +228,18 @@ public static class StockRequestsEndpoints
     /// requester and to the issuer as who handed it over. That keeps the register a single list: the
     /// alternative was a stock movement with nothing in the register explaining it, which is exactly
     /// the gap someone reconciling a technician holding has to close by hand.</summary>
-    private static async Task<Results<Created<StockRequestDto>, NotFound, BadRequest<string>>> DirectIssueAsync(
+    private static async Task<Results<Created<List<StockRequestDto>>, NotFound, BadRequest<string>>> DirectIssueAsync(
         [FromBody] DirectIssueRequest req, ClaimsPrincipal user, AppDbContext db,
         StockLedgerService ledger, SerialService serial, NumberSequenceService seq,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
-        if (req.Qty < 1) return TypedResults.BadRequest("Quantity must be at least 1.");
-
-        var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == req.PartId, ct);
-        if (part is null) return TypedResults.NotFound();
-        if (!part.IsActive) return TypedResults.BadRequest("Part is inactive.");
+        var lines = req.EffectiveLines();
+        if (lines.Count == 0) return TypedResults.BadRequest("Add at least one item to issue.");
+        // One request row per part, so the same part twice would silently become two requests for it.
+        // Rejected rather than added up: two quantities for one part is usually a mistake, and merging
+        // them would hide it.
+        if (lines.Select(l => l.PartId).Distinct().Count() != lines.Count)
+            return TypedResults.BadRequest("The same part is on this issue more than once — put it on one line.");
 
         var technician = await db.Users.FirstOrDefaultAsync(u => u.Id == req.TechnicianId, ct);
         if (technician is null) return TypedResults.NotFound();
@@ -247,51 +249,71 @@ public static class StockRequestsEndpoints
         if (!await IsTechnicianAsync(db, technician.Id, ct))
             return TypedResults.BadRequest($"{technician.Username} is not a technician and cannot hold stock.");
 
-        var (needSerials, serials, serialError) =
-            await CheckSerialsAsync(part, technician, req.Qty, req.Serials, serial, ct);
-        if (serialError is not null) return TypedResults.BadRequest(serialError);
+        // Every line is checked before anything is written. Validating and issuing line by line would
+        // commit the lines ahead of a bad one and then have to explain a half-done issue.
+        var prepared = new List<(Part Part, DirectIssueLine Line, bool NeedSerials, IReadOnlyList<string> Serials)>();
+        foreach (var line in lines)
+        {
+            if (line.Qty < 1) return TypedResults.BadRequest("Quantity must be at least 1.");
+
+            var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == line.PartId, ct);
+            if (part is null) return TypedResults.NotFound();
+            if (!part.IsActive) return TypedResults.BadRequest($"{part.ItemCode} is inactive.");
+
+            var (needSerials, serials, serialError) =
+                await CheckSerialsAsync(part, technician, line.Qty, line.Serials, serial, ct);
+            if (serialError is not null) return TypedResults.BadRequest(serialError);
+
+            prepared.Add((part, line, needSerials, serials));
+        }
 
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        StockRequest entity;
+        var ids = new List<long>();
         try
         {
-            entity = new StockRequest
+            foreach (var (part, line, needSerials, serials) in prepared)
             {
-                RequestNo = await seq.NextAsync(SequenceKeys.StockRequest, ct),
-                RequestedByUserId = technician.Id,
-                PartId = part.Id,
-                QtyRequested = req.Qty,
-                QtyIssued = req.Qty,
-                RequestDate = DateTime.UtcNow,
-                IssuedDate = DateTime.UtcNow,
-                IssuedByUserId = uid,
-                Status = StockRequestStatus.Issued,
-                Remarks = req.Remarks,
-                Courier = string.IsNullOrWhiteSpace(req.Courier) ? null : req.Courier.Trim(),
-                TrackingNo = string.IsNullOrWhiteSpace(req.TrackingNo) ? null : req.TrackingNo.Trim(),
-            };
-            db.StockRequests.Add(entity);
-            // Needs the request id before the movement can reference it.
-            await db.SaveChangesAsync(ct);
+                var entity = new StockRequest
+                {
+                    RequestNo = await seq.NextAsync(SequenceKeys.StockRequest, ct),
+                    RequestedByUserId = technician.Id,
+                    PartId = part.Id,
+                    QtyRequested = line.Qty,
+                    QtyIssued = line.Qty,
+                    RequestDate = DateTime.UtcNow,
+                    IssuedDate = DateTime.UtcNow,
+                    IssuedByUserId = uid,
+                    Status = StockRequestStatus.Issued,
+                    Remarks = req.Remarks,
+                    Courier = string.IsNullOrWhiteSpace(req.Courier) ? null : req.Courier.Trim(),
+                    TrackingNo = string.IsNullOrWhiteSpace(req.TrackingNo) ? null : req.TrackingNo.Trim(),
+                };
+                db.StockRequests.Add(entity);
+                // Needs the request id before the movement can reference it.
+                await db.SaveChangesAsync(ct);
 
-            var movement = await ledger.IssueAsync(part.Id, technician.Id, req.Qty, uid, "STOCK_REQUEST", entity.Id, ct);
-            if (needSerials)
-            {
-                await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
-                await serial.CaptureOnIssueAsync(movement.Id, part.Id, part.Name, technician.Id,
-                    technician.FullName ?? technician.Username, serials, uid, ct);
+                var movement = await ledger.IssueAsync(part.Id, technician.Id, line.Qty, uid, "STOCK_REQUEST", entity.Id, ct);
+                if (needSerials)
+                {
+                    await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
+                    await serial.CaptureOnIssueAsync(movement.Id, part.Id, part.Name, technician.Id,
+                        technician.FullName ?? technician.Username, serials, uid, ct);
+                }
+
+                audit.Log(uid, "stock-request.direct-issue", "stock_request", entity.Id,
+                    details: $"{entity.RequestNo} {part.ItemCode} x{line.Qty} to {technician.Username} (no request raised)",
+                    ip: http.GetIp());
+                await db.SaveChangesAsync(ct);
+                ids.Add(entity.Id);
             }
-
-            audit.Log(uid, "stock-request.direct-issue", "stock_request", entity.Id,
-                details: $"{entity.RequestNo} {part.ItemCode} x{req.Qty} to {technician.Username} (no request raised)",
-                ip: http.GetIp());
-            await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
-        return TypedResults.Created($"/stock-requests/{entity.Id}", await ToDtoAsync(db, entity.Id, ct));
+        var dtos = new List<StockRequestDto>();
+        foreach (var id in ids) dtos.Add(await ToDtoAsync(db, id, ct));
+        return TypedResults.Created($"/stock-requests/{ids[0]}", dtos);
     }
 
     private static Task<bool> IsTechnicianAsync(AppDbContext db, long userId, CancellationToken ct) =>

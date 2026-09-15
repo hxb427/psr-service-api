@@ -57,3 +57,33 @@ public record TatJobRow(
     double? StartedToCompletedHours, double? CompletedToDispatchHours);
 
 public record TatReportDto(List<TatLegStat> Legs, List<TatJobRow> Rows);
+
+// ----- stock ledger -----
+/// <summary>One part's warehouse movement over a window: what was on the shelf when it opened, what
+/// went on and came off it, and what is left. Every figure is derived from the movement ledger rather
+/// than read off the balance table, so the row adds up on its own — opening + in - out == closing — and
+/// a window ending today closes on the same number the warehouse page shows.</summary>
+public record StockLedgerRow(
+    long PartId, string ItemCode, string PartName, string? Unit,
+    int Opening, int Inward, int Issued, int Returned, int Sold, int Adjusted, int Closing);
+
+/// <summary>The ledger plus the totals strip above it, so the page does not have to re-add the column
+/// it is already showing (and get a different answer once the list is paged or filtered).</summary>
+public record StockLedgerDto(
+    DateTime? From, DateTime? To,
+    int TotalOpening, int TotalInward, int TotalIssued, int TotalReturned, int TotalSold, int TotalAdjusted, int TotalClosing,
+    List<StockLedgerRow> Rows);
+
+// ----- detailed stock analysis -----
+/// <summary>What the warehouse took in over the window, part by part.</summary>
+public record StockInwardRow(long PartId, string ItemCode, string PartName, string? Unit, int Received);
+
+/// <summary>One technician's position on one part: what they were given, what came back, what they
+/// actually fitted, and what is still on them. Consumed is the net of Consumption and its reversal —
+/// a completed job that was reverted puts the parts back on the technician, and counting the original
+/// consumption alone would read as usage that never happened.</summary>
+public record TechStockRow(
+    long TechnicianId, string TechnicianName, long PartId, string ItemCode, string PartName,
+    int Issued, int Returned, int Consumed, int OnHand);
+
+public record StockAnalysisDto(List<StockInwardRow> Inward, List<TechStockRow> Technicians);
