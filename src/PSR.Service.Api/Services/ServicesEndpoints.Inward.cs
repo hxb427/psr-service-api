@@ -55,7 +55,9 @@ public static partial class ServicesEndpoints
                 ReportedProblem = req.ReportedProblem?.Trim(),
                 WarrantyStatus = warranty,
                 InwardDcNo = req.InwardDcNo?.Trim(),
-                DateReceived = req.DateReceived ?? ShopClock.Today,
+                // Through BusinessDate, not used raw: a client that sends a zone-bearing date
+                // arrives here as the previous evening. See ShopClock.BusinessDate.
+                DateReceived = ShopClock.BusinessDate(req.DateReceived) ?? ShopClock.Today,
                 Priority = priority,
                 ServiceStatus = ServiceStatus.Inward,
                 AckStatus = AckStatus.Pending,
@@ -99,7 +101,7 @@ public static partial class ServicesEndpoints
 
         var priority = Priority.Normal;
         if (!string.IsNullOrWhiteSpace(req.Priority)) Enum.TryParse(req.Priority, true, out priority);
-        var received = req.DateReceived ?? ShopClock.Today;
+        var received = ShopClock.BusinessDate(req.DateReceived) ?? ShopClock.Today;
         user.TryGetUserId(out var uid);
 
         var created = new List<ServiceJob>();

@@ -24,7 +24,10 @@ public class ServiceJob : ITimestamps
     public string? OutwardDcNo { get; set; }                // delivery-challan (DC document) number — stamped by DC generation / dispatch
     public string? OutwardReferenceNo { get; set; }         // mandatory dispatch reference (courier/AWB/gate-pass etc.)
     public DateTime? DcDate { get; set; }
-    public DateTime DateReceived { get; set; } = DateTime.UtcNow;
+    /// <summary>A day, not an instant — so the shop's calendar, not UtcNow, which in the evening
+    /// here is already tomorrow's date in UTC. Every write path sets this explicitly; the default
+    /// is what a future one inherits.</summary>
+    public DateTime DateReceived { get; set; } = Common.ShopClock.Today;
 
     // Document references stamped when a PI / Invoice is generated for this job (old app: PI, PI_DATE, INV_NO).
     // A PI/Invoice can cover several jobs of one customer, so the same number lands on each covered job.

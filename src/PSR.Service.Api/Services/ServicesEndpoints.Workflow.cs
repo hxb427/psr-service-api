@@ -38,7 +38,7 @@ public static partial class ServicesEndpoints
         job.TechnicianId = req.TechnicianId;
         if (!string.IsNullOrWhiteSpace(req.Priority) && Enum.TryParse<Priority>(req.Priority, true, out var pr))
             job.Priority = pr;
-        if (req.PromisedDate is { } pd) job.PromisedDate = pd;
+        if (ShopClock.BusinessDate(req.PromisedDate) is { } pd) job.PromisedDate = pd;
         WriteTransition(db, job, ServiceStatus.Assigned, uid, $"{(reassign ? "Re-assigned" : "Assigned")} to {techUsername}");
         audit.Log(uid, reassign ? "service.reassign" : "service.assign", "service", job.Id, details: techUsername, ip: ip);
         return ApplyResult.Applied;
@@ -204,7 +204,7 @@ public static partial class ServicesEndpoints
         if (!string.IsNullOrWhiteSpace(req.OutwardDcNo)) job.OutwardDcNo = req.OutwardDcNo.Trim();
         // Only stamp a dispatch date when the job has none: a DC generated last week dated the movement,
         // and re-dating it to now would misreport the turnaround.
-        job.DcDate = req.DcDate ?? job.DcDate ?? ShopClock.Today;
+        job.DcDate = ShopClock.BusinessDate(req.DcDate) ?? job.DcDate ?? ShopClock.Today;
 
         // A dispatched unit has to be traceable to a document. The dialog that used to demand a
         // reference number is gone, so the requirement is enforced here against what the job actually
@@ -383,7 +383,7 @@ public static partial class ServicesEndpoints
 
         var was = job.InvNo;
         job.InvNo = invNo;
-        job.InvDate = req.InvDate ?? ShopClock.Today;
+        job.InvDate = ShopClock.BusinessDate(req.InvDate) ?? ShopClock.Today;
         WriteNote(db, job, "InvoiceNo", uid,
             was is null ? $"Invoice number set to {job.InvNo}" : $"Invoice number {was} → {job.InvNo}");
         audit.Log(uid, "service.invoice-no", "service", job.Id, details: job.InvNo, ip: ip);

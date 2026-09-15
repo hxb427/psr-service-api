@@ -310,7 +310,9 @@ public class PasstestRepository(
             expiry = inv.AddMonths(m);
             // Whole months elapsed, matching the legacy dialog: the anniversary of the invoice is the
             // first day OUT, not the last day IN.
-            var today = DateTime.UtcNow.Date;
+            // The shop's today. On UtcNow the verdict flipped a day early for the five and a half
+            // hours after midnight here, which is a warranty claim answered wrongly.
+            var today = Common.ShopClock.Today;
             var elapsed = ((today.Year - inv.Year) * 12) + (today.Month - inv.Month);
             if (today.Day < inv.Day) elapsed--;
             status = elapsed < m ? "IN" : "OUT";

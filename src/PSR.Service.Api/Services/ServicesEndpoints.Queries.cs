@@ -63,8 +63,10 @@ public static partial class ServicesEndpoints
             q = q.Where(x => x.s.TechnicianId == tid);
         if (technicianId is 0)   // explicit "unassigned" filter
             q = q.Where(x => x.s.TechnicianId == null);
-        if (fromDate is { } fd) q = q.Where(x => x.s.DateReceived >= fd);
-        if (toDate is { } td) q = q.Where(x => x.s.DateReceived < td.AddDays(1));
+        // .Date on both ends: the filter is a day range, and a bound carrying a time of day would
+        // slice the first or last day in half.
+        if (fromDate is { } fd) q = q.Where(x => x.s.DateReceived >= fd.Date);
+        if (toDate is { } td) q = q.Where(x => x.s.DateReceived < td.Date.AddDays(1));
         if (!string.IsNullOrWhiteSpace(warranty) && Enum.TryParse<WarrantyStatus>(warranty, true, out var ws))
             q = q.Where(x => x.s.WarrantyStatus == ws);
         if (!string.IsNullOrWhiteSpace(payment) && Enum.TryParse<PaymentStatus>(payment, true, out var ps))

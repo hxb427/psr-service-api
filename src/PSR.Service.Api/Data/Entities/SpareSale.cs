@@ -26,7 +26,8 @@ public class SpareSale : ITimestamps
 {
     public long Id { get; set; }
     public string SaleNo { get; set; } = string.Empty;   // unique (SAL00001)
-    public DateTime SaleDate { get; set; } = DateTime.UtcNow;
+    /// <summary>A day, not an instant — the shop's calendar. See ServiceJob.DateReceived.</summary>
+    public DateTime SaleDate { get; set; } = Common.ShopClock.Today;
 
     // The party is EITHER a dealer or a direct customer — never both (same rule as an inward job).
     public string CustomerType { get; set; } = "Direct";   // "Dealer" | "Direct"
@@ -105,7 +106,8 @@ public class SpareSaleReturn : ITimestamps
     public long Id { get; set; }
     public long SpareSaleId { get; set; }
     public string ReturnNo { get; set; } = string.Empty;   // unique (SRT00001)
-    public DateTime ReturnDate { get; set; } = DateTime.UtcNow;
+    /// <summary>A day, not an instant — the shop's calendar.</summary>
+    public DateTime ReturnDate { get; set; } = Common.ShopClock.Today;
 
     /// <summary>Why it came back. Required — a return that moves stock without a reason is the thing
     /// a stock audit cannot explain later.</summary>

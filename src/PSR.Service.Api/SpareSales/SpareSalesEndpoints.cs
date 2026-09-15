@@ -434,7 +434,7 @@ public static class SpareSalesEndpoints
             ret = new SpareSaleReturn
             {
                 SpareSaleId = sale.Id,
-                ReturnDate = req.ReturnDate ?? ShopClock.Today,
+                ReturnDate = ShopClock.BusinessDate(req.ReturnDate) ?? ShopClock.Today,
                 Reason = req.Reason.Trim(),
                 CreatedByUserId = uid,
                 // Throws when the SPARE_SALE_RETURN sequence row is missing, which is a deployment

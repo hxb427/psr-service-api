@@ -22,7 +22,7 @@ public class SpareSaleService(AppDbContext db)
     {
         var isDealer = await ApplyPartyAsync(sale, req, userId, audit, ip, ct);
 
-        sale.SaleDate = req.SaleDate ?? ShopClock.Today;
+        sale.SaleDate = ShopClock.BusinessDate(req.SaleDate) ?? ShopClock.Today;
         sale.Remarks = req.Remarks?.Trim();
 
         sale.Lines.Clear();

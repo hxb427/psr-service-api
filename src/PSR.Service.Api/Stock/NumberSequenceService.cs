@@ -1,3 +1,4 @@
+using PSR.Service.Api.Common;
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 
@@ -32,7 +33,10 @@ public class NumberSequenceService(AppDbContext db)
         // Year-scoped sequences (PI / Invoice / DC) format as PREFIX-YYYY-NNNN and reset every January.
         if (row.Year is not null)
         {
-            var year = DateTime.UtcNow.Year;
+            // The shop's year. On UtcNow it stays last year until 05:30 IST on 1 January, so a
+            // document raised that morning got last year's number and then reset the counter to 1
+            // when the year finally rolled — two documents, same number, five hours apart.
+            var year = ShopClock.Now.Year;
             if (row.Year != year) { row.Year = year; row.NextValue = 1; }
             var v = row.NextValue;
             row.NextValue = v + 1;

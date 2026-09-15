@@ -392,7 +392,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, CompanyI
         new()
         {
             DocType = docType,
-            DocDate = docDate ?? ShopClock.Today,
+            DocDate = ShopClock.BusinessDate(docDate) ?? ShopClock.Today,
             PartyName = party.Name,
             PartyAddress = party.Address,
             // Consignee/delivery address — defaults to the billing address when not given separately.

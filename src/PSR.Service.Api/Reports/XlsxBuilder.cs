@@ -34,6 +34,16 @@ public static class XlsxBuilder
                     case long l: cell.Value = l; break;
                     case decimal d: cell.Value = d; break;
                     case double db: cell.Value = db; break;
+                    // A timestamp and a calendar date both arrive as DateTime and need opposite
+                    // treatment: an instant has to be moved onto the shop's clock to read correctly,
+                    // a received date must NOT be moved or it lands at 05:30 — or, an hour either
+                    // side of midnight, on the wrong day. Midnight is the tell, because a business
+                    // date is stored as the day itself. A timestamp landing exactly on 00:00:00.000
+                    // is printed as a bare date, which is the harmless way to be wrong.
+                    case DateTime dt when dt.TimeOfDay == TimeSpan.Zero:
+                        cell.Value = dt;
+                        cell.Style.DateFormat.Format = "yyyy-mm-dd";
+                        break;
                     case DateTime dt:
                         cell.Value = dt.AddHours(localOffsetHours);
                         cell.Style.DateFormat.Format = "yyyy-mm-dd hh:mm";
