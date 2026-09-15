@@ -153,6 +153,12 @@ public static partial class ServicesEndpoints
             if (req.ServiceChargeId is not { } scid) return (null, "A service charge is required for a service-charge line.");
             var sc = await db.ServiceCharges.FirstOrDefaultAsync(s => s.Id == scid, ct);
             if (sc is null) return (null, "Service charge not found.");
+            // Retiring a charge has to mean something. The desk app already asks for active charges
+            // only, but that list is cached per visit, so a client holding a stale copy could still
+            // post one that has since been withdrawn — and it would be billed at the withdrawn price.
+            // Jobs that already carry it are unaffected: a line stores its own amount.
+            if (!sc.IsActive)
+                return (null, $"'{sc.Name}' is no longer offered — pick a current service charge.");
             line.ServiceChargeId = sc.Id;
             line.UnitPrice = sc.Charge;
             line.Description ??= sc.Name;
