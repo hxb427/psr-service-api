@@ -46,7 +46,10 @@ public record UpdatePartRequest(
 // Serial-tracking config toggle (grid one-tap; avoids resending the full part on PUT).
 public record SetSerialTrackingRequest(bool Enabled);
 
-public record ServiceChargeDto(long Id, string Name, decimal Charge, decimal TaxPercent, string? Remarks, bool IsActive);
+/// <summary>Charge and TaxPercent are null for non-pricing roles, the same way PartDto strips a part's
+/// rates. A technician picks which charges a job carries; what the customer is billed for them is not
+/// theirs to see, and the server prices the line from its own copy either way.</summary>
+public record ServiceChargeDto(long Id, string Name, decimal? Charge, decimal? TaxPercent, string? Remarks, bool IsActive);
 
 public record CreateServiceChargeRequest(
     [Required, StringLength(200, MinimumLength = 1)] string Name,

@@ -11,6 +11,13 @@ namespace PSR.Service.Api.Reference;
 
 public static class ServiceChargesEndpoints
 {
+    /// <summary>Who sees what a charge costs. Same list as the parts master's, and for the same reason:
+    /// the shop floor records what was done, the office decides what it is worth.</summary>
+    private static readonly string[] PricingRoles =
+        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer };
+
+    private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);
+
     public static IEndpointRouteBuilder MapServiceChargeEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/service-charges").WithTags("service-charges").RequireAuthorization();
@@ -33,14 +40,16 @@ public static class ServiceChargesEndpoints
     /// so "Sensor Board Replacement" ranks with "sensorboard".</summary>
     internal static readonly string[] LeadingCharges = { "mainboard", "sensorboard", "calibration" };
 
-    private static async Task<Ok<List<ServiceChargeDto>>> ListAsync(AppDbContext db, bool? activeOnly, CancellationToken ct)
+    private static async Task<Ok<List<ServiceChargeDto>>> ListAsync(
+        AppDbContext db, ClaimsPrincipal user, bool? activeOnly, CancellationToken ct)
     {
         var q = db.ServiceCharges.AsNoTracking().AsQueryable();
         if (activeOnly == true) q = q.Where(x => x.IsActive);
         // Ordered by name in SQL, then re-ranked here: the CASE that would express the priority does not
         // survive translation, and the catalogue is a few dozen rows.
         var items = await q.OrderBy(x => x.Name).ToListAsync(ct);
-        return TypedResults.Ok(items.OrderBy(Rank).Select(ToDto).ToList());
+        var pricing = CanSeePricing(user);
+        return TypedResults.Ok(items.OrderBy(Rank).Select(x => ToDto(x, pricing)).ToList());
     }
 
     /// <summary>Where a charge sits in the list — its index in <see cref="LeadingCharges"/>, or past the
@@ -56,10 +65,11 @@ public static class ServiceChargesEndpoints
     private static string Squash(string name) =>
         string.Concat(name.Where(char.IsLetterOrDigit)).ToLowerInvariant();
 
-    private static async Task<Results<Ok<ServiceChargeDto>, NotFound>> GetAsync(long id, AppDbContext db, CancellationToken ct)
+    private static async Task<Results<Ok<ServiceChargeDto>, NotFound>> GetAsync(
+        long id, AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
     {
         var x = await db.ServiceCharges.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
-        return x is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(x));
+        return x is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(x, CanSeePricing(user)));
     }
 
     private static async Task<Results<Created<ServiceChargeDto>, ValidationProblem>> CreateAsync(
@@ -80,7 +90,7 @@ public static class ServiceChargesEndpoints
         audit.Log(actor, "service-charge.create", "service_charge", sc.Id,
             details: $"'{sc.Name}' {sc.Charge:0.##} + {sc.TaxPercent:0.##}% tax", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
-        return TypedResults.Created($"/service-charges/{sc.Id}", ToDto(sc));
+        return TypedResults.Created($"/service-charges/{sc.Id}", ToDto(sc, CanSeePricing(user)));
     }
 
     private static async Task<Results<Ok<ServiceChargeDto>, NotFound, ValidationProblem>> UpdateAsync(
@@ -99,7 +109,7 @@ public static class ServiceChargesEndpoints
         user.TryGetUserId(out var actor);
         audit.Log(actor, "service-charge.update", "service_charge", id, details: diff.Describe(name), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
-        return TypedResults.Ok(ToDto(sc));
+        return TypedResults.Ok(ToDto(sc, CanSeePricing(user)));
     }
 
     private static async Task<Results<NoContent, NotFound>> SetActiveAsync(
@@ -114,5 +124,9 @@ public static class ServiceChargesEndpoints
         return TypedResults.NoContent();
     }
 
-    private static ServiceChargeDto ToDto(ServiceCharge x) => new(x.Id, x.Name, x.Charge, x.TaxPercent, x.Remarks, x.IsActive);
+    private static ServiceChargeDto ToDto(ServiceCharge x, bool pricing) => new(
+        x.Id, x.Name,
+        pricing ? x.Charge : null,
+        pricing ? x.TaxPercent : null,
+        x.Remarks, x.IsActive);
 }
