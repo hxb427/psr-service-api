@@ -51,6 +51,9 @@ public static class SpareSalesEndpoints
         group.MapPost("/{id:long}/mark-sold", MarkSoldAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/unmark-sold", UnmarkSoldAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/clear-pi", ClearPiAsync).RequireAuthorization("SaleManage");
+        // Gated on DocumentManage rather than SaleManage: it is the generate form's own scratch pad,
+        // and accounts raises documents without being able to edit the sale behind them.
+        group.MapPost("/{id:long}/courier", SaveCourierAsync).RequireAuthorization("DocumentManage");
         group.MapPost("/{id:long}/returns", CreateReturnAsync).RequireAuthorization("SaleManage");
         // Asked per row by the sale form as the user types, so it stays a single-part lookup.
         group.MapGet("/availability/{partId:long}", AvailabilityAsync);
@@ -376,6 +379,31 @@ public static class SpareSalesEndpoints
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
     }
 
+    /// <summary>Remember the courier details the generate form was given.
+    ///
+    /// The courier mode and charge belong to the DOCUMENT — this does not change what the sale bills,
+    /// and no total here moves. It is the form's scratch pad: someone raising a PI types the courier,
+    /// previews it, decides the figures need another look and closes it, and the next attempt used to
+    /// start from an empty pair of boxes. Kept on the sale, they come back with it.
+    ///
+    /// No audit row: nothing commercial has happened yet, and one line per abandoned preview would
+    /// bury the entries that record what was actually issued.</summary>
+    private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> SaveCourierAsync(
+        long id, [FromBody] SaveSaleCourierRequest req, ClaimsPrincipal user, AppDbContext db,
+        CancellationToken ct)
+    {
+        var sale = await db.SpareSales.FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
+        if (sale is null) return TypedResults.NotFound();
+        if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
+
+        var mode = req.CourierMode?.Trim();
+        sale.CourierMode = string.IsNullOrWhiteSpace(mode) ? null : mode;
+        sale.CourierCharges = req.CourierCharges;
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
     /// <summary>Record goods coming back from a sale and put them back in the warehouse.
     ///
     /// Only a sale marked sold can be returned against, because that is the only state in which stock
@@ -542,6 +570,7 @@ public static class SpareSalesEndpoints
             sale.Status.ToString(), sale.PaymentStatus.ToString(),
             sale.PiNo, sale.PiDate, sale.InvNo, sale.InvDate,
             pricing ? sale.TaxableAmount : null, pricing ? sale.TaxAmount : null, pricing ? sale.TotalAmount : null,
-            sale.Remarks, createdBy, sale.CreatedAt, lines, returnDtos, sale.SoldAt, soldBy);
+            sale.Remarks, createdBy, sale.CreatedAt, lines, returnDtos, sale.SoldAt, soldBy,
+            sale.CourierMode, pricing ? sale.CourierCharges : null);
     }
 }

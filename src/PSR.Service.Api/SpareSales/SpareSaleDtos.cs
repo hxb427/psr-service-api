@@ -27,6 +27,14 @@ public record SaveSpareSaleRequest(
 
 public record SalePaymentRequest([Required, StringLength(20)] string Status);
 
+/// <summary>Remember what the generate form was told about the courier, so the next PI for this sale
+/// opens with it already filled in. Saved when the form is completed, whether or not the document that
+/// followed was kept — which is the point: a preview that was looked at and discarded used to take the
+/// typed courier details with it. Both fields are optional; blanks clear what was remembered.</summary>
+public record SaveSaleCourierRequest(
+    [StringLength(80)] string? CourierMode,
+    [Range(0, 10_000_000)] decimal? CourierCharges);
+
 /// <summary>Money fields are null for roles that may see the sale but not its pricing (store_manager).
 ///
 /// The stock figures are live, not snapshots. <paramref name="WarehouseOnHand"/> is the physical balance;
@@ -76,4 +84,6 @@ public record SpareSaleDetailDto(
     List<SpareSaleLineDto> Lines,
     List<SaleReturnDto> Returns,
     // Stock: null until someone marks the sale sold. Nothing else on this record moves the warehouse.
-    DateTime? SoldAt = null, string? SoldByUsername = null);
+    DateTime? SoldAt = null, string? SoldByUsername = null,
+    // Last courier details entered on a generate form for this sale — the next one opens on them.
+    string? CourierMode = null, decimal? CourierCharges = null);

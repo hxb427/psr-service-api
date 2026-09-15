@@ -27,13 +27,34 @@ public static class ServiceChargesEndpoints
         return app;
     }
 
+    /// <summary>The charges the bench reaches for on most jobs, in the order it works through them.
+    /// They sit ahead of the alphabetical rest of the list so the technician's add-line dialog opens on
+    /// them instead of on whatever happens to start with an A. Matched on a squashed, case-folded name,
+    /// so "Sensor Board Replacement" ranks with "sensorboard".</summary>
+    internal static readonly string[] LeadingCharges = { "mainboard", "sensorboard", "calibration" };
+
     private static async Task<Ok<List<ServiceChargeDto>>> ListAsync(AppDbContext db, bool? activeOnly, CancellationToken ct)
     {
         var q = db.ServiceCharges.AsNoTracking().AsQueryable();
         if (activeOnly == true) q = q.Where(x => x.IsActive);
+        // Ordered by name in SQL, then re-ranked here: the CASE that would express the priority does not
+        // survive translation, and the catalogue is a few dozen rows.
         var items = await q.OrderBy(x => x.Name).ToListAsync(ct);
-        return TypedResults.Ok(items.Select(ToDto).ToList());
+        return TypedResults.Ok(items.OrderBy(Rank).Select(ToDto).ToList());
     }
+
+    /// <summary>Where a charge sits in the list — its index in <see cref="LeadingCharges"/>, or past the
+    /// end of it for everything else. OrderBy is stable, so the rest keeps the name order it arrived in.</summary>
+    internal static int Rank(ServiceCharge c)
+    {
+        var name = Squash(c.Name);
+        for (var i = 0; i < LeadingCharges.Length; i++)
+            if (name.Contains(LeadingCharges[i], StringComparison.Ordinal)) return i;
+        return LeadingCharges.Length;
+    }
+
+    private static string Squash(string name) =>
+        string.Concat(name.Where(char.IsLetterOrDigit)).ToLowerInvariant();
 
     private static async Task<Results<Ok<ServiceChargeDto>, NotFound>> GetAsync(long id, AppDbContext db, CancellationToken ct)
     {

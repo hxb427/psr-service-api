@@ -54,6 +54,16 @@ public class SpareSale : ITimestamps
     public decimal TaxAmount { get; set; }
     public decimal TotalAmount { get; set; }
 
+    // ----- courier, carried on the sale so the generate form does not ask for it twice -----
+    //
+    // Courier is charged on the DOCUMENT, not on the sale — TotalAmount above still excludes it — but
+    // it is entered on the generate form, and that form used to open blank every time. Someone who
+    // typed the mode and the charge, previewed the PI and then decided not to save it lost both, and
+    // had to type them again on the next attempt. Kept here they behave like every other detail of the
+    // sale: entered once, and there next time.
+    public string? CourierMode { get; set; }
+    public decimal? CourierCharges { get; set; }
+
     public string? Remarks { get; set; }
     public bool IsDeleted { get; set; }
 

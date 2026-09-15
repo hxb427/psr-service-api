@@ -33,6 +33,9 @@ public class SpareSaleConfiguration : IEntityTypeConfiguration<SpareSale>
         b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(14, 2);
         b.Property(x => x.TotalAmount).HasColumnName("total_amount").HasPrecision(14, 2);
 
+        b.Property(x => x.CourierMode).HasColumnName("courier_mode").HasMaxLength(80);
+        b.Property(x => x.CourierCharges).HasColumnName("courier_charges").HasPrecision(12, 2);
+
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.IsDeleted).HasColumnName("is_deleted");
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
