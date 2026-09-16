@@ -206,22 +206,31 @@ public static partial class ServicesEndpoints
         // and re-dating it to now would misreport the turnaround.
         job.DcDate = ShopClock.BusinessDate(req.DcDate) ?? job.DcDate ?? ShopClock.Today;
 
-        // A dispatched unit has to be traceable to a document. The dialog that used to demand a
+        // An out-of-warranty unit has to be traceable to a document. The dialog that used to demand a
         // reference number is gone, so the requirement is enforced here against what the job actually
         // carries — any one of the PI, the delivery challan or the outward reference will do, because
         // each of them is a number the goods can be followed by. Checked after the assignments above so
         // a request that supplies one of them satisfies it in the same call.
-        if (string.IsNullOrWhiteSpace(job.PiNo)
+        //
+        // A job IN warranty is exempt. The rule assumed paperwork such a job never produces: there is
+        // nothing to bill, so no PI is raised, and the challan is usually written by hand at the
+        // counter as the unit is handed back. Demanding one of the three meant the shop generated a DC
+        // purely to get past this check — a document invented to satisfy a rule rather than to record
+        // anything, which is worse for tracing than having none.
+        if (job.WarrantyStatus != WarrantyStatus.InWarranty
+            && string.IsNullOrWhiteSpace(job.PiNo)
             && string.IsNullOrWhiteSpace(job.OutwardDcNo)
             && string.IsNullOrWhiteSpace(job.OutwardReferenceNo))
             return ApplyResult.Invalid(
-                "This job has no PI, delivery challan or outward reference — generate one, or set the "
-                + "outward reference, before dispatching it.");
+                "This out-of-warranty job has no PI, delivery challan or outward reference — generate "
+                + "one, or set the outward reference, before dispatching it.");
 
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(job.OutwardReferenceNo)) parts.Add($"ref {job.OutwardReferenceNo}");
         if (!string.IsNullOrWhiteSpace(job.OutwardDcNo)) parts.Add($"DC {job.OutwardDcNo}");
         if (parts.Count == 0 && !string.IsNullOrWhiteSpace(job.PiNo)) parts.Add($"PI {job.PiNo}");
+        // A warranty job can legitimately carry none of the three, and "Dispatched ()" says nothing.
+        if (parts.Count == 0) parts.Add("in warranty, no reference");
         var note = $"Dispatched ({string.Join(", ", parts)})";
         WriteTransition(db, job, ServiceStatus.Dispatched, uid, note);
         audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: ip);
