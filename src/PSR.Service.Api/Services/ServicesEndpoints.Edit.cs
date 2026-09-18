@@ -60,9 +60,13 @@ public static partial class ServicesEndpoints
                     // Same resolve-or-create the inward desk uses, so a corrected name lands on the
                     // existing customer when there is one instead of forking a near-duplicate. Passing
                     // the auditor keeps an implicitly created customer from appearing from nowhere.
-                    job.CustomerId = await ResolveCustomerAsync(db, null, customerName,
+                    var party = await ResolveCustomerAsync(db, null, customerName,
                         org: null, phone: null, email: null, address: null, ct,
                         audit, uid, http.GetIp(), origin: "record edit");
+                    // Retyping a job's customer as a dealer's name would fork the same firm in two, the
+                    // same way the inward desk could. Refused here for the same reason.
+                    if (party.Error is { } partyError) return TypedResults.BadRequest(partyError);
+                    job.CustomerId = party.CustomerId;
                     diff.Note($"customer '{current}' → '{customerName}'");
                 }
             }

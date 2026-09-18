@@ -99,14 +99,16 @@ public class SpareSaleService(AppDbContext db)
 
         if (string.Equals(type, "Direct", StringComparison.OrdinalIgnoreCase))
         {
-            var customerId = await Services.ServicesEndpoints.ResolveCustomerAsync(
+            var party = await Services.ServicesEndpoints.ResolveCustomerAsync(
                 db, req.CustomerId, req.CustomerName, null, req.Phone, null, req.Address,
                 ct, audit, userId, ip, origin: "sale");
-            if (customerId is null)
-                throw new SaleValidationException("Name the customer being billed.");
+            // A name already on the dealer list is refused with its own wording — it says which dealer
+            // and why, which "Name the customer being billed" would throw away.
+            if (party.CustomerId is null)
+                throw new SaleValidationException(party.Error ?? "Name the customer being billed.");
 
             sale.CustomerType = "Direct";
-            sale.CustomerId = customerId;
+            sale.CustomerId = party.CustomerId;
             sale.DealerId = null;
             return false;
         }

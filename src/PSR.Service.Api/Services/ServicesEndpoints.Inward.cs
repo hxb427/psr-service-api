@@ -36,9 +36,13 @@ public static partial class ServicesEndpoints
         ServiceJob job;
         try
         {
-            var customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
+            var party = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
                 req.OrganizationName, req.Phone, req.Email, req.Address, ct, audit, uid, http.GetIp());
-            if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
+            if (party.CustomerId is not { } customerId)
+            {
+                await tx.RollbackAsync(ct);
+                return TypedResults.BadRequest(party.Error ?? "Customer not found.");
+            }
 
             var no = await seq.NextAsync(SequenceKeys.Service, ct);
             job = new ServiceJob
@@ -46,7 +50,7 @@ public static partial class ServicesEndpoints
                 ServiceNo = no,
                 ChallanNo = req.ChallanNo?.Trim(),
                 CustomerType = req.CustomerType?.Trim(),
-                CustomerId = customerId.Value,
+                CustomerId = customerId,
                 DealerId = req.DealerId,
                 SerialNo = req.SerialNo.Trim(),
                 PsCode = req.PsCode?.Trim(),
@@ -118,9 +122,14 @@ public static partial class ServicesEndpoints
             }
             else
             {
-                customerId = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
+                var party = await ResolveCustomerAsync(db, req.CustomerId, req.CustomerName,
                     req.OrganizationName, req.Phone, null, req.Address, ct, audit, uid, http.GetIp());
-                if (customerId is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest("Customer not found."); }
+                if (party.CustomerId is null)
+                {
+                    await tx.RollbackAsync(ct);
+                    return TypedResults.BadRequest(party.Error ?? "Customer not found.");
+                }
+                customerId = party.CustomerId;
                 customerName = await db.Customers.Where(c => c.Id == customerId).Select(c => c.Name).FirstAsync(ct);
             }
 
@@ -165,19 +174,65 @@ public static partial class ServicesEndpoints
 
     /// <summary>Match an existing customer by name or create one. The create is audited — inward is the only
     /// path that adds customers implicitly, so without this a customer master row appears from nowhere.</summary>
-    /// <summary>Match a customer by id, else by exact active name, else create one. Shared with the spare-sales
-    /// module so a walk-in typed at the counter lands in the same master as one typed at the inward desk.</summary>
-    internal static async Task<long?> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
+    /// <summary>Outcome of resolving the direct customer a job or sale is billed to.
+    ///
+    /// A reason rather than a bare null, because the two ways this fails need different words at the
+    /// counter: "nothing to go on" is the caller's own message, while "that name belongs to a dealer"
+    /// has to name the dealer and say what to do instead.</summary>
+    internal readonly record struct CustomerResolution(long? CustomerId, string? Error)
+    {
+        /// <summary>Nothing identified a customer. The caller supplies its own wording.</summary>
+        public static readonly CustomerResolution Missing = new(null, null);
+
+        public static CustomerResolution Found(long id) => new(id, null);
+        public static CustomerResolution Refused(string error) => new(null, error);
+    }
+
+    /// <summary>Match a customer by id, else by exact active name, else create one. Shared with the
+    /// spare-sales module so a walk-in typed at the counter lands in the same master as one typed at the
+    /// inward desk.
+    ///
+    /// Refuses outright when the name is already on the dealer list. One business must be one party
+    /// record: a document bills a single (CustomerId, DealerId) pair, so the moment the same firm exists
+    /// as both a dealer and a direct customer its jobs split across two records and no PI can cover them
+    /// together. That is not hypothetical — it happened, the shop spent an hour retrying a document that
+    /// could never be raised, and the duplicate had been created here weeks earlier by someone typing a
+    /// dealer's name into the customer box.
+    ///
+    /// The check covers the id path as well as the typed one. Refusing only new names would leave any
+    /// shadow record already in the master usable, and picking it from the list would keep splitting the
+    /// same firm's jobs — which is exactly how the second one goes unnoticed.</summary>
+    internal static async Task<CustomerResolution> ResolveCustomerAsync(AppDbContext db, long? customerId, string? customerName,
         string? org, string? phone, string? email, string? address, CancellationToken ct,
         IAuditService? audit = null, long uid = 0, string? ip = null, string origin = "inward")
     {
+        // The name this resolves to, whichever way the caller identified it. Needed before anything is
+        // matched or created, because the dealer check below is on the name.
+        string name;
         if (customerId is { } cid)
-            return await db.Customers.AnyAsync(c => c.Id == cid, ct) ? cid : null;
-        if (string.IsNullOrWhiteSpace(customerName)) return null;
+        {
+            var picked = await db.Customers.Where(c => c.Id == cid).Select(c => c.Name).FirstOrDefaultAsync(ct);
+            if (picked is null) return CustomerResolution.Missing;
+            name = picked;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(customerName)) return CustomerResolution.Missing;
+            name = customerName.Trim();
+        }
 
-        var name = customerName.Trim();
+        var dealer = await db.Dealers.Where(d => d.Name == name && d.IsActive)
+            .Select(d => d.Name).FirstOrDefaultAsync(ct);
+        if (dealer is not null)
+            return CustomerResolution.Refused(
+                $"“{dealer}” is on the dealer list. Book this to the dealer rather than as a direct "
+                + "customer — entered both ways, the same firm's jobs land on two different party records "
+                + "and cannot go on one PI or invoice.");
+
+        if (customerId is { } okId) return CustomerResolution.Found(okId);
+
         var existing = await db.Customers.FirstOrDefaultAsync(c => c.Name == name && c.IsActive, ct);
-        if (existing is not null) return existing.Id;
+        if (existing is not null) return CustomerResolution.Found(existing.Id);
 
         var created = new Customer
         {
@@ -187,6 +242,6 @@ public static partial class ServicesEndpoints
         db.Customers.Add(created);
         await db.SaveChangesAsync(ct);
         audit?.Log(uid, "customer.create", "customer", created.Id, details: $"auto-created at {origin}: {name}", ip: ip);
-        return created.Id;
+        return CustomerResolution.Found(created.Id);
     }
 }

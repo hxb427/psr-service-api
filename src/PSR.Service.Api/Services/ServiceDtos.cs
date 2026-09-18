@@ -175,7 +175,10 @@ public record ServiceListItemDto(
     // Document refs drive the gated PI → Invoice → DC chain on the dispatch screen. OutwardReferenceNo
     // is here so a bulk dispatch can tell, without opening each job, which rows carry a number the
     // goods can be traced by — dispatch refuses a job with none of PI / DC / outward reference.
-    string? PiNo, string? InvNo, string? OutwardDcNo, string? OutwardReferenceNo = null);
+    // A replaced unit now waits in the same pending-dispatch queue as a repaired one, so the row has
+    // to say which it is — the counter is handing back a different machine from the one booked in.
+    string? PiNo, string? InvNo, string? OutwardDcNo, string? OutwardReferenceNo = null,
+    string? ReplacementSerialNo = null);
 
 // UnitPrice/Amount are null for non-pricing roles (technician/store/etc).
 public record ServiceLineDto(

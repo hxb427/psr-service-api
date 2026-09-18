@@ -154,6 +154,15 @@ public static partial class ServicesEndpoints
             return TypedResults.BadRequest($"Only a completed job can be reverted (currently {job.ServiceStatus}).");
         if (job.PaymentStatus != PaymentStatus.Pending)
             return TypedResults.BadRequest("Cannot revert — a payment has already been recorded.");
+        // A replaced job now sits in Completed like any other, so it reaches this route — but the
+        // revert below only reverses the technician's LINES. The whole-unit replacement left the
+        // warehouse through its own movement and, if serial-tracked, is recorded against the customer;
+        // none of that is undone here, so reverting would put the job back in service while the
+        // replacement unit stayed gone from stock.
+        if (!string.IsNullOrWhiteSpace(job.ReplacementSerialNo))
+            return TypedResults.BadRequest(
+                $"Cannot revert — replacement unit {job.ReplacementSerialNo} has already been issued "
+                + "against this job. Book its return through stock before reverting.");
         // A generated PI / Invoice / DC freezes the billed figures — reverting would let the lines change underneath it.
         if (await db.ServiceDocumentLines.AnyAsync(l => l.ServiceJobId == id, ct))
             return TypedResults.BadRequest("Cannot revert — a PI, invoice or delivery challan has already been generated for this job.");
@@ -498,33 +507,83 @@ public static partial class ServicesEndpoints
         if (job.ServiceStatus is not ServiceStatus.ReplacementApprovalPending)
             return TypedResults.BadRequest($"A replacement can only be issued for a total-loss job awaiting replacement (currently {job.ServiceStatus}).");
 
-        var qty = req.Qty < 1 ? 1 : req.Qty;
+        // Always one. A total loss is one unit written off and one unit handed back in its place, so
+        // there is no quantity to ask for. ReplaceRequest.Qty is still accepted so a desktop build
+        // already in the field keeps working, and is deliberately ignored.
+        const int qty = 1;
+
+        // The part this comes out of. An explicit pick wins — a unit is occasionally replaced with a
+        // different model — but the normal case supplies none, and the replacement is the same item
+        // that came in, which the job carries as its PS code. Resolving it here is what makes the
+        // warehouse move at all: this used to decrement only when someone remembered to pick a part,
+        // so a replacement issued the ordinary way left the shelf count untouched and the stock on
+        // record drifted above the stock on the rack by one unit every time.
         Part? part = null;
         if (req.ReplacementPartId is { } pid)
         {
             part = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
             if (part is null) return TypedResults.BadRequest("Replacement part not found.");
         }
+        else if (!string.IsNullOrWhiteSpace(job.PsCode))
+        {
+            var code = job.PsCode.Trim();
+            // No IsActive filter: a retired code that still has units on the shelf is exactly the case
+            // where the shelf has to be decremented, and refusing it would leave the count wrong.
+            part = await db.Parts.FirstOrDefaultAsync(p => p.ItemCode == code, ct);
+            if (part is null)
+                return TypedResults.BadRequest(
+                    $"No catalogue item matches PS code {code}, so the replacement cannot be taken out of "
+                    + "stock. Pick the replacement part on the form.");
+        }
+        else
+        {
+            return TypedResults.BadRequest(
+                "This job carries no PS code, so the replacement cannot be taken out of stock. Pick the "
+                + "replacement part on the form.");
+        }
+
+        // Checked before anything is written so an empty shelf is reported as an empty shelf, naming
+        // the item and what it actually holds. The ledger guards this again inside the transaction,
+        // which is what stops two people issuing the last unit at once; this one exists so the usual
+        // case reads as a stock problem instead of a failed transaction.
+        var onHand = await db.StockBalances.AsNoTracking()
+            .Where(b => b.PartId == part.Id && b.TechnicianId == StockBalance.Warehouse)
+            .Select(b => (int?)b.OnHand).FirstOrDefaultAsync(ct) ?? 0;
+        if (onHand < qty)
+            return TypedResults.BadRequest(
+                $"{part.ItemCode} — {part.Name} has {onHand} in warehouse stock, so this replacement "
+                + "cannot be issued. Restock it, or pick a different replacement part.");
 
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            // Ship the replacement unit out of the warehouse only when it maps to a catalog part.
-            if (part is not null)
-            {
-                await ledger.ReplacementOutAsync(part.Id, qty, uid, job.Id,
-                    req.ReplacementSerialNo.Trim(), $"Replacement for service {job.ServiceNo}", ct);
-                // A serial-tracked replacement unit is now deployed to the customer.
-                if (part.IsSerialTracked)
-                    await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
-                        await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct);
-            }
+            // The replacement leaves the warehouse. Resolved above, so this always runs.
+            await ledger.ReplacementOutAsync(part.Id, qty, uid, job.Id,
+                req.ReplacementSerialNo.Trim(), $"Replacement for service {job.ServiceNo}", ct);
+            // A serial-tracked replacement unit is now deployed to the customer.
+            if (part.IsSerialTracked)
+                await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
+                    await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct);
 
             job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
-            job.ReplacementPartId = part?.Id;
-            WriteTransition(db, job, ServiceStatus.Replaced, uid,
-                req.Note ?? $"Unit replaced (SN {job.ReplacementSerialNo})");
+            job.ReplacementPartId = part.Id;
+            // Completed, NOT the terminal Replaced. Issuing the replacement finishes the WORK on the
+            // job; it does not hand anything to the customer. The unit still has to be billed if it is
+            // out of warranty and then physically dispatched, which is exactly what a normally serviced
+            // job needs — so it joins the same pending-dispatch queue and goes out through the same
+            // door. Landing on Replaced closed the job at the counter: no PI could be raised for it
+            // (billing refuses anything past Completed), no dispatch step ran, and the turnaround clock
+            // stopped the moment the store issued a part rather than when the customer got the unit.
+            //
+            // This is what the legacy app did — approving a replacement wrote the REPLACEMENT tag onto
+            // the record and then called markServiceComplete, leaving it in Pending Dispatch with a
+            // "REPLACEMENT DONE" badge on the row.
+            //
+            // Replaced stays in the enum: rows closed under the old behaviour still carry it, and the
+            // closed-section and report queries still have to find them.
+            WriteTransition(db, job, ServiceStatus.Completed, uid,
+                req.Note ?? $"Unit replaced (SN {job.ReplacementSerialNo}) — ready for dispatch");
             audit.Log(uid, "service.replace", "service", job.Id, details: job.ReplacementSerialNo, ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
