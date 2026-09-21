@@ -63,7 +63,7 @@ public static class FieldOpsEndpoints
         var tech = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (tech is null) return TypedResults.BadRequest("User not found.");
         var techName = tech.FullName ?? tech.Username;
-        var isField = tech.IsFieldTechnician;
+        var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         FieldService fs;
@@ -73,6 +73,7 @@ public static class FieldOpsEndpoints
             fs = new FieldService
             {
                 ServiceNo = no, TechnicianId = uid, CustomerName = req.CustomerName.Trim(),
+                CustomerId = customerId,
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), MachineSerial = req.MachineSerial?.Trim(),
                 Complaint = req.Complaint?.Trim(), WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
                 CreatedByUserId = uid,
@@ -83,8 +84,8 @@ public static class FieldOpsEndpoints
             foreach (var lineReq in req.Lines ?? [])
             {
                 var (line, err) = await BuildLineAsync(db, ledger, serial, lineReq.Kind, lineReq.PartId,
-                    lineReq.Qty, lineReq.SerialNo, lineReq.Defective, uid, techName, isField,
-                    fs.CustomerName, "FIELD_SERVICE", fs.Id, ct);
+                    lineReq.Qty, lineReq.SerialNo, lineReq.Defective, uid, techName,
+                    fs.CustomerName, customerId, "FIELD_SERVICE", fs.Id, ct);
                 if (err is not null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(err); }
                 line!.FieldServiceId = fs.Id;
                 db.FieldServiceLines.Add(line);
@@ -100,11 +101,14 @@ public static class FieldOpsEndpoints
         return TypedResults.Created($"/field-services/{fs.Id}", await ServiceToDtoAsync(db, loaded, CanSeePricing(user), ct));
     }
 
-    /// <summary>Validates + consumes stock + drives serials for one Used/Collected line.</summary>
+    /// <summary>Validates + consumes stock + drives serials for one Used/Collected line.
+    ///
+    /// Serial rules follow the part, not the technician: a tracked unit fitted at a customer is a
+    /// tracked unit wherever the person who fitted it is based.</summary>
     private static async Task<(FieldServiceLine? line, string? error)> BuildLineAsync(
         AppDbContext db, StockLedgerService ledger, SerialService serial,
         string kindRaw, long partId, int qty, string? serialNo, bool defective,
-        long uid, string techName, bool isField, string customerName,
+        long uid, string techName, string customerName, long? customerId,
         string referenceType, long referenceId, CancellationToken ct)
     {
         if (!Enum.TryParse<FieldLineKind>(kindRaw, true, out var kind))
@@ -123,24 +127,29 @@ public static class FieldOpsEndpoints
         if (kind == FieldLineKind.Used)
         {
             // Serial-tracked units are consumed one per line with their serial named.
-            if (part.IsSerialTracked && isField)
+            if (part.IsSerialTracked)
             {
                 if (string.IsNullOrWhiteSpace(sn))
                     return (null, $"{part.ItemCode} is serial-tracked — name the fitted serial.");
                 if (qty != 1)
                     return (null, $"{part.ItemCode} is serial-tracked — one line per unit (qty 1).");
-                var err = await serial.ValidateFittedSerialAsync(partId, sn!, uid, ct);
+                var err = await serial.ValidateFittedSerialAsync(partId, sn!, uid, ct, techName, uid, part.Name);
                 if (err is not null) return (null, err);
             }
             await ledger.ConsumeAsync(partId, uid, qty, uid, referenceType, referenceId, ct);
-            if (part.IsSerialTracked && isField)
-                await serial.InstallToCustomerAsync(partId, sn!, part.Name, customerName, SerialStatus.Installed, uid, ct);
+            if (part.IsSerialTracked)
+                await serial.InstallToCustomerAsync(partId, sn!, part.Name, customerName,
+                    SerialStatus.Installed, uid, ct, customerId);
         }
         else // Collected — faulty unit taken from the customer; no stock consumption.
         {
+            // Only a tracked part has a unit to follow. A non-tracked one is counted, not identified,
+            // so demanding a serial for it (as this used to, for every part) asked for something that
+            // is not written on the item.
+            if (!part.IsSerialTracked) return (line, null);
             if (string.IsNullOrWhiteSpace(sn))
-                return (null, "Collected lines need the collected unit's serial number.");
-            await serial.CollectFromCustomerAsync(partId, sn!, part.Name, uid, techName, defective, uid, ct);
+                return (null, $"{part.ItemCode} is serial-tracked — name the collected unit's serial.");
+            await serial.CollectFromCustomerAsync(partId, sn!, part.Name, uid, techName, defective, uid, ct, customerId);
         }
         return (line, null);
     }
@@ -173,7 +182,8 @@ public static class FieldOpsEndpoints
         user.TryGetUserId(out var uid);
         var tech = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (tech is null) return TypedResults.BadRequest("User not found.");
-        var isField = tech.IsFieldTechnician;
+        var techName = tech.FullName ?? tech.Username;
+        var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         FieldSale sale;
@@ -183,6 +193,7 @@ public static class FieldOpsEndpoints
             sale = new FieldSale
             {
                 SaleNo = no, TechnicianId = uid, CustomerName = req.CustomerName.Trim(),
+                CustomerId = customerId,
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), Remarks = req.Remarks?.Trim(),
                 CreatedByUserId = uid,
             };
@@ -195,20 +206,21 @@ public static class FieldOpsEndpoints
                 if (part is null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest($"Part {lineReq.PartId} not found."); }
                 var sn = lineReq.SerialNo?.Trim();
 
-                if (part.IsSerialTracked && isField)
+                if (part.IsSerialTracked)
                 {
                     if (string.IsNullOrWhiteSpace(sn))
                     { await tx.RollbackAsync(ct); return TypedResults.BadRequest($"{part.ItemCode} is serial-tracked — name the sold serial."); }
                     if (lineReq.Qty != 1)
                     { await tx.RollbackAsync(ct); return TypedResults.BadRequest($"{part.ItemCode} is serial-tracked — one line per unit (qty 1)."); }
-                    var err = await serial.ValidateFittedSerialAsync(lineReq.PartId, sn!, uid, ct);
+                    var err = await serial.ValidateFittedSerialAsync(
+                        lineReq.PartId, sn!, uid, ct, techName, uid, part.Name);
                     if (err is not null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(err); }
                 }
 
                 await ledger.ConsumeAsync(lineReq.PartId, uid, lineReq.Qty, uid, "FIELD_SALE", sale.Id, ct);
-                if (part.IsSerialTracked && isField)
+                if (part.IsSerialTracked)
                     await serial.InstallToCustomerAsync(lineReq.PartId, sn!, part.Name, sale.CustomerName,
-                        SerialStatus.Used, uid, ct);
+                        SerialStatus.Used, uid, ct, customerId);
 
                 var unit = part.CustomerRate;
                 db.FieldSaleLines.Add(new FieldSaleLine
@@ -228,13 +240,27 @@ public static class FieldOpsEndpoints
         return TypedResults.Created($"/field-sales/{sale.Id}", await SaleToDtoAsync(db, loaded, CanSeePricing(user), ct));
     }
 
+    /// <summary>A field customer may be an existing account picked from the list, or a name typed on
+    /// the spot. Only the first kind can be linked, and an id that no longer resolves is dropped
+    /// rather than rejected - the free-text name on the record still says who it was.</summary>
+    private static async Task<long?> ResolveCustomerIdAsync(AppDbContext db, long? customerId, CancellationToken ct)
+        => customerId is { } cid && await db.Customers.AsNoTracking().AnyAsync(c => c.Id == cid, ct) ? cid : null;
+
     // ---------------------------------------------------------------- available serials
 
     private static async Task<Ok<List<AvailableSerialDto>>> AvailableSerialsAsync(
-        AppDbContext db, ClaimsPrincipal user, SerialService serial, long? partId, bool? forReturn, CancellationToken ct)
+        AppDbContext db, ClaimsPrincipal user, SerialService serial, long? partId, bool? forReturn,
+        string? returnKind, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
-        var rows = await serial.AvailableForTechnicianAsync(uid, partId, forReturn == true, ct);
+        // forReturn is the older flag and now means the good-stock list; returnKind is explicit and
+        // wins when sent, so a client that knows about faulty returns can ask for that list instead.
+        StockReturnKind? kind = null;
+        if (!string.IsNullOrWhiteSpace(returnKind) && Enum.TryParse<StockReturnKind>(returnKind, true, out var k))
+            kind = k;
+        else if (forReturn == true) kind = StockReturnKind.GoodStock;
+
+        var rows = await serial.AvailableForTechnicianAsync(uid, partId, kind, ct);
         var partIds = rows.Select(r => r.PartId).Distinct().ToList();
         var codes = await db.Parts.AsNoTracking().Where(p => partIds.Contains(p.Id))
             .ToDictionaryAsync(p => p.Id, p => p.ItemCode, ct);

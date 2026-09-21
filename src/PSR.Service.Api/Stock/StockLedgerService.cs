@@ -38,25 +38,102 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>Returns the movement entity so callers can link serial rows to it (id is assigned
-    /// once the caller saves changes).</summary>
-    public async Task<StockMovement> IssueAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    /// <summary>Dispatch stock to a technician.
+    ///
+    /// The warehouse is always debited here - the goods have left the shelf, whatever happens next.
+    /// Whether the TECHNICIAN is credited here depends on how the stock travels, and that is the
+    /// distinction <paramref name="creditTechnician"/> carries:
+    ///
+    /// A courier issue is not in anyone's hands while it is in transit. Crediting the technician at
+    /// dispatch says they are holding stock they have not seen, and it stays wrong if the shipment
+    /// arrives short, damaged or not at all - the acknowledgement recorded the shortfall while the
+    /// balance kept counting the full quantity. So it waits for <see cref="AcknowledgeReceiptAsync"/>.
+    ///
+    /// A counter handover has no transit to survive: it is acknowledged in the same call that issues
+    /// it, so it credits immediately and the two are one event.
+    ///
+    /// Returns the movement entity so callers can link serial rows to it (id is assigned once the
+    /// caller saves changes).</summary>
+    public async Task<StockMovement> IssueAsync(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, CancellationToken ct, bool creditTechnician = true)
     {
         if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
             throw new StockException("Insufficient warehouse stock to issue.");
-        await IncrementAsync(partId, technicianId, qty, ct);
+        if (creditTechnician) await IncrementAsync(partId, technicianId, qty, ct);
         var movement = new StockMovement
         {
             PartId = partId, MovementType = MovementType.Issue, Quantity = qty, TechnicianId = technicianId,
             PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+            CreditedOnIssue = creditTechnician,
         };
         db.StockMovements.Add(movement);
         return movement;
     }
 
-    public async Task ReturnToStockAsync(long partId, long technicianId, int qty, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    /// <summary>Apply a technician's acknowledgement of an issue to their balance.
+    ///
+    /// Only what actually arrived AND is usable is credited: <paramref name="received"/> minus
+    /// <paramref name="defective"/>, the same figure the legacy app derived from the movement ledger.
+    /// A defective unit is physically with the technician - they can send it in for service - but it
+    /// is not stock they can fit, so counting it as on-hand would offer it on the next job.
+    ///
+    /// The shortfall is not silently dropped. Missing and defective quantities each get their own
+    /// movement, so the gap between what left the warehouse and what became usable stock is a row
+    /// somebody can look at rather than an unexplained difference between two numbers.</summary>
+    public async Task AcknowledgeReceiptAsync(long partId, long technicianId, int received, int defective,
+        int missing, long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        var usable = Math.Max(received - defective, 0);
+        if (usable > 0)
+        {
+            await IncrementAsync(partId, technicianId, usable, ct);
+            db.StockMovements.Add(new StockMovement
+            {
+                PartId = partId, MovementType = MovementType.IssueReceipt, Quantity = usable,
+                TechnicianId = technicianId, PerformedByUserId = byUser,
+                ReferenceType = referenceType, ReferenceId = referenceId,
+            });
+        }
+
+        if (defective > 0)
+            DefectiveOnArrival(partId, technicianId, defective, byUser, referenceType, referenceId,
+                "Arrived faulty - held by the technician, not usable stock");
+
+        if (missing > 0)
+            db.StockMovements.Add(new StockMovement
+            {
+                PartId = partId, MovementType = MovementType.LossInTransit, Quantity = missing,
+                TechnicianId = technicianId, PerformedByUserId = byUser,
+                ReferenceType = referenceType, ReferenceId = referenceId,
+                Remarks = "Dispatched but never arrived",
+            });
+    }
+
+    /// <summary>The units leave the technician as the shipment leaves them. Mirror of an issue's
+    /// warehouse debit: stock stops being yours when it physically goes, so it cannot be fitted on a
+    /// job while it is sitting in a courier's van. Booked here rather than at acknowledgement because
+    /// a technician who spent it in the meantime used to make the acknowledgement fail outright,
+    /// leaving the shipment stuck pending with nothing anyone could do about it from the desk.</summary>
+    public async Task ReturnDispatchAsync(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, CancellationToken ct)
     {
         if (!await GuardedDecrementAsync(partId, technicianId, qty, ct))
+            throw new StockException("Technician does not hold enough of this part to return.");
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.ReturnDispatched, Quantity = qty,
+            TechnicianId = technicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
+    /// <summary>The shipment arrived and was acknowledged: the units go back on the warehouse shelf.
+    /// <paramref name="debitTechnician"/> covers shipments raised before dispatch and receipt were
+    /// split out — those never had their quantity taken off the technician, so this still has to.</summary>
+    public async Task ReturnToStockAsync(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, CancellationToken ct, bool debitTechnician = false)
+    {
+        if (debitTechnician && !await GuardedDecrementAsync(partId, technicianId, qty, ct))
             throw new StockException("Technician does not hold enough of this part to return.");
         await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
         db.StockMovements.Add(new StockMovement
@@ -66,8 +143,76 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>Peer transfer at acknowledgement: sender technician → receiver technician.
-    /// TechnicianId on the movement is the SENDER; the receiver is on the transfer row.</summary>
+    /// <summary>Units that arrived faulty. Recorded, never credited: the technician is holding them
+    /// and can send them in for service, but they are not stock anyone can fit.</summary>
+    public void DefectiveOnArrival(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, string remarks) =>
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.DefectiveOnArrival, Quantity = qty,
+            TechnicianId = technicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId, Remarks = remarks,
+        });
+
+    /// <summary>A shipment that never arrived. The technician was debited when it left them, so the
+    /// quantity is simply gone; this records where it went instead of leaving an unexplained gap
+    /// between what was sent and what was shelved.</summary>
+    public void LostInTransit(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, string remarks) =>
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.LossInTransit, Quantity = qty,
+            TechnicianId = technicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId, Remarks = remarks,
+        });
+
+    /// <summary>A peer transfer leaves the sender as it is handed over, for the same reason a return
+    /// does: it is out of their hands, so it must not still be fittable on their jobs.</summary>
+    public async Task TransferOutAsync(long partId, long fromTechnicianId, int qty,
+        long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        if (!await GuardedDecrementAsync(partId, fromTechnicianId, qty, ct))
+            throw new StockException("Sender does not hold enough of this part.");
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.TransferOut, Quantity = qty,
+            TechnicianId = fromTechnicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
+    /// <summary>The receiver acknowledged: credit what arrived and is usable. Defective units are
+    /// theirs to hold but are not stock they can fit, the same rule an issue receipt follows.</summary>
+    public async Task TransferInAsync(long partId, long toTechnicianId, int qty,
+        long byUser, string referenceType, long referenceId, CancellationToken ct)
+    {
+        if (qty <= 0) return;
+        await IncrementAsync(partId, toTechnicianId, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.TransferIn, Quantity = qty,
+            TechnicianId = toTechnicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId,
+        });
+    }
+
+    /// <summary>Put a transfer's units back on the sender: the transfer was cancelled, or the receiver
+    /// reported them missing and custody rolled back. No guard — returning stock cannot go negative.</summary>
+    public async Task TransferReturnToSenderAsync(long partId, long fromTechnicianId, int qty,
+        long byUser, string referenceType, long referenceId, string remarks, CancellationToken ct)
+    {
+        if (qty <= 0) return;
+        await IncrementAsync(partId, fromTechnicianId, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.TransferIn, Quantity = qty,
+            TechnicianId = fromTechnicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId, Remarks = remarks,
+        });
+    }
+
+    /// <summary>Legacy one-row transfer: sender → receiver, both sides at acknowledgement. Kept for
+    /// transfers raised before send and receipt were split out.</summary>
     public async Task TransferAsync(long partId, long fromTechnicianId, long toTechnicianId, int qty,
         long byUser, string referenceType, long referenceId, CancellationToken ct)
     {

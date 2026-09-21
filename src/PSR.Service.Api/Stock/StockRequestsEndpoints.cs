@@ -123,13 +123,18 @@ public static class StockRequestsEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            var movement = await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid, "STOCK_REQUEST", r.Id, ct);
+            // Field stock travels by courier and is confirmed on arrival; in-house stock is handed
+            // over at the counter, so it is received the moment it is issued.
+            var inTransit = requester?.IsFieldTechnician ?? true;
+            var movement = await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid,
+                "STOCK_REQUEST", r.Id, ct, creditTechnician: !inTransit);
             if (needSerials)
             {
                 await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
                 await serial.CaptureOnIssueAsync(movement.Id, r.PartId, part.Name, r.RequestedByUserId,
-                    requester!.FullName ?? requester.Username, serials, uid, ct);
+                    requester!.FullName ?? requester.Username, serials, uid, ct, inTransit);
             }
+            if (!inTransit) AddHandoverAck(db, movement, issueQty, uid);
             r.QtyIssued += issueQty;
             r.Status = r.QtyIssued >= r.QtyRequested ? StockRequestStatus.Issued : StockRequestStatus.Partial;
             r.IssuedByUserId = uid;
@@ -200,15 +205,34 @@ public static class StockRequestsEndpoints
         return TypedResults.Ok(rows);
     }
 
+    /// <summary>Record a counter handover as its own receipt. Without it the issue would sit on the
+    /// pending-receipts list forever waiting on an acknowledgement nobody is going to make - the
+    /// desktop has no screen for it, because an in-house technician took the part off the counter
+    /// rather than waiting for a courier. Quantities are declarative here exactly as they are on a
+    /// technician's own acknowledgement, so no balance moves.</summary>
+    private static void AddHandoverAck(AppDbContext db, StockMovement movement, int qty, long uid) =>
+        db.StockIssueAcks.Add(new StockIssueAck
+        {
+            StockMovementId = movement.Id, QtyReceived = qty, QtyDefective = 0, QtyMissing = 0,
+            Remarks = "Handed over at the service center", AckedByUserId = uid,
+        });
+
     /// <summary>Serial capture rules, shared by issuing against a request and issuing directly.
-    /// Capture applies only when a serial-tracked part goes to a FIELD technician — in-house holdings
-    /// are not tracked unit by unit. Returns the message to hand back, or null when the issue may go
-    /// ahead.</summary>
+    ///
+    /// Capture is decided by the PART, not by who is receiving it. It used to apply only to field
+    /// technicians, on the reasoning that in-house stock never leaves the building — but a serial-
+    /// tracked unit fitted in-house leaves with the customer's machine exactly as one fitted in the
+    /// field does, and until it was captured nothing could say which unit went where. That gap also
+    /// made the rest of the system contradict itself: a peer transfer demanded serials from everyone,
+    /// and a fitted serial was validated against custody that in-house issues never created, so an
+    /// in-house technician could neither transfer a tracked part nor record the unit they fitted.
+    ///
+    /// Returns the message to hand back, or null when the issue may go ahead.</summary>
     private static async Task<(bool NeedSerials, List<string> Serials, string? Error)> CheckSerialsAsync(
         Part part, User? holder, int qty, IReadOnlyList<string>? supplied,
         SerialService serial, CancellationToken ct)
     {
-        var needSerials = part.IsSerialTracked && holder is { IsFieldTechnician: true };
+        var needSerials = part.IsSerialTracked && holder is not null;
         var serials = (supplied ?? [])
             .Select(s => s?.Trim() ?? string.Empty).Where(s => s.Length > 0).ToList();
         if (!needSerials) return (false, serials, null);
@@ -293,13 +317,16 @@ public static class StockRequestsEndpoints
                 // Needs the request id before the movement can reference it.
                 await db.SaveChangesAsync(ct);
 
-                var movement = await ledger.IssueAsync(part.Id, technician.Id, line.Qty, uid, "STOCK_REQUEST", entity.Id, ct);
+                var inTransit = technician.IsFieldTechnician;
+                var movement = await ledger.IssueAsync(part.Id, technician.Id, line.Qty, uid,
+                    "STOCK_REQUEST", entity.Id, ct, creditTechnician: !inTransit);
                 if (needSerials)
                 {
                     await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
                     await serial.CaptureOnIssueAsync(movement.Id, part.Id, part.Name, technician.Id,
-                        technician.FullName ?? technician.Username, serials, uid, ct);
+                        technician.FullName ?? technician.Username, serials, uid, ct, inTransit);
                 }
+                if (!inTransit) AddHandoverAck(db, movement, line.Qty, uid);
 
                 audit.Log(uid, "stock-request.direct-issue", "stock_request", entity.Id,
                     details: $"{entity.RequestNo} {part.ItemCode} x{line.Qty} to {technician.Username} (no request raised)",

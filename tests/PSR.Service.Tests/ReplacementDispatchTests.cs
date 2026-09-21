@@ -4,6 +4,7 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 using PSR.Service.Api.Services;
+using PSR.Service.Api.Stock;
 using Xunit;
 
 namespace PSR.Service.Tests;
@@ -31,26 +32,26 @@ public class ReplacementDispatchTests
     };
 
     [Fact]
-    public void A_job_whose_unit_was_replaced_dispatches_like_any_other_completed_job()
+    public async Task A_job_whose_unit_was_replaced_dispatches_like_any_other_completed_job()
     {
         using var db = NewContext();
         var job = ReplacedJob(ServiceStatus.Completed);
 
-        var result = ServicesEndpoints.ApplyDispatch(
-            job, new DispatchRequest(), 1, db, new AuditService(db), null);
+        var result = await ServicesEndpoints.ApplyDispatchAsync(
+            job, new DispatchRequest(), 1, db, new SerialService(db), new AuditService(db), null, default);
 
         result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
         job.ServiceStatus.Should().Be(ServiceStatus.Dispatched);
     }
 
     [Fact]
-    public void The_retired_terminal_status_still_cannot_be_dispatched()
+    public async Task The_retired_terminal_status_still_cannot_be_dispatched()
     {
         using var db = NewContext();
         var job = ReplacedJob(ServiceStatus.Replaced);
 
-        var result = ServicesEndpoints.ApplyDispatch(
-            job, new DispatchRequest(), 1, db, new AuditService(db), null);
+        var result = await ServicesEndpoints.ApplyDispatchAsync(
+            job, new DispatchRequest(), 1, db, new SerialService(db), new AuditService(db), null, default);
 
         // Rows closed under the old behaviour stay closed — nothing re-opens them.
         result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Invalid);
@@ -58,14 +59,14 @@ public class ReplacementDispatchTests
     }
 
     [Fact]
-    public void An_out_of_warranty_replacement_still_needs_a_document_before_it_goes_out()
+    public async Task An_out_of_warranty_replacement_still_needs_a_document_before_it_goes_out()
     {
         using var db = NewContext();
         var job = ReplacedJob(ServiceStatus.Completed);
         job.WarrantyStatus = WarrantyStatus.OutOfWarranty;
 
-        var result = ServicesEndpoints.ApplyDispatch(
-            job, new DispatchRequest(), 1, db, new AuditService(db), null);
+        var result = await ServicesEndpoints.ApplyDispatchAsync(
+            job, new DispatchRequest(), 1, db, new SerialService(db), new AuditService(db), null, default);
 
         // The point of routing a replacement back through Completed: it is billable, and the billing
         // rules apply to it unchanged.

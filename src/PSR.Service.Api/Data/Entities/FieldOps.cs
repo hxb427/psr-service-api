@@ -9,6 +9,9 @@ public class FieldService
     public string ServiceNo { get; set; } = string.Empty;   // unique (FSVnnnnn)
     public long TechnicianId { get; set; }
     public string CustomerName { get; set; } = string.Empty;
+    /// <summary>Set when the technician picked an existing customer rather than typing a new name.
+    /// Free text stays authoritative for display; this is what carries ownership onto the serial.</summary>
+    public long? CustomerId { get; set; }
     public string? Phone { get; set; }
     public string? Place { get; set; }
     public string? MachineSerial { get; set; }              // serviced unit's serial (free text)
@@ -52,6 +55,9 @@ public class FieldSale
     public string SaleNo { get; set; } = string.Empty;      // unique (FSLnnnnn)
     public long TechnicianId { get; set; }
     public string CustomerName { get; set; } = string.Empty;
+    /// <summary>Set when the technician picked an existing customer rather than typing a new name.
+    /// Free text stays authoritative for display; this is what carries ownership onto the serial.</summary>
+    public long? CustomerId { get; set; }
     public string? Phone { get; set; }
     public string? Place { get; set; }
     public string? Remarks { get; set; }

@@ -71,6 +71,8 @@ public class TechnicianTransferConfiguration : IEntityTypeConfiguration<Technici
         b.Property(x => x.FromTechnicianId).HasColumnName("from_technician_id");
         b.Property(x => x.ToTechnicianId).HasColumnName("to_technician_id");
         b.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20);
+        // False for existing rows: their quantity has not left the sender yet.
+        b.Property(x => x.SenderDebitedOnSend).HasColumnName("sender_debited_on_send").HasDefaultValue(false);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
@@ -130,6 +132,7 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.HasIndex(x => x.ServiceNo).IsUnique();
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
+        b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.Phone).HasColumnName("phone").HasMaxLength(50);
         b.Property(x => x.Place).HasColumnName("place").HasMaxLength(200);
         b.Property(x => x.MachineSerial).HasColumnName("machine_serial").HasMaxLength(100);
@@ -177,6 +180,7 @@ public class FieldSaleConfiguration : IEntityTypeConfiguration<FieldSale>
         b.HasIndex(x => x.SaleNo).IsUnique();
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
+        b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.Phone).HasColumnName("phone").HasMaxLength(50);
         b.Property(x => x.Place).HasColumnName("place").HasMaxLength(200);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);

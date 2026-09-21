@@ -5,6 +5,7 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 using PSR.Service.Api.Services;
+using PSR.Service.Api.Stock;
 using Xunit;
 
 namespace PSR.Service.Tests;
@@ -189,39 +190,60 @@ public class BulkWorkflowTests
     // ---------------------------------------------------------------- stock / dispatch
 
     [Fact]
-    public void Keeping_a_job_in_stock_twice_is_a_no_op_the_second_time()
+    public async Task Keeping_a_job_in_stock_twice_is_a_no_op_the_second_time()
     {
         using var db = NewContext();
         var job = AssignedJob();
         job.ServiceStatus = ServiceStatus.Stocked;
 
-        var result = ServicesEndpoints.ApplyStock(job, null, TechId, db, Audit(db), null);
+        var result = await ServicesEndpoints.ApplyStockAsync(
+            job, null, TechId, db, new StockLedgerService(db), new SerialService(db), Audit(db), null, default);
 
         result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
         db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
     }
 
+    /// <summary>An ordinary job holds a customer's machine, not a catalogue part, so stocking it must
+    /// stay a pure status change. Only a job raised off a faulty field return carries a source serial
+    /// and moves stock - this is the guard on that split.</summary>
     [Fact]
-    public void Dispatch_replayed_on_a_dispatched_job_is_a_no_op()
-    {
-        using var db = NewContext();
-        var job = AssignedJob();
-        job.ServiceStatus = ServiceStatus.Dispatched;
-
-        var result = ServicesEndpoints.ApplyDispatch(job, new DispatchRequest(), TechId, db, Audit(db), null);
-
-        result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
-        db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
-    }
-
-    [Fact]
-    public void Dispatch_is_refused_when_the_job_carries_no_traceable_number()
+    public async Task Stocking_an_ordinary_job_records_no_stock_movement()
     {
         using var db = NewContext();
         var job = AssignedJob();
         job.ServiceStatus = ServiceStatus.Completed;
 
-        var result = ServicesEndpoints.ApplyDispatch(job, new DispatchRequest(), TechId, db, Audit(db), null);
+        var result = await ServicesEndpoints.ApplyStockAsync(
+            job, null, TechId, db, new StockLedgerService(db), new SerialService(db), Audit(db), null, default);
+
+        result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
+        job.ServiceStatus.Should().Be(ServiceStatus.Stocked);
+        db.ChangeTracker.Entries<StockMovement>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Dispatch_replayed_on_a_dispatched_job_is_a_no_op()
+    {
+        using var db = NewContext();
+        var job = AssignedJob();
+        job.ServiceStatus = ServiceStatus.Dispatched;
+
+        var result = await ServicesEndpoints.ApplyDispatchAsync(
+            job, new DispatchRequest(), TechId, db, new SerialService(db), Audit(db), null, default);
+
+        result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
+        db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Dispatch_is_refused_when_the_job_carries_no_traceable_number()
+    {
+        using var db = NewContext();
+        var job = AssignedJob();
+        job.ServiceStatus = ServiceStatus.Completed;
+
+        var result = await ServicesEndpoints.ApplyDispatchAsync(
+            job, new DispatchRequest(), TechId, db, new SerialService(db), Audit(db), null, default);
 
         result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Invalid);
         result.Error.Should().Contain("outward reference");

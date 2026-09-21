@@ -52,6 +52,7 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.ReplacementSerialNo).HasColumnName("replacement_serial_no").HasMaxLength(100);
         b.Property(x => x.ReplacementPartId).HasColumnName("replacement_part_id");
 
+        b.Property(x => x.SourceComponentSerialId).HasColumnName("source_component_serial_id");
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");

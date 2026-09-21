@@ -73,7 +73,10 @@ public record CreateFieldServiceRequest(
     [StringLength(1000)] string? Complaint,
     [StringLength(1000)] string? WorkDone,
     [StringLength(500)] string? Remarks,
-    List<FieldServiceLineRequest>? Lines = null);
+    List<FieldServiceLineRequest>? Lines = null,
+    /// <summary>Set when the technician picked an existing customer instead of typing a new name.
+    /// Optional: a walk-in who is not on the list still gets served, and CustomerName carries them.</summary>
+    long? CustomerId = null);
 
 public record FieldServiceLineDto(
     long Id, string Kind, long PartId, string ItemCode, string PartName, int Qty,
@@ -95,7 +98,8 @@ public record CreateFieldSaleRequest(
     [StringLength(50)] string? Phone,
     [StringLength(200)] string? Place,
     [StringLength(500)] string? Remarks,
-    [MinLength(1)] List<FieldSaleLineRequest> Lines);
+    [MinLength(1)] List<FieldSaleLineRequest> Lines,
+    long? CustomerId = null);
 
 public record FieldSaleLineDto(
     long Id, long PartId, string ItemCode, string PartName, int Qty,

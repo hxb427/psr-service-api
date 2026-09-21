@@ -10,8 +10,16 @@ using PSR.Service.Api.Data.Entities;
 namespace PSR.Service.Api.Stock;
 
 /// <summary>Technician acknowledgement of issued stock (legacy "pending receipts").
-/// Quantities are declarative (no balance mutation — discrepancies are resolved by admin
-/// adjustment/returns); serial-tracked units are acknowledged per-serial and flip custody.</summary>
+///
+/// This is the point stock becomes theirs. A courier issue debits the warehouse when it is dispatched
+/// but credits nobody until it arrives, so acknowledging is what puts the quantity on the
+/// technician's balance and flips each serial into their custody - one event, both ledgers, so they
+/// cannot disagree. Only what arrived and is usable counts: received minus defective, exactly as the
+/// legacy app derived it.
+///
+/// Quantities used to be purely declarative here, recorded and then ignored, while the balance had
+/// already been credited in full at dispatch. A shipment that arrived short was written down as short
+/// and still counted as complete.</summary>
 public static class StockAcksEndpoints
 {
     public static IEndpointRouteBuilder MapStockAckEndpoints(this IEndpointRouteBuilder app)
@@ -65,9 +73,33 @@ public static class StockAcksEndpoints
         return TypedResults.Ok(items);
     }
 
+    /// <summary>Check the declared quantities against the per-unit verdicts. Returns the message to
+    /// hand back, or null when the two agree. Extracted so the rule can be exercised on its own -
+    /// it is the join between the quantity ledger and the serial ledger, and a mistake in it lets
+    /// the two drift apart silently, which is the whole failure this guard exists to prevent.</summary>
+    internal static string? SerialQuantityMismatch(
+        IEnumerable<string> serialVerdicts, int qtyReceived, int qtyDefective, int qtyMissing)
+    {
+        var counted = new Dictionary<SerialAckStatus, int>();
+        foreach (var raw in serialVerdicts)
+        {
+            if (!Enum.TryParse<SerialAckStatus>(raw, true, out var parsed))
+                return $"Unknown serial ack status '{raw}'.";
+            counted[parsed] = counted.GetValueOrDefault(parsed) + 1;
+        }
+
+        var received = counted.GetValueOrDefault(SerialAckStatus.Received);
+        var defective = counted.GetValueOrDefault(SerialAckStatus.Defective);
+        var missing = counted.GetValueOrDefault(SerialAckStatus.Missing);
+        if (received == qtyReceived && defective == qtyDefective && missing == qtyMissing) return null;
+
+        return "The quantities do not match the serials: "
+             + $"{received} received, {defective} defective, {missing} missing were marked on the units.";
+    }
+
     private static async Task<Results<Ok, NotFound, BadRequest<string>>> AckAsync(
         long movementId, [FromBody] AckIssueRequest req, ClaimsPrincipal user, AppDbContext db,
-        SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
+        SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         var movement = await db.StockMovements.AsNoTracking()
@@ -88,6 +120,15 @@ public static class StockAcksEndpoints
         if (serialLines.Count > 0 && serialLines.Any(l => !acks.ContainsKey(l.Id)))
             return TypedResults.BadRequest("Acknowledge every serial on this issue (Received / Defective / Missing).");
 
+        // On a serial-tracked issue the units ARE the quantity, so the two accounts of what arrived
+        // have to be the same account. Without this a shipment could be booked as three received
+        // while all three serials were marked missing: the balance would gain stock that the serial
+        // ledger says never turned up, and nothing downstream could tell which one was lying.
+        if (serialLines.Count > 0
+            && SerialQuantityMismatch(serialLines.Select(l => acks[l.Id]),
+                   req.QtyReceived, req.QtyDefective, req.QtyMissing) is { } mismatch)
+            return TypedResults.BadRequest(mismatch);
+
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
@@ -99,6 +140,13 @@ public static class StockAcksEndpoints
                 if (err is not null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(err); }
                 line.AckStatus = st;
             }
+
+            // Rows written before receipts were split out were credited at dispatch, so crediting
+            // them again here would double the technician's holding.
+            if (!movement.CreditedOnIssue)
+                await ledger.AcknowledgeReceiptAsync(movement.PartId, uid,
+                    req.QtyReceived, req.QtyDefective, req.QtyMissing, uid,
+                    movement.ReferenceType ?? "STOCK_REQUEST", movement.ReferenceId ?? movementId, ct);
 
             db.StockIssueAcks.Add(new StockIssueAck
             {

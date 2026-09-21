@@ -55,6 +55,12 @@ public class ServiceJob : ITimestamps
     public string? ReplacementSerialNo { get; set; }
     public long? ReplacementPartId { get; set; }
 
+    /// <summary>The serial-tracked unit this job was opened for, when the job was raised automatically
+    /// by acknowledging a faulty technician return. Null for every normal job, and that is what keeps
+    /// the ordinary service-center workflow untouched: only a job carrying this moves stock when it is
+    /// stocked, or scraps a unit when it is written off.</summary>
+    public long? SourceComponentSerialId { get; set; }
+
     public long CreatedByUserId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

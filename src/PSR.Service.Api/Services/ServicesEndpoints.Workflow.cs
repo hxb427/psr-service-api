@@ -197,8 +197,14 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    internal static ApplyResult ApplyDispatch(ServiceJob job, DispatchRequest req,
-        long uid, AppDbContext db, IAuditService audit, string? ip)
+    /// <summary>Dispatch a completed job.
+    ///
+    /// A job raised off a faulty field return normally ends at Stocked - the repaired unit goes back
+    /// on the shelf. Dispatching one instead is legitimate (the unit goes back out to the party on the
+    /// job), and it has to be handled here rather than ignored: otherwise the unit would sit at
+    /// UNDER_REPAIR forever, pointing at a job that finished, and never reach a terminal owner.</summary>
+    internal static async Task<ApplyResult> ApplyDispatchAsync(ServiceJob job, DispatchRequest req,
+        long uid, AppDbContext db, SerialService serial, IAuditService audit, string? ip, CancellationToken ct)
     {
         // Idempotent: a job already dispatched is the state the caller asked for.
         if (job.ServiceStatus is ServiceStatus.Dispatched) return ApplyResult.Applied;
@@ -242,46 +248,99 @@ public static partial class ServicesEndpoints
         if (parts.Count == 0) parts.Add("in warranty, no reference");
         var note = $"Dispatched ({string.Join(", ", parts)})";
         WriteTransition(db, job, ServiceStatus.Dispatched, uid, note);
+
+        if (job.SourceComponentSerialId is { } dispatchedSerialId)
+        {
+            var unit = await db.ComponentSerials.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == dispatchedSerialId, ct);
+            if (unit is not null)
+            {
+                var party = await PartyLabelAsync(db, job, ct);
+                await serial.InstallToCustomerAsync(unit.PartId, unit.SerialNumber, unit.ItemName, party,
+                    SerialStatus.Installed, uid, ct, job.CustomerId);
+                await ClearRepairJobLinkAsync(db, dispatchedSerialId, ct);
+            }
+        }
+
         audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: ip);
         return ApplyResult.Applied;
     }
 
+    /// <summary>The repair job is over, so the unit is no longer being worked on. Kept separate from
+    /// the status change because dispatch hands the unit to a customer while stocking hands it to the
+    /// shelf, and only the link is common to both.</summary>
+    private static async Task ClearRepairJobLinkAsync(AppDbContext db, long serialId, CancellationToken ct)
+    {
+        var tracked = await db.ComponentSerials.FirstOrDefaultAsync(c => c.Id == serialId, ct);
+        if (tracked is not null) tracked.CurrentServiceJobId = null;
+    }
+
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> DispatchAsync(
-        long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, [FromBody] DispatchRequest req, ClaimsPrincipal user, AppDbContext db, SerialService serial,
+        IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
 
         user.TryGetUserId(out var uid);
-        if (ApplyDispatch(job, req, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
+        if ((await ApplyDispatchAsync(job, req, uid, db, serial, audit, http.GetIp(), ct)).ToProblem() is { } problem)
             return problem;
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    internal static ApplyResult ApplyStock(ServiceJob job, string? note,
-        long uid, AppDbContext db, IAuditService audit, string? ip)
+    /// <summary>Stock a completed job.
+    ///
+    /// For an ordinary job this is what it has always been: a status transition and nothing else. The
+    /// unit on a normal job is the customer's machine, so there is no part to put on a shelf, and
+    /// adding one would invent stock that does not exist.
+    ///
+    /// A job raised off a faulty field return is the one case where stocking it is also a stock event.
+    /// That unit IS a catalogue part - it left the warehouse, went out to a customer, came back broken
+    /// and has now been repaired - so this is the point it rejoins the warehouse count and becomes
+    /// re-issuable. <see cref="ServiceJob.SourceComponentSerialId"/> is what separates the two, and it
+    /// is null on every job that existed before field returns did.</summary>
+    internal static async Task<ApplyResult> ApplyStockAsync(ServiceJob job, string? note,
+        long uid, AppDbContext db, StockLedgerService ledger, SerialService serial,
+        IAuditService audit, string? ip, CancellationToken ct)
     {
         if (job.ServiceStatus is ServiceStatus.Stocked) return ApplyResult.Applied;
         if (job.ServiceStatus is not ServiceStatus.Completed)
             return ApplyResult.Invalid($"Cannot move a {job.ServiceStatus} job to {ServiceStatus.Stocked}.");
 
         WriteTransition(db, job, ServiceStatus.Stocked, uid, note);
+
+        if (job.SourceComponentSerialId is { } serialId)
+        {
+            var unit = await db.ComponentSerials.AsNoTracking().FirstOrDefaultAsync(c => c.Id == serialId, ct);
+            if (unit is not null)
+            {
+                await ledger.ReceiptAsync(unit.PartId, 1, uid,
+                    $"Repaired unit {unit.SerialNumber} stocked from job {job.ServiceNo}", null, "SERVICE_RETURN", ct);
+                await serial.MarkRepairedAsync(serialId, uid,
+                    $"Repaired and stocked on job {job.ServiceNo}", ct);
+            }
+        }
+
         audit.Log(uid, "service.stock", "service", job.Id, ip: ip);
         return ApplyResult.Applied;
     }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> StockJobAsync(
-        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db,
+        StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
 
         user.TryGetUserId(out var uid);
-        if (ApplyStock(job, req?.Note, uid, db, audit, http.GetIp()).ToProblem() is { } problem)
-            return problem;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if ((await ApplyStockAsync(job, req?.Note, uid, db, ledger, serial, audit, http.GetIp(), ct))
+            .ToProblem() is { } problem)
+        { await tx.RollbackAsync(ct); return problem; }
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
 
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
@@ -303,10 +362,30 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    private static Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> LeaveTotalLossAsync(
-        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
-        => SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss, "service.discard",
-            null, req?.Note ?? "Discarded — total loss, no replacement", user, db, audit, http, ct);
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> LeaveTotalLossAsync(
+        long id, [FromBody] NoteRequest? req, ClaimsPrincipal user, AppDbContext db, SerialService serial,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        var result = await SimpleTransitionAsync(id, [ServiceStatus.ReplacementApprovalPending], ServiceStatus.TotalLoss,
+            "service.discard", null, req?.Note ?? "Discarded — total loss, no replacement", user, db, audit, http, ct);
+
+        // A written-off return unit has to reach a terminal state. Left at UNDER_REPAIR it would sit in
+        // the ledger forever as a unit the service center is still working on, and the shelf count
+        // would never explain where it went.
+        if (result.Result is Ok<ServiceDetailDto>)
+        {
+            var job = await db.Services.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
+            if (job?.SourceComponentSerialId is { } serialId)
+            {
+                user.TryGetUserId(out var uid);
+                await serial.MarkScrappedAsync(serialId, uid,
+                    $"Written off on job {job.ServiceNo} - total loss", ct);
+                await db.SaveChangesAsync(ct);
+            }
+        }
+
+        return result;
+    }
 
     internal static ApplyResult ApplyPayment(ServiceJob job, PaymentStatus status,
         long uid, AppDbContext db, IAuditService audit, string? ip)
@@ -564,7 +643,7 @@ public static partial class ServicesEndpoints
             // A serial-tracked replacement unit is now deployed to the customer.
             if (part.IsSerialTracked)
                 await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
-                    await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct);
+                    await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct, job.CustomerId);
 
             job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
             job.ReplacementPartId = part.Id;
@@ -614,7 +693,10 @@ public static partial class ServicesEndpoints
             if (part is null || !part.IsSerialTracked) continue;
 
             var newStatus = line.LineType == ServiceLineType.Replacement ? SerialStatus.Used : SerialStatus.Installed;
-            await serial.InstallToCustomerAsync(pid, line.ReplacementSerialNo!.Trim(), part.Name, party, newStatus, uid, ct);
+            // The customer id rides along so the unit can later be traced back to this job's party -
+            // which is what lets a return raise its repair job against the right account.
+            await serial.InstallToCustomerAsync(pid, line.ReplacementSerialNo!.Trim(), part.Name, party,
+                newStatus, uid, ct, job.CustomerId);
         }
     }
 }

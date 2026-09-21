@@ -121,14 +121,34 @@ public static partial class ServicesEndpoints
             if (lineType is ServiceLineType.Replacement || part.IsSerialTracked)
                 line.ReplacementSerialNo = req.ReplacementSerialNo?.Trim();
 
+            // A tracked part has to say which unit was fitted. Leaving it blank used to be accepted,
+            // and that is how a unit could leave the building on a customer's machine with the
+            // quantity decremented and nothing recording where the unit itself went - the one thing
+            // serial tracking exists to answer.
+            if (lineType is ServiceLineType.Component && part.IsSerialTracked
+                && string.IsNullOrWhiteSpace(line.ReplacementSerialNo))
+                return (null, $"{part.ItemCode} is serial-tracked — enter the serial of the unit fitted.");
+
             // A fitted serial on a serial-tracked component must be a unit the technician actually
             // holds (RECEIVED, their custody) — legacy pick-list rule enforced server-side.
             if (lineType is ServiceLineType.Component && part.IsSerialTracked
                 && !string.IsNullOrWhiteSpace(line.ReplacementSerialNo) && job.TechnicianId is { } techId)
             {
-                var err = await serial.ValidateFittedSerialAsync(part.Id, line.ReplacementSerialNo!, techId, ct);
+                // Name + user are passed so a unit the technician was issued before serial capture
+                // existed is adopted rather than refused. Without it, switching capture on would have
+                // blocked every in-house technician from booking stock already in their hands.
+                var techName = await db.Users.AsNoTracking().Where(u => u.Id == techId)
+                    .Select(u => u.FullName ?? u.Username).FirstOrDefaultAsync(ct);
+                var err = await serial.ValidateFittedSerialAsync(
+                    part.Id, line.ReplacementSerialNo!, techId, ct, techName, techId, part.Name);
                 if (err is not null) return (null, err);
             }
+
+            // A tracked part is identified unit by unit, so a line has to name the unit it fitted -
+            // and one line can only name one. Quantity above one would record a single serial for
+            // several units, which is the same as recording none of them.
+            if (lineType is ServiceLineType.Component && part.IsSerialTracked && qty != 1)
+                return (null, $"{part.ItemCode} is serial-tracked — add one line per unit (qty 1).");
 
             // The line has to be one the technician can actually cover, because completing the job is
             // what consumes it — and that consume is guarded. Until this check existed nothing verified

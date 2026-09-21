@@ -16,6 +16,8 @@ public enum SerialStatus
     ReturnedToSc,    // received back at the service center (re-issuable)
     Repaired,        // repaired at the service center (re-issuable)
     InTransitTech,   // held in a pending technician-to-technician transfer (mobile)
+    UnderRepair,     // arrived back at the service center on a FAULTY return; a repair job is open on it
+    Scrapped,        // written off at the service center (repair job closed as total loss) — terminal
 }
 
 /// <summary>Who currently holds the unit.</summary>

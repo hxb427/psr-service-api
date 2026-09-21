@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Stock;
 
@@ -6,6 +7,25 @@ public record StockRowDto(long PartId, string ItemCode, string Name, string? Uni
 
 public record ReceiptRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty, [StringLength(500)] string? Remarks,
     [StringLength(50)] string? InvoiceNo = null, [StringLength(100)] string? Source = null);
+
+/// <summary>A whole delivery booked in at once. A supplier's invoice lists a dozen parts and used to
+/// mean a dozen openings of the Receive dialog and a dozen round trips, each one re-typing the same
+/// invoice number; the numbers that describe the delivery therefore sit on the request, not the line.
+/// The lot is one transaction, so a bad line stops the delivery instead of leaving eight parts booked
+/// in and an error about the ninth.
+///
+/// Separate from <see cref="ReceiptRequest"/> rather than folded into it: that endpoint answers with a
+/// single stock row, and a build in the field would choke on an array coming back where it expects an
+/// object. The one-part route stays exactly as it was.</summary>
+public record ReceiptBatchRequest(
+    [Required] [MinLength(1)] List<ReceiptLine> Lines,
+    [StringLength(500)] string? Remarks = null,
+    [StringLength(50)] string? InvoiceNo = null,
+    [StringLength(100)] string? Source = null);
+
+/// <summary>One part on a delivery. Quantity only — what the parts cost and who sent them is the same
+/// for every line on one invoice.</summary>
+public record ReceiptLine([Required] long PartId, [Range(1, 1_000_000)] int Qty);
 public record AdjustRequest([Required] long PartId, int Delta, [StringLength(500)] string? Remarks);
 
 public record StockMovementDto(
@@ -79,14 +99,18 @@ public record TechnicianStockRowDto(
 
 // Courier/tracking + serial ids are the field-technician shipment additions (legacy
 // technician_return_dispatches); desktop in-house returns send only part/qty/remarks.
+/// <param name="Kind">GoodStock (default) or Faulty. Defaulted rather than required so the desktop
+/// in-house return, and any client built before faulty returns existed, keeps behaving as it did.</param>
 public record CreateStockReturnRequest(
     [Required] long PartId, [Range(1, 1_000_000)] int Qty, [StringLength(500)] string? Remarks,
     [StringLength(80)] string? Courier = null, [StringLength(80)] string? TrackingNo = null,
-    List<long>? SerialIds = null);
+    List<long>? SerialIds = null, string? Kind = null);
 
 public record StockReturnDto(
     long Id, string ReturnNo, long TechnicianId, string? TechnicianUsername,
     long PartId, string ItemCode, string PartName, int Qty, string Status,
     DateTime? AcknowledgedDate, string? Remarks, DateTime CreatedAt,
     string? Courier = null, string? TrackingNo = null,
-    List<StockReturnSerialDto>? Serials = null);
+    List<StockReturnSerialDto>? Serials = null,
+    string Kind = nameof(StockReturnKind.GoodStock),
+    List<string>? CreatedServiceNos = null);

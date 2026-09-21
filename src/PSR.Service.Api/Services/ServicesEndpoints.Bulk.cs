@@ -7,6 +7,7 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Stock;
 
 namespace PSR.Service.Api.Services;
 
@@ -104,6 +105,12 @@ public static partial class ServicesEndpoints
         var succeeded = new List<long>();
         var failed = new List<BulkFailureDto>();
 
+        // An action may touch the stock ledger, and the ledger's balance updates are raw SQL that runs
+        // as it is called while the movement rows wait for the save below. Without a transaction a
+        // failed save would leave balances moved and nothing recording why, so the batch takes one
+        // even for the actions that only change a status.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
         foreach (var id in ids)
         {
             if (!byId.TryGetValue(id, out var job))
@@ -121,9 +128,16 @@ public static partial class ServicesEndpoints
         try
         {
             await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex)
+        {
+            await tx.RollbackAsync(ct);
+            return TypedResults.BadRequest(ex.Message);
         }
         catch (DbUpdateConcurrencyException)
         {
+            await tx.RollbackAsync(ct);
             // One SaveChanges for the batch means a job someone else edited mid-run takes the whole
             // batch down rather than just itself — the price of all-or-nothing, and the safer side of
             // the trade: nothing is half-applied. Say so plainly instead of returning a 500, because
@@ -176,22 +190,23 @@ public static partial class ServicesEndpoints
     }
 
     private static Task<Results<Ok<BulkActionResultDto>, BadRequest<string>>> BulkDispatchAsync(
-        [FromBody] BulkDispatchRequest req, ClaimsPrincipal user, AppDbContext db,
+        [FromBody] BulkDispatchRequest req, ClaimsPrincipal user, AppDbContext db, SerialService serial,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         var inner = new DispatchRequest(req.ReferenceNo, req.OutwardDcNo, req.DcDate);
         return RunBulkAsync(req.Ids, db, ct, job =>
-            Task.FromResult(ApplyDispatch(job, inner, uid, db, audit, http.GetIp())));
+            ApplyDispatchAsync(job, inner, uid, db, serial, audit, http.GetIp(), ct));
     }
 
     private static Task<Results<Ok<BulkActionResultDto>, BadRequest<string>>> BulkStockAsync(
         [FromBody] BulkNoteRequest req, ClaimsPrincipal user, AppDbContext db,
+        Stock.StockLedgerService ledger, Stock.SerialService serial,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         return RunBulkAsync(req.Ids, db, ct, job =>
-            Task.FromResult(ApplyStock(job, req.Note, uid, db, audit, http.GetIp())));
+            ApplyStockAsync(job, req.Note, uid, db, ledger, serial, audit, http.GetIp(), ct));
     }
 
     private static Task<Results<Ok<BulkActionResultDto>, BadRequest<string>>> BulkPaymentAsync(

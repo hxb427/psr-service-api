@@ -17,6 +17,12 @@ public class TechnicianTransfer : ITimestamps
     public long FromTechnicianId { get; set; }
     public long ToTechnicianId { get; set; }
     public TransferStatus Status { get; set; } = TransferStatus.Pending;
+
+    /// <summary>True when the sender's balance was debited as the transfer was raised, which is what
+    /// new transfers do. False for transfers raised before send and receipt were split out — those
+    /// still carry their quantity on the sender, so acknowledging one has to move both sides.</summary>
+    public bool SenderDebitedOnSend { get; set; }
+
     public string? Remarks { get; set; }
     public DateTime? AcknowledgedAt { get; set; }
 

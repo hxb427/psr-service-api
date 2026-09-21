@@ -20,6 +20,9 @@ public class StockMovementConfiguration : IEntityTypeConfiguration<StockMovement
         b.Property(x => x.InvoiceNo).HasColumnName("invoice_no").HasMaxLength(50);
         b.Property(x => x.Source).HasColumnName("source").HasMaxLength(100);
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(100);
+        // Defaults to true so every existing row keeps describing what it actually did: credit the
+        // technician at issue. Only rows written from now on can say otherwise.
+        b.Property(x => x.CreditedOnIssue).HasColumnName("credited_on_issue").HasDefaultValue(true);
         b.Property(x => x.PerformedByUserId).HasColumnName("performed_by_user_id");
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
@@ -92,6 +95,11 @@ public class StockReturnConfiguration : IEntityTypeConfiguration<StockReturn>
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.PartId).HasColumnName("part_id");
         b.Property(x => x.Qty).HasColumnName("qty");
+        b.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(20)
+            .HasDefaultValue(StockReturnKind.GoodStock);
+        // False for existing rows: they have not been debited yet, so their acknowledgement still must.
+        b.Property(x => x.TechnicianDebitedOnShip).HasColumnName("technician_debited_on_ship")
+            .HasDefaultValue(false);
         b.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.AcknowledgedByUserId).HasColumnName("acknowledged_by_user_id");
         b.Property(x => x.AcknowledgedDate).HasColumnName("acknowledged_date");

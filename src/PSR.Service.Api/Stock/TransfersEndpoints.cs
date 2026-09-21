@@ -57,7 +57,8 @@ public static class TransfersEndpoints
 
     private static async Task<Results<Created<TransferDto>, BadRequest<string>>> CreateAsync(
         [FromBody] CreateTransferRequest req, ClaimsPrincipal user, AppDbContext db,
-        NumberSequenceService seq, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
+        NumberSequenceService seq, SerialService serial, StockLedgerService ledger,
+        IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         if (req.ToTechnicianId == uid) return TypedResults.BadRequest("Cannot transfer to yourself.");
@@ -73,6 +74,7 @@ public static class TransfersEndpoints
             transfer = new TechnicianTransfer
             {
                 TransferNo = no, FromTechnicianId = uid, ToTechnicianId = req.ToTechnicianId,
+                SenderDebitedOnSend = true,
                 Remarks = req.Remarks?.Trim(),
             };
             db.TechnicianTransfers.Add(transfer);
@@ -95,6 +97,12 @@ public static class TransfersEndpoints
 
                 var line = new TechnicianTransferLine { Transfer = transfer, PartId = lineReq.PartId, Qty = lineReq.Qty };
                 db.TechnicianTransferLines.Add(line);
+
+                // Out of the sender's hands now, so out of their usable stock now. Waiting for the
+                // receiver's acknowledgement would leave it fittable on the sender's own jobs while
+                // it was already gone, and the acknowledgement would then fail on a balance they had
+                // since spent - stranding the transfer with nothing either side could do about it.
+                await ledger.TransferOutAsync(lineReq.PartId, uid, lineReq.Qty, uid, "TRANSFER", transfer.Id, ct);
 
                 foreach (var sid in serialIds)
                 {
@@ -145,11 +153,30 @@ public static class TransfersEndpoints
                 if (ack.QtyReceived + ack.QtyDefective + ack.QtyMissing != line.Qty)
                     return TypedResults.BadRequest($"Line {line.Id}: quantities must add up to {line.Qty}.");
 
-                // Received + defective units physically moved: sender → receiver balance.
-                var moved = ack.QtyReceived + ack.QtyDefective;
-                if (moved > 0)
-                    await ledger.TransferAsync(line.PartId, t.FromTechnicianId, t.ToTechnicianId, moved, uid,
+                if (t.SenderDebitedOnSend)
+                {
+                    // Only what arrived and is usable becomes the receiver's stock. A defective unit
+                    // is in their hands - they can send it in for service - but it is not something
+                    // they can fit, the same rule an issue receipt follows.
+                    await ledger.TransferInAsync(line.PartId, t.ToTechnicianId, ack.QtyReceived, uid,
                         "TRANSFER", t.Id, ct);
+                    if (ack.QtyDefective > 0)
+                        ledger.DefectiveOnArrival(line.PartId, t.ToTechnicianId, ack.QtyDefective, uid,
+                            "TRANSFER", t.Id, "Arrived faulty on a peer transfer - held, not usable stock");
+                    // Never arrived: custody rolls back to the sender, and so does the quantity.
+                    if (ack.QtyMissing > 0)
+                        await ledger.TransferReturnToSenderAsync(line.PartId, t.FromTechnicianId, ack.QtyMissing,
+                            uid, "TRANSFER", t.Id, $"Transfer {t.TransferNo} reported missing by {receiverName}", ct);
+                }
+                else
+                {
+                    // Raised before send and receipt were split out: the quantity is still on the
+                    // sender, so both sides move here exactly as they always did.
+                    var moved = ack.QtyReceived + ack.QtyDefective;
+                    if (moved > 0)
+                        await ledger.TransferAsync(line.PartId, t.FromTechnicianId, t.ToTechnicianId, moved, uid,
+                            "TRANSFER", t.Id, ct);
+                }
 
                 line.QtyReceived = ack.QtyReceived;
                 line.QtyDefective = ack.QtyDefective;
@@ -182,7 +209,7 @@ public static class TransfersEndpoints
     }
 
     private static async Task<Results<Ok<TransferDto>, NotFound, BadRequest<string>, ForbidHttpResult>> CancelAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, SerialService serial,
+        long id, ClaimsPrincipal user, AppDbContext db, SerialService serial, StockLedgerService ledger,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var t = await LoadAsync(db, id, ct);
@@ -195,6 +222,13 @@ public static class TransfersEndpoints
         var senderName = sender.FullName ?? sender.Username;
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // The units left the sender's balance when the transfer was raised, so cancelling has to put
+        // them back — otherwise a cancelled transfer would quietly destroy the stock.
+        if (t.SenderDebitedOnSend)
+            foreach (var line in t.Lines)
+                await ledger.TransferReturnToSenderAsync(line.PartId, t.FromTechnicianId, line.Qty, uid,
+                    "TRANSFER", t.Id, $"Transfer {t.TransferNo} cancelled", ct);
+
         foreach (var ts in t.Lines.SelectMany(l => l.Serials))
             await serial.RollbackTransferSerialAsync(ts.ComponentSerialId, t.FromTechnicianId, senderName, uid, ct);
 

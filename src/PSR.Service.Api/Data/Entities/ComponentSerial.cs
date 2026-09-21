@@ -17,6 +17,17 @@ public class ComponentSerial
     public string? OwnerRef { get; set; }            // human label: technician / customer name, or "In transit to …"
     public long? TechnicianId { get; set; }          // set while assigned to / held by a technician
 
+    /// <summary>Set while the unit is with a customer, when that customer is one of ours. Nullable on
+    /// purpose: a field technician may name a walk-in who is not in the customers table, and the unit
+    /// still has to be tracked. <see cref="OwnerRef"/> always carries the display name either way.
+    /// This is what lets a returned unit open its repair job against the customer it came from.</summary>
+    public long? CustomerId { get; set; }
+
+    /// <summary>The service job opened on this unit when it arrived back on a FAULTY return. Set with
+    /// UNDER_REPAIR, cleared when the job stocks or scraps the unit. Nullable: units that never went
+    /// through the field return loop never have one.</summary>
+    public long? CurrentServiceJobId { get; set; }
+
     public DateTime? LastUpdatedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

@@ -18,6 +18,8 @@ public class ComponentSerialConfiguration : IEntityTypeConfiguration<ComponentSe
         b.Property(x => x.OwnerType).HasColumnName("owner_type").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.OwnerRef).HasColumnName("owner_ref").HasMaxLength(200);
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
+        b.Property(x => x.CustomerId).HasColumnName("customer_id");
+        b.Property(x => x.CurrentServiceJobId).HasColumnName("current_service_job_id");
         b.Property(x => x.LastUpdatedAt).HasColumnName("last_updated_at");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
 
@@ -25,6 +27,10 @@ public class ComponentSerialConfiguration : IEntityTypeConfiguration<ComponentSe
         b.HasIndex(x => new { x.PartId, x.SerialNumber }).IsUnique();
         b.HasIndex(x => x.Status);
         b.HasIndex(x => new { x.OwnerType, x.TechnicianId });
+        // No FK on customer_id: a unit may sit with a customer who was later merged or removed, and
+        // losing the serial's history to a cascade would defeat the point of the ledger.
+        b.HasIndex(x => x.CustomerId);
+        b.HasIndex(x => x.CurrentServiceJobId);
     }
 }
 

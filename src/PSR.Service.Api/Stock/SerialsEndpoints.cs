@@ -39,7 +39,10 @@ public static class SerialsEndpoints
                 join p in db.Parts on c.PartId equals p.Id
                 join u in db.Users on c.TechnicianId equals (long?)u.Id into ug
                 from u in ug.DefaultIfEmpty()
-                select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null };
+                join j in db.Services on c.CurrentServiceJobId equals (long?)j.Id into jg
+                from j in jg.DefaultIfEmpty()
+                select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null,
+                             ServiceNo = j != null ? j.ServiceNo : null };
 
         if (partId is { } pid) q = q.Where(x => x.c.PartId == pid);
         if (technicianId is { } tid) q = q.Where(x => x.c.TechnicianId == tid);
@@ -56,7 +59,7 @@ public static class SerialsEndpoints
         q = q.OrderByDescending(x => x.c.LastUpdatedAt ?? x.c.CreatedAt);
         var total = await q.CountAsync(ct);
         var rows = await q.Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
-        var items = rows.Select(x => ToDto(x.c, x.ItemCode, x.Name, x.TechName)).ToList();
+        var items = rows.Select(x => ToDto(x.c, x.ItemCode, x.Name, x.TechName, x.ServiceNo)).ToList();
         return TypedResults.Ok(new PagedResult<ComponentSerialDto>(items, pageNum, size, total));
     }
 
@@ -75,7 +78,7 @@ public static class SerialsEndpoints
                                u != null ? u.Username : null, h.Remarks, h.ChangedAt)).ToListAsync(ct);
 
         return TypedResults.Ok(new ComponentSerialDetailDto(
-            ToDto(row.c, row.ItemCode, row.Name, row.TechName), audit));
+            ToDto(row.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo), audit));
     }
 
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ChangeStatusAsync(
@@ -96,7 +99,7 @@ public static class SerialsEndpoints
         await tx.CommitAsync(ct);
 
         var row = await SingleRowAsync(db, id, ct);
-        return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName));
+        return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));
     }
 
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ReceiveAsync(
@@ -116,12 +119,12 @@ public static class SerialsEndpoints
         await tx.CommitAsync(ct);
 
         var row = await SingleRowAsync(db, id, ct);
-        return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName));
+        return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));
     }
 
     // ---- helpers ----
 
-    private record SerialRow(ComponentSerial c, string ItemCode, string Name, string? TechName);
+    private record SerialRow(ComponentSerial c, string ItemCode, string Name, string? TechName, string? ServiceNo);
 
     private static async Task<SerialRow?> SingleRowAsync(AppDbContext db, long id, CancellationToken ct)
     {
@@ -129,13 +132,18 @@ public static class SerialsEndpoints
                          join p in db.Parts on c.PartId equals p.Id
                          join u in db.Users on c.TechnicianId equals (long?)u.Id into ug
                          from u in ug.DefaultIfEmpty()
+                         join j in db.Services on c.CurrentServiceJobId equals (long?)j.Id into jg
+                         from j in jg.DefaultIfEmpty()
                          where c.Id == id
-                         select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null })
+                         select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null,
+                                      ServiceNo = j != null ? j.ServiceNo : null })
             .FirstOrDefaultAsync(ct);
-        return row is null ? null : new SerialRow(row.c, row.ItemCode, row.Name, row.TechName);
+        return row is null ? null : new SerialRow(row.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo);
     }
 
-    private static ComponentSerialDto ToDto(ComponentSerial c, string itemCode, string partName, string? techName) =>
+    private static ComponentSerialDto ToDto(ComponentSerial c, string itemCode, string partName, string? techName,
+        string? serviceNo = null) =>
         new(c.Id, c.PartId, itemCode, partName, c.SerialNumber, c.Status.ToString(), c.OwnerType.ToString(),
-            c.OwnerRef, c.TechnicianId, techName, c.LastUpdatedAt, c.CreatedAt);
+            c.OwnerRef, c.TechnicianId, techName, c.LastUpdatedAt, c.CreatedAt,
+            c.CustomerId, c.CurrentServiceJobId, serviceNo);
 }
