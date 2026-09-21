@@ -15,7 +15,9 @@ public static partial class ServicesEndpoints
     private static async Task<Ok<PagedResult<ServiceListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user,
         string? status, string? section, long? technicianId, string? search,
-        string? itemName, string? psCode, DateTime? fromDate, DateTime? toDate,
+        string? itemName, string? psCode, string? piNo, string? invNo, string? outwardRef,
+        string? inwardDcNo, string? outwardDcNo,
+        DateTime? fromDate, DateTime? toDate,
         string? warranty, string? payment, string? sort, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
@@ -93,6 +95,37 @@ public static partial class ServicesEndpoints
         {
             var code = psCode.Trim();
             q = q.Where(x => x.s.PsCode != null && x.s.PsCode.Contains(code));
+        }
+        // The paperwork numbers. PI, invoice and outward reference are stamped on the way back out and
+        // the wide search reaches none of them; the challans it does reach, but only mixed in with
+        // every other column, which is no use to someone holding one and chasing the job on it.
+        if (!string.IsNullOrWhiteSpace(piNo))
+        {
+            var pi = piNo.Trim();
+            q = q.Where(x => x.s.PiNo != null && x.s.PiNo.Contains(pi));
+        }
+        if (!string.IsNullOrWhiteSpace(invNo))
+        {
+            var inv = invNo.Trim();
+            q = q.Where(x => x.s.InvNo != null && x.s.InvNo.Contains(inv));
+        }
+        if (!string.IsNullOrWhiteSpace(outwardRef))
+        {
+            var oref = outwardRef.Trim();
+            q = q.Where(x => x.s.OutwardReferenceNo != null && x.s.OutwardReferenceNo.Contains(oref));
+        }
+        // The two challans are asked for separately. A job carries one of each and they are different
+        // documents raised at different ends of the job, so a single box matching either would answer
+        // a question nobody is asking — and would pair an inward number with an outward job.
+        if (!string.IsNullOrWhiteSpace(inwardDcNo))
+        {
+            var dc = inwardDcNo.Trim();
+            q = q.Where(x => x.s.InwardDcNo != null && x.s.InwardDcNo.Contains(dc));
+        }
+        if (!string.IsNullOrWhiteSpace(outwardDcNo))
+        {
+            var dc = outwardDcNo.Trim();
+            q = q.Where(x => x.s.OutwardDcNo != null && x.s.OutwardDcNo.Contains(dc));
         }
 
         var ordered = sort switch

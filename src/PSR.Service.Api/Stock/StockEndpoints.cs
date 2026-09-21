@@ -21,6 +21,7 @@ public static class StockEndpoints
         group.MapGet("/", ListAsync).RequireAuthorization("StockView");
         group.MapGet("/movements", MovementsAsync).RequireAuthorization("StockManage");
         group.MapPost("/receipts", ReceiptAsync).RequireAuthorization("StockManage");
+        group.MapPost("/receipts/batch", ReceiptBatchAsync).RequireAuthorization("StockManage");
         group.MapPost("/adjustments", AdjustAsync).RequireAuthorization("StockManage");
 
         return app;
@@ -101,6 +102,57 @@ public static class StockEndpoints
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         return TypedResults.Ok(await WarehouseRowAsync(db, part, ct));
+    }
+
+    /// <summary>Book in a whole delivery — every line under one invoice, in one transaction.
+    ///
+    /// Each part becomes its own ledger movement, exactly as the one-part route writes it, so nothing
+    /// reading the ledger has to learn about deliveries. What the batch adds is the all-or-nothing: a
+    /// ninth line the ledger refuses takes the eight before it back out, rather than leaving the
+    /// storekeeper to work out how far down the invoice the count got.</summary>
+    private static async Task<Results<Ok<List<StockRowDto>>, NotFound, BadRequest<string>>> ReceiptBatchAsync(
+        [FromBody] ReceiptBatchRequest req, ClaimsPrincipal user, AppDbContext db,
+        StockLedgerService ledger, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        if (req.Lines is not { Count: > 0 }) return TypedResults.BadRequest("Add at least one item to receive.");
+
+        // Every part is looked up before anything is written, so a bad line is refused by name instead
+        // of surfacing as a failed transaction the storekeeper has to interpret.
+        var parts = new List<Part>();
+        foreach (var line in req.Lines)
+        {
+            if (line.Qty < 1) return TypedResults.BadRequest("Quantity must be at least 1.");
+
+            var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == line.PartId, ct);
+            if (part is null) return TypedResults.NotFound();
+            if (!part.IsActive) return TypedResults.BadRequest($"{part.ItemCode} is inactive.");
+
+            parts.Add(part);
+        }
+
+        user.TryGetUserId(out var uid);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            // One movement and one audit line per part, the same rows the one-part route writes — a
+            // delivery is a way of entering stock, not a new kind of thing in the ledger.
+            foreach (var line in req.Lines)
+            {
+                await ledger.ReceiptAsync(line.PartId, line.Qty, uid, req.Remarks, req.InvoiceNo, req.Source, ct);
+                audit.Log(uid, "stock.receipt", "part", line.PartId, details: $"+{line.Qty}", ip: http.GetIp());
+            }
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
+
+        // Read back after the commit: the same part can appear on two lines of one invoice, and the
+        // caller wants the shelf figure it ended on rather than the figure partway through.
+        var rows = new List<StockRowDto>();
+        foreach (var part in parts.DistinctBy(p => p.Id))
+            rows.Add(await WarehouseRowAsync(db, part, ct));
+
+        return TypedResults.Ok(rows);
     }
 
     private static async Task<Results<Ok<StockRowDto>, NotFound, BadRequest<string>>> AdjustAsync(
