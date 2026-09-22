@@ -37,7 +37,10 @@ public class StockIssueAckConfiguration : IEntityTypeConfiguration<StockIssueAck
         b.Property(x => x.AckedByUserId).HasColumnName("acked_by_user_id");
         b.Property(x => x.AckedAt).HasColumnName("acked_at");
 
-        b.HasOne<StockMovement>().WithMany().HasForeignKey(x => x.StockMovementId).OnDelete(DeleteBehavior.Cascade);
+        // Mapped through the navigation rather than the bare foreign key so that an ack added alongside
+        // a brand-new movement still gets its id: without a reference to fix up from, EF writes whatever
+        // is in the column, and an unsaved movement's id is 0.
+        b.HasOne(x => x.StockMovement).WithMany().HasForeignKey(x => x.StockMovementId).OnDelete(DeleteBehavior.Cascade);
         b.HasIndex(x => x.StockMovementId).IsUnique();
     }
 }

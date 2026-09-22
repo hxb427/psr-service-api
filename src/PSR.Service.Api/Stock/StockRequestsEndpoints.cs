@@ -209,11 +209,16 @@ public static class StockRequestsEndpoints
     /// pending-receipts list forever waiting on an acknowledgement nobody is going to make - the
     /// desktop has no screen for it, because an in-house technician took the part off the counter
     /// rather than waiting for a courier. Quantities are declarative here exactly as they are on a
-    /// technician's own acknowledgement, so no balance moves.</summary>
-    private static void AddHandoverAck(AppDbContext db, StockMovement movement, int qty, long uid) =>
+    /// technician's own acknowledgement, so no balance moves.
+    ///
+    /// The movement goes on as a reference, never as StockMovementId: it has usually not been saved yet
+    /// when this is called, so its id is still 0 and the foreign key refused the row outright - every
+    /// in-house issue of a part that carries no serials answered 500 until this was mapped through the
+    /// navigation. EF fills the column in once the movement itself is written.</summary>
+    internal static void AddHandoverAck(AppDbContext db, StockMovement movement, int qty, long uid) =>
         db.StockIssueAcks.Add(new StockIssueAck
         {
-            StockMovementId = movement.Id, QtyReceived = qty, QtyDefective = 0, QtyMissing = 0,
+            StockMovement = movement, QtyReceived = qty, QtyDefective = 0, QtyMissing = 0,
             Remarks = "Handed over at the service center", AckedByUserId = uid,
         });
 

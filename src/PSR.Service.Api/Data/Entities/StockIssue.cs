@@ -18,6 +18,11 @@ public class StockIssueAck
 {
     public long Id { get; set; }
     public long StockMovementId { get; set; }
+    /// <summary>The movement being acknowledged. Set this instead of the id whenever the movement is
+    /// itself new: a counter handover is written in the same unit of work as the issue that created it,
+    /// so the id is still 0 at that point and storing it fails the foreign key. With the reference set,
+    /// EF orders the inserts and fills the column in from the saved movement.</summary>
+    public StockMovement? StockMovement { get; set; }
     public int QtyReceived { get; set; }
     public int QtyDefective { get; set; }
     public int QtyMissing { get; set; }
