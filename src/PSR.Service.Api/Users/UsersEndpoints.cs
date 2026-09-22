@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using MySqlConnector;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
@@ -105,7 +106,17 @@ public static class UsersEndpoints
         db.Users.Add(user);
         // Saved first so the audit row carries the new account's id — the one thing that still
         // identifies it after a later rename.
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (IsDuplicateKey(ex))
+        {
+            // The AnyAsync above is the friendly path; this is that same check losing a race with a
+            // concurrent create. IX_users_username is what actually holds the username unique — all
+            // this does is report the conflict that really happened instead of a 500.
+            return TypedResults.Conflict($"Username '{username}' already exists.");
+        }
 
         principal.TryGetUserId(out var actorId);
         audit.Log(actorId, "user.create", "user", user.Id,
@@ -285,6 +296,10 @@ public static class UsersEndpoints
         => db.Users.AnyAsync(u =>
             u.Id != excludeUserId && u.IsActive &&
             u.UserRoles.Any(ur => ur.Role.Name == RoleNames.Admin), ct);
+
+    /// <summary>A unique-index violation coming back from MySQL (ER_DUP_ENTRY, 1062).</summary>
+    private static bool IsDuplicateKey(DbUpdateException ex)
+        => ex.InnerException is MySqlException { ErrorCode: MySqlErrorCode.DuplicateKeyEntry };
 
     /// <summary>
     /// Resolves role names to entities. Returns null if any name is unknown.
