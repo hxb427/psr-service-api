@@ -22,11 +22,11 @@ public static class FieldOpsEndpoints
     {
         var services = app.MapGroup("/field-services").WithTags("field-services").RequireAuthorization();
         services.MapGet("/", ListServicesAsync);
-        services.MapPost("/", CreateServiceAsync);
+        services.MapPost("/", CreateServiceAsync).RequireAuthorization("FieldOpsRecord");
 
         var sales = app.MapGroup("/field-sales").WithTags("field-sales").RequireAuthorization();
         sales.MapGet("/", ListSalesAsync);
-        sales.MapPost("/", CreateSaleAsync);
+        sales.MapPost("/", CreateSaleAsync).RequireAuthorization("FieldOpsRecord");
 
         // Pick list: serials the caller has in hand (RECEIVED) for a part.
         app.MapGet("/serials/available", AvailableSerialsAsync).RequireAuthorization();
@@ -54,7 +54,7 @@ public static class FieldOpsEndpoints
         return TypedResults.Ok(dtos);
     }
 
-    private static async Task<Results<Created<FieldServiceDto>, BadRequest<string>>> CreateServiceAsync(
+    private static async Task<Results<Created<FieldServiceDto>, BadRequest<string>, ForbidHttpResult>> CreateServiceAsync(
         [FromBody] CreateFieldServiceRequest req, ClaimsPrincipal user, AppDbContext db,
         NumberSequenceService seq, StockLedgerService ledger, SerialService serial,
         IAuditService audit, HttpContext http, CancellationToken ct)
@@ -62,6 +62,7 @@ public static class FieldOpsEndpoints
         user.TryGetUserId(out var uid);
         var tech = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (tech is null) return TypedResults.BadRequest("User not found.");
+        if (!CarriesStockOffSite(tech)) return TypedResults.Forbid();
         var techName = tech.FullName ?? tech.Username;
         var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
@@ -174,7 +175,7 @@ public static class FieldOpsEndpoints
         return TypedResults.Ok(dtos);
     }
 
-    private static async Task<Results<Created<FieldSaleDto>, BadRequest<string>>> CreateSaleAsync(
+    private static async Task<Results<Created<FieldSaleDto>, BadRequest<string>, ForbidHttpResult>> CreateSaleAsync(
         [FromBody] CreateFieldSaleRequest req, ClaimsPrincipal user, AppDbContext db,
         NumberSequenceService seq, StockLedgerService ledger, SerialService serial,
         IAuditService audit, HttpContext http, CancellationToken ct)
@@ -182,6 +183,7 @@ public static class FieldOpsEndpoints
         user.TryGetUserId(out var uid);
         var tech = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (tech is null) return TypedResults.BadRequest("User not found.");
+        if (!CarriesStockOffSite(tech)) return TypedResults.Forbid();
         var techName = tech.FullName ?? tech.Username;
         var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
@@ -272,6 +274,17 @@ public static class FieldOpsEndpoints
     // ---------------------------------------------------------------- mapping
 
     private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);
+
+    /// <summary>The second half of the field-ops gate. The route's policy has already established that
+    /// the caller is a technician; this establishes that they are the kind who carries stock off-site.
+    ///
+    /// It lives here rather than in a policy because is_field_technician is an account column and never
+    /// reaches the token — the claims a session carries are its roles, and both kinds of technician hold
+    /// the same one. An in-house technician therefore satisfies the policy exactly as a field technician
+    /// does, while holding a balance and serial custody that this endpoint would happily consume: without
+    /// this check the bench could book an on-site job against a customer nobody visited, and take the
+    /// parts out of stock to do it.</summary>
+    internal static bool CarriesStockOffSite(User account) => account.IsFieldTechnician;
 
     private static async Task<FieldServiceDto> ServiceToDtoAsync(
         AppDbContext db, FieldService f, bool pricing, CancellationToken ct)

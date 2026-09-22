@@ -87,6 +87,20 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.StoreManager));
             options.AddPolicy("ReturnAck", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+            // Raising a request is asking for stock to be issued to YOURSELF: the row is attributed to
+            // the caller and issuing it credits the caller's balance. So it is the technician's own
+            // action, and the store roles that fill the rest of this area are deliberately absent --
+            // they issue, they do not ask, and direct-issue is the route they use to hand stock over
+            // with no request behind it. It also closes the other way into a holding that nobody can
+            // see or return: direct-issue already refuses a non-technician outright ("is not a
+            // technician and cannot hold stock"), but issuing against a request never re-checked, so a
+            // request raised by a non-technician was a way to reach the same broken state.
+            options.AddPolicy("StockRequestRaise", p => p.RequireRole(RoleNames.Technician));
+            // On-site work -- a service performed or a part sold at the customer's premises, consuming
+            // stock the caller is carrying. This is the ROLE half only. Whether the account actually
+            // carries stock off-site is the is_field_technician flag, which is not in the token and so
+            // cannot be expressed here; the handler checks it against the user record.
+            options.AddPolicy("FieldOpsRecord", p => p.RequireRole(RoleNames.Technician));
 
             // Phase 4 — service workflow (inward_manager / dispatch_manager roles removed → folded into manager/supervisor)
             // The receiving-desk role is admitted HERE and nowhere else — booking inward is the whole

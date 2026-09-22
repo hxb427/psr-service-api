@@ -16,7 +16,7 @@ public static class StockRequestsEndpoints
         var group = app.MapGroup("/stock-requests").WithTags("stock-requests").RequireAuthorization();
 
         group.MapGet("/", ListAsync);
-        group.MapPost("/", CreateAsync);
+        group.MapPost("/", CreateAsync).RequireAuthorization("StockRequestRaise");
         group.MapPost("/{id:long}/issue", IssueAsync).RequireAuthorization("StockManage");
         // Hand stock over without a request having been raised first. Writes the request itself, so the
         // register and every report over it keep working off one shape.
