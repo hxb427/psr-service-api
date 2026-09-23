@@ -20,6 +20,10 @@ public static class StockEndpoints
 
         group.MapGet("/", ListAsync).RequireAuthorization("StockView");
         group.MapGet("/movements", MovementsAsync).RequireAuthorization("StockManage");
+        // One number for the whole warehouse, not one page of it. The per-row columns answer "is THIS
+        // part on the road"; this answers "how much of the shop's stock is in a van right now", which
+        // is the question the desk could not ask at all before.
+        group.MapGet("/in-transit", InTransitSummaryAsync).RequireAuthorization("StockView");
         group.MapPost("/receipts", ReceiptAsync).RequireAuthorization("StockManage");
         group.MapPost("/receipts/batch", ReceiptBatchAsync).RequireAuthorization("StockManage");
         group.MapPost("/adjustments", AdjustAsync).RequireAuthorization("StockManage");
@@ -50,8 +54,62 @@ public static class StockEndpoints
         var rows = await q.OrderBy(x => x.p.ItemCode)
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
-        var items = rows.Select(x => new StockRowDto(x.p.Id, x.p.ItemCode, x.p.Name, x.p.Unit, x.OnHand)).ToList();
+        var (outbound, inbound) = await InTransitAsync(db, ct);
+
+        var items = rows.Select(x => new StockRowDto(x.p.Id, x.p.ItemCode, x.p.Name, x.p.Unit, x.OnHand,
+            outbound.GetValueOrDefault(x.p.Id), inbound.GetValueOrDefault(x.p.Id))).ToList();
         return TypedResults.Ok(new PagedResult<StockRowDto>(items, pageNum, size, total));
+    }
+
+    /// <summary>Stock that has left one side and not yet arrived at the other, per part.
+    ///
+    /// This is the quantity that is on nobody's balance. The warehouse was debited as the issue was
+    /// dispatched and the technician is not credited until they acknowledge what actually turned up;
+    /// in between it is in a van, which is the honest answer and also the one nobody could see. The
+    /// per-unit view has always shown it (a serial sits at ISSUED, owner "In transit to …"), but an
+    /// untracked part had nothing at all, and nobody could get a total either way.
+    ///
+    /// Two directions, because they answer different questions. OUT is stock heading away from the
+    /// shelf. IN is stock heading back to it — worth knowing before ordering more.
+    ///
+    /// Not filtered to the current page's parts: the set is small by definition (only things actually
+    /// in flight), and filtering by a list of ids runs into the EF Core 9 + .NET 10 funcletizer bug
+    /// that the rest of this codebase works around with OR-chains.</summary>
+    private static async Task<(Dictionary<long, int> Outbound, Dictionary<long, int> Inbound)>
+        InTransitAsync(AppDbContext db, CancellationToken ct)
+    {
+        // Issues awaiting acknowledgement. CreditedOnIssue false is what says "the technician has not
+        // been credited yet"; rows written before dispatch and receipt were split out are true and are
+        // already on somebody's balance, so they are not in transit by this definition.
+        var outbound = await (from m in db.StockMovements.AsNoTracking()
+                              where m.MovementType == MovementType.Issue
+                                    && !m.CreditedOnIssue
+                                    && !db.StockIssueAcks.Any(a => a.StockMovementId == m.Id)
+                              group m by m.PartId into g
+                              select new { PartId = g.Key, Qty = g.Sum(x => x.Quantity) })
+            .ToDictionaryAsync(x => x.PartId, x => x.Qty, ct);
+
+        // Returns on their way back. Only good stock: a faulty return moves no quantity at either end,
+        // so counting it here would promise the shelf units that are not coming to it — they arrive
+        // only if the repair job on them is stocked. TechnicianDebitedOnShip false means the shipment
+        // predates the split and is still on the technician's balance, so it is not in transit either.
+        var inbound = await (from r in db.StockReturns.AsNoTracking()
+                             where r.Status == StockReturnStatus.Pending
+                                   && r.Kind == StockReturnKind.GoodStock
+                                   && r.TechnicianDebitedOnShip
+                             group r by r.PartId into g
+                             select new { PartId = g.Key, Qty = g.Sum(x => x.Qty) })
+            .ToDictionaryAsync(x => x.PartId, x => x.Qty, ct);
+
+        return (outbound, inbound);
+    }
+
+    private static async Task<Ok<InTransitSummaryDto>> InTransitSummaryAsync(
+        AppDbContext db, CancellationToken ct)
+    {
+        var (outbound, inbound) = await InTransitAsync(db, ct);
+        return TypedResults.Ok(new InTransitSummaryDto(
+            outbound.Values.Sum(), outbound.Count, inbound.Values.Sum(), inbound.Count));
     }
 
     private static async Task<Ok<PagedResult<StockMovementDto>>> MovementsAsync(
@@ -181,6 +239,18 @@ public static class StockEndpoints
         var onHand = await db.StockBalances.AsNoTracking()
             .Where(b => b.PartId == part.Id && b.TechnicianId == StockBalance.Warehouse)
             .Select(b => (int?)b.OnHand).FirstOrDefaultAsync(ct) ?? 0;
-        return new StockRowDto(part.Id, part.ItemCode, part.Name, part.Unit, onHand);
+
+        // The in-transit figures too, so a row refreshed after a receipt does not come back claiming
+        // nothing is on its way and quietly contradict the grid it is being dropped into.
+        var outbound = await db.StockMovements.AsNoTracking()
+            .Where(m => m.PartId == part.Id && m.MovementType == MovementType.Issue && !m.CreditedOnIssue
+                        && !db.StockIssueAcks.Any(a => a.StockMovementId == m.Id))
+            .SumAsync(m => (int?)m.Quantity, ct) ?? 0;
+        var inbound = await db.StockReturns.AsNoTracking()
+            .Where(r => r.PartId == part.Id && r.Status == StockReturnStatus.Pending
+                        && r.Kind == StockReturnKind.GoodStock && r.TechnicianDebitedOnShip)
+            .SumAsync(r => (int?)r.Qty, ct) ?? 0;
+
+        return new StockRowDto(part.Id, part.ItemCode, part.Name, part.Unit, onHand, outbound, inbound);
     }
 }

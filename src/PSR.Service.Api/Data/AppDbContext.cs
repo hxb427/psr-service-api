@@ -35,6 +35,7 @@ public class AppDbContext : DbContext
     public DbSet<ServiceJob> Services => Set<ServiceJob>();
     public DbSet<ServiceLine> ServiceLines => Set<ServiceLine>();
     public DbSet<ServiceStatusHistory> ServiceStatusHistory => Set<ServiceStatusHistory>();
+    public DbSet<ServiceReplacement> ServiceReplacements => Set<ServiceReplacement>();
     public DbSet<SpareSale> SpareSales => Set<SpareSale>();
     public DbSet<SpareSaleLine> SpareSaleLines => Set<SpareSaleLine>();
     public DbSet<SpareSaleReturn> SpareSaleReturns => Set<SpareSaleReturn>();

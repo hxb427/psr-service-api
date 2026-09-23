@@ -34,6 +34,8 @@ Status by stage:
 | Shipped in for service (faulty) | `InTransitSc` | Technician | none |
 | Service center acknowledges (faulty) | `UnderRepair` | ServiceCenter | **none** |
 | Repair job stocked | `Repaired` | ServiceCenter | warehouse **+1** |
+| Kept from a customer on an advance replacement | `UnderRepair` | ServiceCenter | none — ownership only |
+| Any finished job stocked | `Repaired` | ServiceCenter | warehouse **+1** |
 | Repair job dispatched instead | `Installed` | Customer | none |
 | Repair job written off | `Scrapped` | ServiceCenter | none — terminal |
 | Unused stock shipped back | `InTransitSc` | Technician | technician **−1** |
@@ -94,9 +96,12 @@ complete, and then either stocked or dispatched.
 `ServiceJob.SourceComponentSerialId` is null on every job that is not a field return, and every
 serial-aware branch is behind it:
 
-- **`ApplyStockAsync`** — an ordinary job holds a customer's machine, not a catalogue part, so
-  stocking it stays a pure status change. Only a job carrying a source serial credits the warehouse.
-  `BulkWorkflowTests.Stocking_an_ordinary_job_records_no_stock_movement` guards this.
+- **`ApplyStockAsync`** — ~~an ordinary job holds a customer's machine, not a catalogue part, so
+  stocking it stays a pure status change. Only a job carrying a source serial credits the warehouse.~~
+  **Superseded 2026-09-23.** Pressing *Keep in stock* means the shop has decided to keep the machine,
+  so every stocked job now credits the warehouse and puts the unit into the service centre's custody.
+  The source-serial case stopped being the exception and became the general path. See
+  `advance-replacement-and-stocking.md`.
 - **`ApplyDispatchAsync`** — same. A return-sourced job that is dispatched hands the unit back to the
   party on the job (`Installed`, owner Customer) rather than leaving it stranded at `UnderRepair`
   pointing at a finished job.
@@ -201,10 +206,15 @@ the rules it was created with. Nothing needs draining first.
 
 ## Known gap, not addressed here
 
-**In-transit stock has no home on the desk.** It is off the warehouse and not yet on a technician, so
-it appears on neither balance. The pending-receipts list on the Android app is the only place it
-shows. A "dispatched, not yet acknowledged" figure on the technician-stock screen would close this;
-it needs a change to `StockEndpoints`, which has unrelated uncommitted work in it.
+~~**In-transit stock has no home on the desk.**~~ **Closed 2026-09-23.** The store screen now carries
+two columns and a footer total: *Out (in transit)* — issues dispatched and not yet acknowledged — and
+*In (returning)* — good-stock returns shipped and not yet acknowledged. Both are read by
+`StockEndpoints.InTransitAsync`, and `GET /stock/in-transit` gives the warehouse-wide totals.
+
+Neither is ever added to On hand. The quantity is on nobody's balance, and counting it would offer
+units that are still in a van. Faulty returns are excluded from the incoming figure on purpose: they
+move no quantity at either end, so promising the shelf those units would be wrong — they only arrive
+if the repair job on them is stocked.
 
 **Non-serial faulty returns.** Out of scope, as in legacy. A non-tracked part collected from a
 customer is not shippable through the faulty flow; `Collected` lines no longer demand a serial for

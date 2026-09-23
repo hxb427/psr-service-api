@@ -18,7 +18,8 @@ public static partial class ServicesEndpoints
 
     private static async Task<Results<Created<ServiceDetailDto>, BadRequest<string>>> CreateAsync(
         [FromBody] CreateServiceRequest req, ClaimsPrincipal user, AppDbContext db,
-        NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
+        NumberSequenceService seq, SerialService serial, IAuditService audit, HttpContext http,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.SerialNo))
             return TypedResults.BadRequest("Serial number is required.");
@@ -75,6 +76,11 @@ public static partial class ServicesEndpoints
                 ServiceId = job.Id, FromStatus = null, ToStatus = ServiceStatus.Inward.ToString(),
                 ChangedByUserId = uid, Note = "Inward created",
             });
+            // A part the shop follows unit by unit joins the serial ledger here, so the same unit
+            // coming back next year is a record rather than a memory. Items with no matching
+            // serial-tracked part - whole machines, chiefly - are left alone: the factory records
+            // already register those and the shop only reads them.
+            await RegisterInwardUnitAsync(db, serial, job, uid, ct);
             audit.Log(uid, "service.create", "service", job.Id, details: no, ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -86,7 +92,8 @@ public static partial class ServicesEndpoints
 
     private static async Task<Results<Created<InwardBatchResult>, BadRequest<string>>> InwardBatchAsync(
         [FromBody] InwardBatchRequest req, ClaimsPrincipal user, AppDbContext db,
-        NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
+        NumberSequenceService seq, SerialService serial, IAuditService audit, HttpContext http,
+        CancellationToken ct)
     {
         if (req.Items is null || req.Items.Count == 0)
             return TypedResults.BadRequest("Add at least one item.");
@@ -109,6 +116,9 @@ public static partial class ServicesEndpoints
         user.TryGetUserId(out var uid);
 
         var created = new List<ServiceJob>();
+        // Units the counter should look at twice: seen before, or last held by somebody else. Collected
+        // rather than thrown, because one odd serial must not stop a ten-item challan being booked.
+        var alerts = new List<string>();
         string? customerName;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
@@ -152,11 +162,15 @@ public static partial class ServicesEndpoints
             await db.SaveChangesAsync(ct);   // assign Ids
 
             foreach (var job in created)
+            {
                 db.ServiceStatusHistory.Add(new ServiceStatusHistory
                 {
                     ServiceId = job.Id, FromStatus = null, ToStatus = ServiceStatus.Inward.ToString(),
                     ChangedByUserId = uid, Note = "Inward created (batch)",
                 });
+                var alert = await RegisterInwardUnitAsync(db, serial, job, uid, ct);
+                if (alert is not null) alerts.Add($"{job.ServiceNo}: {alert}");
+            }
             audit.Log(uid, "service.inward-batch", "service", null,
                 details: $"{created.Count} item(s), challan {req.ChallanNo}", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
@@ -169,7 +183,8 @@ public static partial class ServicesEndpoints
             j.ServiceStatus.ToString(), j.AckStatus.ToString(), j.PaymentStatus.ToString(),
             j.Priority.ToString(), j.WarrantyStatus.ToString(), j.TechnicianId, null, j.DateReceived, j.PromisedDate,
             j.PiNo, j.InvNo, j.OutwardDcNo)).ToList();
-        return TypedResults.Created($"/services?challan={req.ChallanNo}", new InwardBatchResult(req.ChallanNo, created.Count, jobs));
+        return TypedResults.Created($"/services?challan={req.ChallanNo}",
+            new InwardBatchResult(req.ChallanNo, created.Count, jobs, alerts));
     }
 
     /// <summary>Match an existing customer by name or create one. The create is audited — inward is the only

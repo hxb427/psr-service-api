@@ -57,7 +57,10 @@ public record InwardItem(
     [StringLength(1000)] string? ReportedProblem,
     string? WarrantyStatus);
 
-public record InwardBatchResult(string? ChallanNo, int Created, List<ServiceListItemDto> Jobs);
+/// <summary>Alerts are advisory, never blocking: a unit seen before, or one last held by a different
+/// party. The counter is holding the item while there is still time to check a misread serial.</summary>
+public record InwardBatchResult(string? ChallanNo, int Created, List<ServiceListItemDto> Jobs,
+    List<string>? UnitAlerts = null);
 
 public record TechnicianOptionDto(long Id, string Username, string? FullName);
 
@@ -178,7 +181,10 @@ public record ServiceListItemDto(
     // A replaced unit now waits in the same pending-dispatch queue as a repaired one, so the row has
     // to say which it is — the counter is handing back a different machine from the one booked in.
     string? PiNo, string? InvNo, string? OutwardDcNo, string? OutwardReferenceNo = null,
-    string? ReplacementSerialNo = null);
+    string? ReplacementSerialNo = null,
+    // A retained job is the shop's own unit sitting in the service sections. The row has to say so,
+    // because it cannot be dispatched or billed and the desk should not have to open it to find out.
+    string JobKind = "Customer", long? ParentServiceJobId = null);
 
 // UnitPrice/Amount are null for non-pricing roles (technician/store/etc).
 public record ServiceLineDto(
@@ -199,4 +205,28 @@ public record ServiceDetailDto(
     DateTime DateReceived, DateTime? PromisedDate, long? TechnicianId, string? TechnicianName, string Priority, string AckStatus,
     string ServiceStatus, string PaymentStatus, string? TechnicianRemarks, bool IsTotalLoss,
     string? ReplacementSerialNo, long? ReplacementPartId, string? ReplacementPartName,
-    decimal? Total, uint RowVersion, List<ServiceLineDto> Lines, List<ServiceHistoryDto> History);
+    decimal? Total, uint RowVersion, List<ServiceLineDto> Lines, List<ServiceHistoryDto> History,
+    // The two halves of a swap. Each is reachable from the other because they are one event, and the
+    // question asked at the counter ("where is the machine they left with us?") starts from either.
+    string JobKind = "Customer",
+    long? ParentServiceJobId = null, string? ParentServiceNo = null,
+    long? RetainedServiceJobId = null, string? RetainedServiceNo = null,
+    // Whether the swap on THIS job can still be undone. Server-decided: the desktop must not have to
+    // re-derive a rule that depends on documents and on the other half's progress.
+    bool CanCancelSwap = false);
+
+/// <summary>One replacement in the trail, for the counter's "was this one of ours?" lookup.</summary>
+public record ServiceReplacementDto(
+    long Id, string Kind, long OriginalServiceJobId, string? OriginalServiceNo,
+    long? RetainedServiceJobId, string? RetainedServiceNo,
+    string? OutgoingSerialNo, string? OutgoingItemCode,
+    string? IncomingSerialNo, string? IncomingItemCode,
+    string? PartyName, string? Reason, string? ApprovedByUsername,
+    DateTime CreatedAt, DateTime? CancelledAt);
+
+/// <summary>Issue an advance replacement: the customer leaves with a unit off the shelf and their own
+/// stays behind. <paramref name="RetainedPartId"/> defaults to the replacement's part, which is the
+/// normal case — the unit handed over is the same item that came in.</summary>
+public record SwapRequest(
+    string ReplacementSerialNo, long? ReplacementPartId, long? RetainedPartId,
+    string? Reason, string? Note);

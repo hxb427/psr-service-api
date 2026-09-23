@@ -56,6 +56,12 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         // None may be awaiting replacement approval; all must be completed (the pending-dispatch bucket).
         if (jobs.Any(j => j.ServiceStatus == ServiceStatus.ReplacementApprovalPending))
             throw new BillingException("A selected job is awaiting replacement approval and cannot be billed yet.");
+        // A retained job holds the service centre's own unit — the customer was billed on the job the
+        // replacement went out on, and there is nobody to bill for the shop repairing its own stock.
+        if (jobs.FirstOrDefault(j => j.JobKind == JobKind.SwapRetained) is { } retained)
+            throw new BillingException(
+                $"{retained.ServiceNo} carries the service centre's own unit (kept against a replacement) "
+                + "and cannot be billed.");
         if (jobs.Any(j => j.ServiceStatus is ServiceStatus.Inward or ServiceStatus.Assigned
                 or ServiceStatus.Acknowledged or ServiceStatus.InService))
             throw new BillingException("Only completed jobs can be put on a document.");

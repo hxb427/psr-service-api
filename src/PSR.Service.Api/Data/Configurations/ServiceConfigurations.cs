@@ -53,6 +53,9 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.ReplacementPartId).HasColumnName("replacement_part_id");
 
         b.Property(x => x.SourceComponentSerialId).HasColumnName("source_component_serial_id");
+        b.Property(x => x.JobKind).HasColumnName("job_kind").HasConversion<string>().HasMaxLength(20)
+            .HasDefaultValue(JobKind.Customer);
+        b.Property(x => x.ParentServiceJobId).HasColumnName("parent_service_job_id");
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
@@ -67,6 +70,49 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.HasIndex(x => x.TechnicianId);
         b.HasIndex(x => x.SerialNo);
         b.HasIndex(x => x.CustomerId);
+        // The lists filter the shop's own units out of the customer sections on this, so it is read
+        // on every page of every service query.
+        b.HasIndex(x => x.JobKind);
+        b.HasIndex(x => x.ParentServiceJobId);
+    }
+}
+
+public class ServiceReplacementConfiguration : IEntityTypeConfiguration<ServiceReplacement>
+{
+    public void Configure(EntityTypeBuilder<ServiceReplacement> b)
+    {
+        b.ToTable("service_replacements");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.OriginalServiceJobId).HasColumnName("original_service_job_id");
+        b.Property(x => x.RetainedServiceJobId).HasColumnName("retained_service_job_id");
+        b.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(20);
+
+        b.Property(x => x.OutgoingPartId).HasColumnName("outgoing_part_id");
+        b.Property(x => x.OutgoingSerialNo).HasColumnName("outgoing_serial_no").HasMaxLength(100);
+        b.Property(x => x.OutgoingComponentSerialId).HasColumnName("outgoing_component_serial_id");
+
+        b.Property(x => x.IncomingPartId).HasColumnName("incoming_part_id");
+        b.Property(x => x.IncomingSerialNo).HasColumnName("incoming_serial_no").HasMaxLength(100);
+        b.Property(x => x.IncomingComponentSerialId).HasColumnName("incoming_component_serial_id");
+        b.Property(x => x.IncomingSerialCreated).HasColumnName("incoming_serial_created").HasDefaultValue(false);
+
+        b.Property(x => x.StatusBeforeSwap).HasColumnName("status_before_swap").HasMaxLength(40);
+        b.Property(x => x.CustomerId).HasColumnName("customer_id");
+        b.Property(x => x.DealerId).HasColumnName("dealer_id");
+        b.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(500);
+        b.Property(x => x.ApprovedByUserId).HasColumnName("approved_by_user_id");
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+        b.Property(x => x.CancelledAt).HasColumnName("cancelled_at");
+        b.Property(x => x.CancelledByUserId).HasColumnName("cancelled_by_user_id");
+
+        // Both serials are looked up by hand at the counter, by somebody holding a unit and asking
+        // where it came from. Neither is unique: a serial can go out as a replacement, come back, be
+        // repaired and go out again.
+        b.HasIndex(x => x.OutgoingSerialNo);
+        b.HasIndex(x => x.IncomingSerialNo);
+        b.HasIndex(x => x.OriginalServiceJobId);
+        b.HasIndex(x => x.RetainedServiceJobId);
     }
 }
 

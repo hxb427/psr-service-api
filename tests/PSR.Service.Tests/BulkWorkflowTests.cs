@@ -203,22 +203,109 @@ public class BulkWorkflowTests
         db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
     }
 
-    /// <summary>An ordinary job holds a customer's machine, not a catalogue part, so stocking it must
-    /// stay a pure status change. Only a job raised off a faulty field return carries a source serial
-    /// and moves stock - this is the guard on that split.</summary>
+    /// <summary>Stocking used to be a pure status change on an ordinary job, and this test asserted
+    /// that. It no longer is: pressing Keep in stock means the shop has decided to keep the machine,
+    /// so the shelf is credited and the unit becomes the service centre's. What replaces the old
+    /// guard is the pair of refusals below - a count that moves has to say what moved it.
+    ///
+    /// The status guard is still worth pinning here because it runs before any lookup, which is what
+    /// keeps a wrong-status call from reaching the database at all.</summary>
     [Fact]
-    public async Task Stocking_an_ordinary_job_records_no_stock_movement()
+    public async Task Stocking_a_job_that_is_not_completed_is_refused_before_anything_is_read()
+    {
+        using var db = NewContext();
+        var job = AssignedJob();   // still Assigned
+
+        var result = await ServicesEndpoints.ApplyStockAsync(
+            job, null, TechId, db, new StockLedgerService(db), new SerialService(db), Audit(db), null, default);
+
+        result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Invalid);
+        job.ServiceStatus.Should().Be(ServiceStatus.Assigned);
+        db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
+    }
+
+    /// <summary>Replaying Keep in stock on a job already stocked must stay a no-op. It matters more
+    /// now than it did: the action credits the warehouse, so a replayed request that fell through
+    /// would add a second unit to the shelf that does not exist.</summary>
+    [Fact]
+    public async Task Stocking_replayed_on_a_stocked_job_credits_nothing_a_second_time()
     {
         using var db = NewContext();
         var job = AssignedJob();
-        job.ServiceStatus = ServiceStatus.Completed;
+        job.ServiceStatus = ServiceStatus.Stocked;
 
         var result = await ServicesEndpoints.ApplyStockAsync(
             job, null, TechId, db, new StockLedgerService(db), new SerialService(db), Audit(db), null, default);
 
         result.Status.Should().Be(ServicesEndpoints.ApplyStatus.Applied);
-        job.ServiceStatus.Should().Be(ServiceStatus.Stocked);
         db.ChangeTracker.Entries<StockMovement>().Should().BeEmpty();
+        db.ChangeTracker.Entries<ServiceStatusHistory>().Should().BeEmpty();
+    }
+
+    // ---------------------------------------------------------------- stocking refusals
+
+    private static Part TrackedPart(bool serialTracked = true) => new()
+    {
+        Id = 5, ItemCode = "PS-100", Name = "Control board", IsSerialTracked = serialTracked,
+    };
+
+    /// <summary>The job has to name an item the shelf actually has a row for. Before this, stocking
+    /// always succeeded and claimed nothing, so a job with a junk PS code was indistinguishable from
+    /// one that had been counted.</summary>
+    [Fact]
+    public void Stocking_is_refused_when_the_PS_code_matches_no_catalogue_item()
+    {
+        var job = AssignedJob();
+        job.PsCode = "PS-NOPE";
+
+        ServicesEndpoints.StockBlockedReason(job, null, job.SerialNo)
+            .Should().Contain("PS-NOPE").And.Contain("No catalogue item");
+    }
+
+    /// <summary>A job with no PS code at all gets a different instruction, because the fix is
+    /// different: there is nothing to correct, something has to be set.</summary>
+    [Fact]
+    public void Stocking_is_refused_when_the_job_carries_no_PS_code()
+    {
+        var job = AssignedJob();
+        job.PsCode = null;
+
+        ServicesEndpoints.StockBlockedReason(job, null, job.SerialNo)
+            .Should().Contain("no PS code");
+    }
+
+    /// <summary>A serial-tracked item must name its unit, for the same reason a serial-tracked
+    /// component line must: otherwise the count moves and nothing records which physical thing
+    /// moved it.</summary>
+    [Fact]
+    public void Stocking_a_serial_tracked_item_without_a_serial_is_refused()
+    {
+        var job = AssignedJob();
+        job.PsCode = "PS-100";
+
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(), "   ")
+            .Should().Contain("serial-tracked");
+    }
+
+    /// <summary>An untracked item has no unit record either way - the quantity is the whole of what
+    /// moved - so a missing serial is not a reason to refuse it.</summary>
+    [Fact]
+    public void Stocking_an_untracked_item_without_a_serial_is_allowed()
+    {
+        var job = AssignedJob();
+        job.PsCode = "PS-100";
+
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), null)
+            .Should().BeNull();
+    }
+
+    [Fact]
+    public void Stocking_a_resolved_serial_tracked_unit_is_allowed()
+    {
+        var job = AssignedJob();
+        job.PsCode = "PS-100";
+
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(), "SN-9001").Should().BeNull();
     }
 
     [Fact]

@@ -18,7 +18,8 @@ public static partial class ServicesEndpoints
         string? itemName, string? psCode, string? piNo, string? invNo, string? outwardRef,
         string? inwardDcNo, string? outwardDcNo,
         DateTime? fromDate, DateTime? toDate,
-        string? warranty, string? payment, string? sort, int? page, int? pageSize, CancellationToken ct)
+        string? warranty, string? payment, int? minDaysOpen, string? sort, int? page, int? pageSize,
+        CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -61,6 +62,15 @@ public static partial class ServicesEndpoints
                     || x.s.ServiceStatus == ServiceStatus.Replaced || x.s.ServiceStatus == ServiceStatus.TotalLoss),
                 _ => q,
             };
+        // Days open, counted from the day the machine arrived. This is what a swap is aimed at: the
+        // items that have been here long enough that the customer needs one now rather than a repair
+        // later. Compared against the shop's own date, not UtcNow, which in the evening here is
+        // already tomorrow.
+        if (minDaysOpen is { } minDays and > 0)
+        {
+            var cutoff = ShopClock.Today.AddDays(-minDays);
+            q = q.Where(x => x.s.DateReceived <= cutoff);
+        }
         if (technicianId is { } tid and > 0)
             q = q.Where(x => x.s.TechnicianId == tid);
         if (technicianId is 0)   // explicit "unassigned" filter
@@ -144,7 +154,8 @@ public static partial class ServicesEndpoints
             x.s.ServiceStatus.ToString(), x.s.AckStatus.ToString(), x.s.PaymentStatus.ToString(),
             x.s.Priority.ToString(), x.s.WarrantyStatus.ToString(),
             x.s.TechnicianId, x.TechName, x.s.DateReceived, x.s.PromisedDate,
-            x.s.PiNo, x.s.InvNo, x.s.OutwardDcNo, x.s.OutwardReferenceNo, x.s.ReplacementSerialNo)).ToList();
+            x.s.PiNo, x.s.InvNo, x.s.OutwardDcNo, x.s.OutwardReferenceNo, x.s.ReplacementSerialNo,
+            x.s.JobKind.ToString(), x.s.ParentServiceJobId)).ToList();
 
         return TypedResults.Ok(new PagedResult<ServiceListItemDto>(items, pageNum, size, total));
     }

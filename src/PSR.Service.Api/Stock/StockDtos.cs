@@ -3,7 +3,17 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Stock;
 
-public record StockRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand);
+/// <summary>A warehouse row. <paramref name="InTransitOut"/> and <paramref name="InTransitIn"/> are
+/// stock that has physically left one side and not yet been acknowledged by the other, so it sits on
+/// NOBODY's balance — the honest position for something in a van. Until these existed the desk could
+/// see a shelf count of two and no way to learn that four more were on their way.</summary>
+public record StockRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand,
+    int InTransitOut = 0, int InTransitIn = 0);
+
+/// <summary>Everything currently on nobody's balance, across the whole warehouse. Part counts come
+/// with the quantities because "18 units" and "18 units across 14 different items" are different
+/// situations and only one of them is a delivery.</summary>
+public record InTransitSummaryDto(int OutQty, int OutParts, int InQty, int InParts);
 
 public record ReceiptRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty, [StringLength(500)] string? Remarks,
     [StringLength(50)] string? InvoiceNo = null, [StringLength(100)] string? Source = null);

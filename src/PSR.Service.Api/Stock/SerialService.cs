@@ -13,7 +13,7 @@ namespace PSR.Service.Api.Stock;
 public class SerialService(AppDbContext db)
 {
     // A serial may be (re)issued only when it is brand-new, or back at the service center ready to redeploy.
-    private static readonly SerialStatus[] ReIssuable = { SerialStatus.ReturnedToSc, SerialStatus.Repaired };
+    internal static readonly SerialStatus[] ReIssuable = { SerialStatus.ReturnedToSc, SerialStatus.Repaired };
 
     // What each kind of return shipment may physically contain. The split matters: good stock going
     // back is stock the technician was issued and still holds, while a faulty return is a customer's
@@ -329,6 +329,56 @@ public class SerialService(AppDbContext db)
         return c;
     }
 
+    /// <summary>A serial-tracked PART has been booked in for service over the counter. The unit goes
+    /// UNDER_REPAIR in the service centre's custody with the job stamped on it, and its record is
+    /// created if the shop has never seen this one before.
+    ///
+    /// Custody, not ownership: the machine is still the customer's, and CustomerId keeps saying so.
+    /// That is the whole point of registering it — a unit that comes back next year under a different
+    /// name is only visible because the last name is still on the record. It is the same convention
+    /// the faulty-return path uses, and UNDER_REPAIR is deliberately not re-issuable so a customer's
+    /// unit can never be offered on the next issue.
+    ///
+    /// Returns the unit and who held it before, so the counter can be told when the owner has changed.
+    /// Null when the serial is blank.</summary>
+    public async Task<(ComponentSerial Unit, long? PreviousCustomerId, string? PreviousOwnerRef, bool WasKnown)?>
+        ReceiveForServiceAsync(long partId, string? serialNumber, string? itemName, long? customerId,
+            string partyLabel, long byUser, string remarks, CancellationToken ct, long? serviceJobId = null)
+    {
+        var sn = serialNumber?.Trim();
+        if (string.IsNullOrEmpty(sn)) return null;
+        var now = DateTime.UtcNow;
+
+        var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.PartId == partId && x.SerialNumber == sn, ct);
+        if (c is null)
+        {
+            c = new ComponentSerial
+            {
+                PartId = partId, SerialNumber = sn, ItemName = itemName,
+                Status = SerialStatus.UnderRepair, OwnerType = SerialOwnerType.ServiceCenter,
+                OwnerRef = $"In for service ({partyLabel})", CustomerId = customerId,
+                CurrentServiceJobId = serviceJobId, LastUpdatedAt = now, CreatedAt = now,
+            };
+            db.ComponentSerials.Add(c);
+            await db.SaveChangesAsync(ct);   // id, for the history row's FK
+            AddHistory(c, null, SerialStatus.UnderRepair, byUser, remarks, now);
+            return (c, null, null, false);
+        }
+
+        var previousCustomerId = c.CustomerId;
+        var previousOwnerRef = c.OwnerRef;
+        var old = c.Status.ToString();
+        c.Status = SerialStatus.UnderRepair;
+        c.OwnerType = SerialOwnerType.ServiceCenter;
+        c.OwnerRef = $"In for service ({partyLabel})";
+        c.TechnicianId = null;
+        c.CustomerId = customerId;
+        c.CurrentServiceJobId = serviceJobId;
+        c.LastUpdatedAt = now;
+        AddHistory(c, old, SerialStatus.UnderRepair, byUser, remarks, now);
+        return (c, previousCustomerId, previousOwnerRef, true);
+    }
+
     /// <summary>The repair job on a returned unit was stocked: the unit is serviceable again and goes
     /// back on the shelf. REPAIRED is re-issuable, so this is the point the unit rejoins the pool.
     /// The customer link is dropped here - it is service-center stock now, and its past owners stay
@@ -347,6 +397,63 @@ public class SerialService(AppDbContext db)
         c.CurrentServiceJobId = null;
         c.LastUpdatedAt = now;
         AddHistory(c, old, SerialStatus.Repaired, byUser, remarks, now);
+    }
+
+    /// <summary>Take a unit into the service centre's own custody, creating its record if the shop has
+    /// never seen it before. Owner → SERVICE_CENTER, customer and technician links dropped.
+    ///
+    /// This is how a machine that arrived as a customer's becomes the shop's. Two moments use it and
+    /// they want different statuses, which is why the status is a parameter rather than fixed:
+    ///
+    /// <list type="bullet">
+    /// <item><c>UnderRepair</c> — an advance replacement was issued and the customer's unit stayed
+    /// behind. Ownership changes now; the unit is broken, so it is deliberately NOT re-issuable and
+    /// no quantity moves yet.</item>
+    /// <item><c>Repaired</c> — a finished job was stocked. The unit is serviceable and rejoins the
+    /// pool in the same breath as the warehouse count.</item>
+    /// <item><c>ReturnedToSc</c> — a replacement that never left the building is being put back on
+    /// the shelf because the swap was cancelled.</item>
+    /// </list>
+    ///
+    /// Returns the unit, or null when the serial is blank — an untracked machine with no serial
+    /// written on it still has a quantity, and refusing to stock it over a missing record would be
+    /// inventing a rule the shop floor cannot satisfy.</summary>
+    public async Task<ComponentSerial?> AcquireToServiceCentreAsync(
+        long partId, string? serialNumber, string? itemName, SerialStatus status,
+        long byUser, string remarks, CancellationToken ct, long? serviceJobId = null)
+    {
+        var sn = serialNumber?.Trim();
+        if (string.IsNullOrEmpty(sn)) return null;
+        var now = DateTime.UtcNow;
+
+        var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.PartId == partId && x.SerialNumber == sn, ct);
+        if (c is null)
+        {
+            c = new ComponentSerial
+            {
+                PartId = partId, SerialNumber = sn, ItemName = itemName,
+                Status = status, OwnerType = SerialOwnerType.ServiceCenter,
+                OwnerRef = "Service center", CurrentServiceJobId = serviceJobId,
+                LastUpdatedAt = now, CreatedAt = now,
+            };
+            db.ComponentSerials.Add(c);
+            await db.SaveChangesAsync(ct);   // id, for the history row's FK
+            AddHistory(c, null, status, byUser, remarks, now);
+            return c;
+        }
+
+        var old = c.Status.ToString();
+        c.Status = status;
+        c.OwnerType = SerialOwnerType.ServiceCenter;
+        c.OwnerRef = "Service center";
+        c.TechnicianId = null;
+        // The customer link goes: it is the shop's unit now. Where it has been stays readable in the
+        // history rather than lingering as current ownership.
+        c.CustomerId = null;
+        c.CurrentServiceJobId = serviceJobId;
+        c.LastUpdatedAt = now;
+        AddHistory(c, old, status, byUser, remarks, now);
+        return c;
     }
 
     /// <summary>The repair job was written off: the unit is scrap. Terminal, and never re-issuable.</summary>

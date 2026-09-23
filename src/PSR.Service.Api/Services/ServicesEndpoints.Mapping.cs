@@ -89,6 +89,34 @@ public static partial class ServicesEndpoints
         string? replPartName = job.ReplacementPartId is { } rpid
             ? await db.Parts.AsNoTracking().Where(p => p.Id == rpid).Select(p => p.Name).FirstOrDefaultAsync(ct) : null;
 
+        // The two halves of a swap. A retained job knows its parent directly; the original has to look
+        // its other half up through the replacement row, which is the only thing that links them from
+        // this side. Both are one round trip and only on a job that actually has one.
+        string? parentNo = job.ParentServiceJobId is { } pid
+            ? await db.Services.AsNoTracking().Where(s => s.Id == pid).Select(s => s.ServiceNo).FirstOrDefaultAsync(ct)
+            : null;
+        long? retainedId = null;
+        string? retainedNo = null;
+        var canCancelSwap = false;
+        if (!string.IsNullOrWhiteSpace(job.ReplacementSerialNo) || job.JobKind == JobKind.Customer)
+        {
+            var swap = await db.ServiceReplacements.AsNoTracking()
+                .Where(r => r.OriginalServiceJobId == job.Id && r.Kind == ReplacementKind.AdvanceSwap
+                            && r.CancelledAt == null)
+                .OrderByDescending(r => r.Id).FirstOrDefaultAsync(ct);
+            if (swap is not null)
+            {
+                retainedId = swap.RetainedServiceJobId;
+                var retainedJob = retainedId is { } rid
+                    ? await db.Services.AsNoTracking().FirstOrDefaultAsync(s => s.Id == rid, ct) : null;
+                retainedNo = retainedJob?.ServiceNo;
+                // Decided here, not on the desktop. Whether a swap can still be undone depends on
+                // documents, payments and how far the other half has got — re-deriving that client
+                // side is how the button and the server end up disagreeing.
+                canCancelSwap = await SwapCancelBlockedReasonAsync(db, job, retainedJob, ct) is null;
+            }
+        }
+
         var lines = await (from l in db.ServiceLines.AsNoTracking()
                            where l.ServiceId == job.Id
                            join p in db.Parts on l.PartId equals p.Id into pg
@@ -124,7 +152,8 @@ public static partial class ServicesEndpoints
             job.DateReceived, job.PromisedDate, job.TechnicianId, techName, job.Priority.ToString(), job.AckStatus.ToString(),
             job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks, job.IsTotalLoss,
             job.ReplacementSerialNo, job.ReplacementPartId, replPartName,
-            total, job.RowVersion, lineDtos, history);
+            total, job.RowVersion, lineDtos, history,
+            job.JobKind.ToString(), job.ParentServiceJobId, parentNo, retainedId, retainedNo, canCancelSwap);
     }
 
     private static async Task<ServiceLineDto> LineToDtoAsync(AppDbContext db, long lineId, bool pricing, CancellationToken ct)

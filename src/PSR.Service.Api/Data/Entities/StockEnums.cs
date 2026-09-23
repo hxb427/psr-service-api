@@ -17,6 +17,10 @@ public enum MovementType
     Consumption,  // technician -= qty (parts used while servicing; applied on service complete)
     ConsumptionReversal, // technician += qty (a completed service was reverted — parts returned to the tech)
     Replacement,  // warehouse -= qty (a whole replacement unit shipped out for a Replaced service)
+    ReplacementReturn, // warehouse += qty (an advance replacement was cancelled before it was dispatched;
+                  // the unit never left the building, so it goes back on the shelf. The exact reversal
+                  // of Replacement, kept as its own type for the same reason SaleUnsold is: a shelf
+                  // that goes up needs a row saying which of the several reasons it was)
     Sale,         // warehouse -= qty (spare sold directly to a dealer/customer; applied on Mark as sold)
     SaleReturn,   // warehouse += qty (sold spare sale sent back; applied on the return)
     SaleUnsold,   // warehouse += qty (a sale marked sold in error was un-marked; the exact reversal of Sale)

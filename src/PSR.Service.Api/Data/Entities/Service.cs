@@ -61,6 +61,16 @@ public class ServiceJob : ITimestamps
     /// stocked, or scraps a unit when it is written off.</summary>
     public long? SourceComponentSerialId { get; set; }
 
+    /// <summary>What this job is, as opposed to where it is. Only ever set when the job is raised —
+    /// a job does not change kind. Dispatch and billing both refuse a SwapRetained job, and the lists
+    /// use it to keep the shop's own units out of customer turnaround figures.</summary>
+    public JobKind JobKind { get; set; } = JobKind.Customer;
+
+    /// <summary>The job this one was split off from, on an advance replacement: the customer's
+    /// original job, which carries the replacement that went out. Null on every other job. The two
+    /// halves are one event and each has to be reachable from the other.</summary>
+    public long? ParentServiceJobId { get; set; }
+
     public long CreatedByUserId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

@@ -462,7 +462,12 @@ public static class ReportsEndpoints
     /// whole ledger up to the start date rather than anything stored. The balance table only knows
     /// "now", so it cannot answer what the shelf held last March, and a report that mixed a live
     /// balance with historic movements would not add up. The cost is scanning the movements; the
-    /// benefit is that opening + in - out == closing on every row, by construction.
+    /// benefit is that opening + input - outward == closing on every row, by construction.
+    ///
+    /// Opening, input and outward all come out of the one <see cref="WarehouseDelta"/> rule, so a
+    /// movement cannot count one way inside the window and the other way before it, and a signed
+    /// adjustment sorts itself: a shrinkage is a negative delta and lands in outward without being
+    /// named anywhere as a special case.
     ///
     /// A window ending today therefore closes on the same number the warehouse page shows. If it ever
     /// does not, the ledger and the balance table have drifted, and the ledger is the one to trust.</summary>
@@ -498,58 +503,49 @@ public static class ReportsEndpoints
         foreach (var p in parts)
         {
             var mine = byPart.GetValueOrDefault(p.Id);
-            if (mine is null) { rows.Add(new StockLedgerRow(p.Id, p.ItemCode, p.Name, p.Unit, 0, 0, 0, 0, 0, 0, 0)); continue; }
+            if (mine is null) { rows.Add(new StockLedgerRow(p.Id, p.ItemCode, p.Name, p.Unit, 0, 0, 0, 0)); continue; }
 
-            var opening = 0;
-            int inward = 0, issued = 0, returned = 0, sold = 0, adjusted = 0;
+            int opening = 0, input = 0, outward = 0;
             foreach (var m in mine)
             {
-                if (fromInc is { } f && m.CreatedAt < f) { opening += WarehouseDelta(m.MovementType, m.Quantity); continue; }
+                // Consumption, its reversal and peer transfers move stock between technicians and
+                // never touch the warehouse, so they come back as zero and are not on this report.
+                var delta = WarehouseDelta(m.MovementType, m.Quantity);
+                if (delta == 0) continue;
 
-                switch (m.MovementType)
-                {
-                    case MovementType.Receipt: inward += m.Quantity; break;
-                    case MovementType.Issue: issued += m.Quantity; break;
-                    // Stock coming back to the shelf, whoever is handing it over. A sale un-marked in
-                    // error is the exact reversal of the sale, so it belongs here rather than as a
-                    // negative sale that would read as a credit note.
-                    case MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold:
-                        returned += m.Quantity; break;
-                    case MovementType.Sale or MovementType.Replacement: sold += m.Quantity; break;
-                    case MovementType.Adjustment: adjusted += m.Quantity; break;   // already signed
-                    // Consumption, its reversal and peer transfers move stock between technicians and
-                    // never touch the warehouse, so they are not on this report at all.
-                }
+                if (fromInc is { } f && m.CreatedAt < f) { opening += delta; continue; }
+                if (delta > 0) input += delta; else outward += -delta;
             }
 
             rows.Add(new StockLedgerRow(p.Id, p.ItemCode, p.Name, p.Unit,
-                opening, inward, issued, returned, sold, adjusted,
-                opening + inward + returned + adjusted - issued - sold));
+                opening, input, outward, opening + input - outward));
         }
 
         // Parts that never moved and hold nothing would otherwise pad the report with zero rows.
-        rows = rows.Where(r => r.Opening != 0 || r.Closing != 0
-                            || r.Inward != 0 || r.Issued != 0 || r.Returned != 0 || r.Sold != 0 || r.Adjusted != 0)
+        rows = rows.Where(r => r.Opening != 0 || r.Closing != 0 || r.Input != 0 || r.Outward != 0)
             .ToList();
 
         if (IsXlsx(format))
             return TypedResults.File(XlsxBuilder.Build("Stock ledger",
-                new[] { "Item code", "Part", "Unit", "Opening", "Inward", "Issued", "Returned", "Sold", "Adjusted", "Closing" },
+                new[] { "Item code", "Part", "Unit", "Opening", "Input", "Outward", "Closing" },
                 rows.Select(x => (IReadOnlyList<object?>)new object?[] { x.ItemCode, x.PartName, x.Unit,
-                    x.Opening, x.Inward, x.Issued, x.Returned, x.Sold, x.Adjusted, x.Closing })),
+                    x.Opening, x.Input, x.Outward, x.Closing })),
                 XlsxMime, "stock-ledger.xlsx");
 
         return TypedResults.Ok(new StockLedgerDto(fromInc, to?.Date,
-            rows.Sum(r => r.Opening), rows.Sum(r => r.Inward), rows.Sum(r => r.Issued),
-            rows.Sum(r => r.Returned), rows.Sum(r => r.Sold), rows.Sum(r => r.Adjusted), rows.Sum(r => r.Closing),
+            rows.Sum(r => r.Opening), rows.Sum(r => r.Input), rows.Sum(r => r.Outward), rows.Sum(r => r.Closing),
             rows));
     }
 
-    /// <summary>How a movement type changes the WAREHOUSE balance. The technician side is deliberately
-    /// not modelled here — see StockAnalysisAsync for that.</summary>
+    /// <summary>How a movement type changes the WAREHOUSE balance, signed: positive went on the shelf,
+    /// negative came off it, zero never touched it. The stock ledger's opening, input and outward are
+    /// all read off this one rule, so adding a movement type here puts it on the report correctly or
+    /// leaves it off entirely, and never half of each. The technician side is deliberately not
+    /// modelled here — see StockAnalysisAsync for that.</summary>
     private static int WarehouseDelta(MovementType type, int qty) => type switch
     {
-        MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold => qty,
+        MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold
+            or MovementType.ReplacementReturn => qty,
         MovementType.Adjustment => qty,   // stored already signed; a shrinkage is a negative quantity
         MovementType.Issue or MovementType.Replacement or MovementType.Sale => -qty,
         _ => 0,                           // Consumption / ConsumptionReversal / Transfer are technician-side
@@ -558,15 +554,20 @@ public static class ReportsEndpoints
     // ---------------------------------------------------------------- detailed stock analysis
 
     /// <summary>Where the stock went, in one answer: what the warehouse took in, what each technician
-    /// was given, what they actually fitted, and what is still on them.
+    /// was given, what they actually used, and what is still on them.
     ///
-    /// Issued and fitted are different numbers and the gap is the point — a technician carrying six
-    /// boards and fitting two is not a problem, a technician issued sixty and fitting two is. Consumed
+    /// Issued and used are different numbers and the gap is the point — a technician carrying six
+    /// boards and using two is not a problem, a technician issued sixty and using two is. Consumed
     /// nets off ConsumptionReversal, because a completed job that was reverted hands the parts back
-    /// and counting the original consumption alone reads as usage that never happened.</summary>
+    /// and counting the original consumption alone reads as usage that never happened.
+    ///
+    /// Both halves come back in one payload whatever the caller is showing, because they are one
+    /// window over one filter and splitting them into two round trips would let the two halves be
+    /// read against different dates. <paramref name="segment"/> only picks which half an xlsx export
+    /// writes — a workbook is one sheet, and the export should be the table on screen.</summary>
     private static async Task<Results<Ok<StockAnalysisDto>, FileContentHttpResult>> StockAnalysisAsync(
         AppDbContext db, DateTime? from, DateTime? to, long? technicianId, string? search, string? format,
-        CancellationToken ct)
+        string? segment, CancellationToken ct)
     {
         var fromInc = from?.Date;
         var toEx = to?.Date.AddDays(1);
@@ -600,9 +601,9 @@ public static class ReportsEndpoints
             .ToList();
 
         // Technician side. Transfers are left out: they move stock between two technicians without
-        // changing what the pair were issued or fitted, and attributing one would double-count it.
+        // changing what the pair were issued or used, and attributing one would double-count it.
         var techMoves = moves.Where(m => m.TechnicianId is > 0 && partById.ContainsKey(m.PartId)
-                                      && m.MovementType is MovementType.Issue or MovementType.Return
+                                      && m.MovementType is MovementType.Issue
                                           or MovementType.Consumption or MovementType.ConsumptionReversal);
         if (technicianId is { } tid) techMoves = techMoves.Where(m => m.TechnicianId == tid);
 
@@ -610,7 +611,6 @@ public static class ReportsEndpoints
             .ToDictionary(g => g.Key, g => new
             {
                 Issued = g.Where(x => x.MovementType == MovementType.Issue).Sum(x => x.Quantity),
-                Returned = g.Where(x => x.MovementType == MovementType.Return).Sum(x => x.Quantity),
                 Consumed = g.Where(x => x.MovementType == MovementType.Consumption).Sum(x => x.Quantity)
                          - g.Where(x => x.MovementType == MovementType.ConsumptionReversal).Sum(x => x.Quantity),
             });
@@ -637,19 +637,25 @@ public static class ReportsEndpoints
                 var c = cells.GetValueOrDefault(k);
                 return new TechStockRow(
                     k.Tech, techNames.GetValueOrDefault(k.Tech, $"#{k.Tech}"), p.Id, p.ItemCode, p.Name,
-                    c?.Issued ?? 0, c?.Returned ?? 0, c?.Consumed ?? 0, onHand.GetValueOrDefault(k, 0));
+                    c?.Issued ?? 0, c?.Consumed ?? 0, onHand.GetValueOrDefault(k, 0));
             })
-            .Where(r => r.Issued != 0 || r.Returned != 0 || r.Consumed != 0 || r.OnHand != 0)
+            .Where(r => r.Issued != 0 || r.Consumed != 0 || r.OnHand != 0)
             .OrderBy(r => r.TechnicianName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(r => r.ItemCode, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         if (IsXlsx(format))
-            return TypedResults.File(XlsxBuilder.Build("Stock analysis",
-                new[] { "Technician", "Item code", "Part", "Issued", "Returned", "Fitted", "On hand" },
-                technicians.Select(x => (IReadOnlyList<object?>)new object?[] { x.TechnicianName, x.ItemCode,
-                    x.PartName, x.Issued, x.Returned, x.Consumed, x.OnHand })),
-                XlsxMime, "stock-analysis.xlsx");
+            return string.Equals(segment, "inward", StringComparison.OrdinalIgnoreCase)
+                ? TypedResults.File(XlsxBuilder.Build("Inward stock",
+                    new[] { "Item code", "Part", "Unit", "Received" },
+                    inward.Select(x => (IReadOnlyList<object?>)new object?[] { x.ItemCode, x.PartName,
+                        x.Unit, x.Received })),
+                    XlsxMime, "stock-inward.xlsx")
+                : TypedResults.File(XlsxBuilder.Build("Technician stock",
+                    new[] { "Technician", "Item code", "Part", "Issued", "Used", "In hand" },
+                    technicians.Select(x => (IReadOnlyList<object?>)new object?[] { x.TechnicianName, x.ItemCode,
+                        x.PartName, x.Issued, x.Consumed, x.OnHand })),
+                    XlsxMime, "stock-technicians.xlsx");
 
         return TypedResults.Ok(new StockAnalysisDto(inward, technicians));
     }

@@ -197,12 +197,14 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    /// <summary>Dispatch a completed job.
+    /// <summary>Dispatch a completed job: the item goes back to the party it came from.
     ///
-    /// A job raised off a faulty field return normally ends at Stocked - the repaired unit goes back
-    /// on the shelf. Dispatching one instead is legitimate (the unit goes back out to the party on the
-    /// job), and it has to be handled here rather than ignored: otherwise the unit would sit at
-    /// UNDER_REPAIR forever, pointing at a job that finished, and never reach a terminal owner.</summary>
+    /// Any job may carry a tracked unit now - an inward part registered at the counter, a faulty field
+    /// return, or a retained swap unit - and dispatching is one of the two ways a unit stops being the
+    /// shop's problem. It has to be handled here rather than ignored, or the unit would sit at
+    /// UNDER_REPAIR forever pointing at a job that finished, and never reach a terminal owner.
+    ///
+    /// The one exception is a job that issued a replacement; see below.</summary>
     internal static async Task<ApplyResult> ApplyDispatchAsync(ServiceJob job, DispatchRequest req,
         long uid, AppDbContext db, SerialService serial, IAuditService audit, string? ip, CancellationToken ct)
     {
@@ -210,6 +212,15 @@ public static partial class ServicesEndpoints
         if (job.ServiceStatus is ServiceStatus.Dispatched) return ApplyResult.Applied;
         if (job.ServiceStatus is not ServiceStatus.Completed)
             return ApplyResult.Invalid($"Only a completed job can be dispatched (currently {job.ServiceStatus}).");
+
+        // A retained unit is the shop's own stock sitting on a job. The customer was served when the
+        // replacement went out; dispatching this one would hand over a second unit for the same job
+        // and take it off the shelf with nothing recording a sale. It is stocked or written off, and
+        // if it genuinely has to go out it goes through the door that records a sale.
+        if (job.JobKind is JobKind.SwapRetained)
+            return ApplyResult.Invalid(
+                $"{job.ServiceNo} carries the unit kept in place of a replacement, so it belongs to the "
+                + "service centre and cannot be dispatched. Add it to stock, or write it off.");
 
         // Blank means "leave it alone", never "clear it". The reference is stamped by its own action and
         // the DC number by generating the DC document, so by the time anything is dispatched both are
@@ -251,20 +262,37 @@ public static partial class ServicesEndpoints
 
         if (job.SourceComponentSerialId is { } dispatchedSerialId)
         {
-            var unit = await db.ComponentSerials.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == dispatchedSerialId, ct);
-            if (unit is not null)
+            if (DispatchReturnsUnitToParty(job))
             {
-                var party = await PartyLabelAsync(db, job, ct);
-                await serial.InstallToCustomerAsync(unit.PartId, unit.SerialNumber, unit.ItemName, party,
-                    SerialStatus.Installed, uid, ct, job.CustomerId);
-                await ClearRepairJobLinkAsync(db, dispatchedSerialId, ct);
+                var unit = await db.ComponentSerials.AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == dispatchedSerialId, ct);
+                if (unit is not null)
+                {
+                    var party = await PartyLabelAsync(db, job, ct);
+                    await serial.InstallToCustomerAsync(unit.PartId, unit.SerialNumber, unit.ItemName, party,
+                        SerialStatus.Installed, uid, ct, job.CustomerId);
+                }
             }
+            // Either way the job is over, so nothing should still read as open work on the unit.
+            await ClearRepairJobLinkAsync(db, dispatchedSerialId, ct);
         }
 
         audit.Log(uid, "service.dispatch", "service", job.Id, details: note, ip: ip);
         return ApplyResult.Applied;
     }
+
+    /// <summary>Whether dispatching this job hands its own unit back to the party on it.
+    ///
+    /// Normally yes — that is what dispatch means. Not when a replacement was issued: THAT is what the
+    /// customer is walking out with, and the unit on the job is still on the shop's rack. Booking it
+    /// back to them would put a unit at a customer who never received it, which is exactly the quiet
+    /// wrong answer the ledger exists to prevent.
+    ///
+    /// What happens to the kept unit instead is deliberately not decided here. It stays in the shop's
+    /// custody, not re-issuable, with its job link cleared. Whether it is repaired onto the shelf or
+    /// scrapped is a judgement somebody makes after looking at it.</summary>
+    internal static bool DispatchReturnsUnitToParty(ServiceJob job)
+        => job.SourceComponentSerialId is not null && string.IsNullOrWhiteSpace(job.ReplacementSerialNo);
 
     /// <summary>The repair job is over, so the unit is no longer being worked on. Kept separate from
     /// the status change because dispatch hands the unit to a customer while stocking hands it to the
@@ -290,17 +318,29 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    /// <summary>Stock a completed job.
+    /// <summary>Stock a completed job: the shop is keeping the unit, so it goes on the shelf.
     ///
-    /// For an ordinary job this is what it has always been: a status transition and nothing else. The
-    /// unit on a normal job is the customer's machine, so there is no part to put on a shelf, and
-    /// adding one would invent stock that does not exist.
+    /// Stocking used to be a pure status change for an ordinary job, on the reasoning that such a job
+    /// holds a customer's machine rather than a catalogue part, so crediting the shelf would invent
+    /// stock. That reasoning had one thing wrong with it. By the time anybody presses this, the shop
+    /// has decided to keep the machine - it is not the customer's any more. It is a unit on a rack
+    /// with nothing in the system saying so, and every unit kept since the rewrite has been off the
+    /// books.
     ///
-    /// A job raised off a faulty field return is the one case where stocking it is also a stock event.
-    /// That unit IS a catalogue part - it left the warehouse, went out to a customer, came back broken
-    /// and has now been repaired - so this is the point it rejoins the warehouse count and becomes
-    /// re-issuable. <see cref="ServiceJob.SourceComponentSerialId"/> is what separates the two, and it
-    /// is null on every job that existed before field returns did.</summary>
+    /// The legacy app knew this: <c>pending_dispatch_page.dart</c> <c>_addSelectedToStock</c> matched
+    /// the job's PSCODE against the stock table, incremented Total_stock by one and wrote a
+    /// stock_input row sourced "Service Return" BEFORE marking DISPATCH = 'STOCKED'. The rewrite kept
+    /// the status change and dropped the lines that made it mean anything.
+    ///
+    /// So every stocked job now credits the warehouse by one and puts the unit into the service
+    /// centre's custody as re-issuable stock. The field-return case is no longer a special path -
+    /// it is the general path, with the unit's record already in hand.
+    ///
+    /// Two consequences worth knowing before touching this. Stocking can now FAIL: the unit has to
+    /// resolve to a catalogue item, and a job whose PS code matches nothing is refused by name rather
+    /// than silently stocked. And a serial-tracked item must name its unit, for the same reason a
+    /// serial-tracked component line must - otherwise the count moves and nothing records which
+    /// physical thing moved it.</summary>
     internal static async Task<ApplyResult> ApplyStockAsync(ServiceJob job, string? note,
         long uid, AppDbContext db, StockLedgerService ledger, SerialService serial,
         IAuditService audit, string? ip, CancellationToken ct)
@@ -309,22 +349,76 @@ public static partial class ServicesEndpoints
         if (job.ServiceStatus is not ServiceStatus.Completed)
             return ApplyResult.Invalid($"Cannot move a {job.ServiceStatus} job to {ServiceStatus.Stocked}.");
 
-        WriteTransition(db, job, ServiceStatus.Stocked, uid, note);
-
+        // A field-return / swap-retained job already carries the unit's record, so the part comes from
+        // there and no lookup can disagree with it. Everything else resolves the way a replacement
+        // does: the job's PS code against the catalogue.
+        ComponentSerial? tracked = null;
+        Part? part;
         if (job.SourceComponentSerialId is { } serialId)
         {
-            var unit = await db.ComponentSerials.AsNoTracking().FirstOrDefaultAsync(c => c.Id == serialId, ct);
-            if (unit is not null)
-            {
-                await ledger.ReceiptAsync(unit.PartId, 1, uid,
-                    $"Repaired unit {unit.SerialNumber} stocked from job {job.ServiceNo}", null, "SERVICE_RETURN", ct);
-                await serial.MarkRepairedAsync(serialId, uid,
-                    $"Repaired and stocked on job {job.ServiceNo}", ct);
-            }
+            tracked = await db.ComponentSerials.AsNoTracking().FirstOrDefaultAsync(c => c.Id == serialId, ct);
+            part = tracked is null ? null : await db.Parts.FirstOrDefaultAsync(p => p.Id == tracked.PartId, ct);
+        }
+        else
+        {
+            part = await ResolveStockPartAsync(db, job.PsCode, ct);
         }
 
-        audit.Log(uid, "service.stock", "service", job.Id, ip: ip);
+        // The unit the job is about: its own serial normally, the tracked unit's when it has one.
+        var unitSerial = tracked?.SerialNumber ?? job.SerialNo;
+        if (StockBlockedReason(job, part, unitSerial) is { } blocked) return ApplyResult.Invalid(blocked);
+
+        WriteTransition(db, job, ServiceStatus.Stocked, uid, note);
+
+        var label = string.IsNullOrWhiteSpace(unitSerial) ? job.ServiceNo : $"unit {unitSerial}";
+        await ledger.ReceiptAsync(part.Id, 1, uid,
+            $"Kept from service - {label} stocked from job {job.ServiceNo}", null, "SERVICE_RETURN", ct);
+
+        // Ownership. A unit already tracked is flipped in place (this is what clears its open repair
+        // job); one the shop has never seen gets its record here. An untracked part has no unit record
+        // either way - the quantity is the whole of what moved.
+        if (tracked is not null)
+            await serial.MarkRepairedAsync(tracked.Id, uid, $"Repaired and stocked on job {job.ServiceNo}", ct);
+        else if (part.IsSerialTracked)
+            await serial.AcquireToServiceCentreAsync(part.Id, unitSerial, part.Name, SerialStatus.Repaired,
+                uid, $"Kept from service and stocked on job {job.ServiceNo}", ct);
+
+        audit.Log(uid, "service.stock", "service", job.Id, details: part.ItemCode, ip: ip);
         return ApplyResult.Applied;
+    }
+
+    /// <summary>Why this job cannot go on the shelf, or null when it can. Split out from the writes
+    /// so the refusals can be pinned down without a database — the reasons are the new part of this
+    /// behaviour, and they are what the desk will actually meet.
+    ///
+    /// Both refusals are about the same thing: a count that moves has to say WHAT moved it. An
+    /// unresolvable PS code means there is no shelf to add to, and a serial-tracked item with no
+    /// serial on the job means a unit arrived on the rack that nothing can identify afterwards.</summary>
+    internal static string? StockBlockedReason(ServiceJob job, Part? part, string? unitSerial)
+    {
+        if (part is null)
+            return string.IsNullOrWhiteSpace(job.PsCode)
+                ? $"{job.ServiceNo} carries no PS code, so there is no catalogue item to add it to. "
+                  + "Set the PS code on the job first."
+                : $"No catalogue item matches PS code {job.PsCode.Trim()}, so {job.ServiceNo} cannot be "
+                  + "added to stock. Correct the PS code, or add the item to the catalogue first.";
+
+        if (part.IsSerialTracked && string.IsNullOrWhiteSpace(unitSerial))
+            return $"{part.ItemCode} - {part.Name} is serial-tracked, but {job.ServiceNo} carries no "
+                 + "serial number. Record it on the job before adding the unit to stock.";
+
+        return null;
+    }
+
+    /// <summary>The job's PS code against the catalogue. No IsActive filter, deliberately: a retired
+    /// code with units still on the rack is exactly the case where the count has to move, and refusing
+    /// it would leave the shelf and the books disagreeing. Same rule <see cref="ReplaceAsync"/> uses
+    /// to find the item a replacement comes out of.</summary>
+    private static async Task<Part?> ResolveStockPartAsync(AppDbContext db, string? psCode, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(psCode)) return null;
+        var code = psCode.Trim();
+        return await db.Parts.FirstOrDefaultAsync(p => p.ItemCode == code, ct);
     }
 
     private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> StockJobAsync(

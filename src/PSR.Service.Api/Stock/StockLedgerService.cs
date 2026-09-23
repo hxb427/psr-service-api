@@ -265,6 +265,23 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
+    /// <summary>Put a replacement unit back on the shelf: the swap it was issued for was cancelled
+    /// before the job was dispatched, so the unit never left the building. The exact reversal of
+    /// <see cref="ReplacementOutAsync"/>, and deliberately not a Receipt — a receipt means goods
+    /// arrived from a supplier, and somebody reading the shelf's history a year later should not have
+    /// to guess which of those two this row was.</summary>
+    public async Task ReplacementReturnAsync(long partId, int qty, long byUser, long serviceId,
+        string? serialNo, string? remarks, CancellationToken ct)
+    {
+        await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.ReplacementReturn, Quantity = qty,
+            PerformedByUserId = byUser, ReferenceType = "SERVICE", ReferenceId = serviceId,
+            SerialNo = serialNo, Remarks = remarks,
+        });
+    }
+
     /// <summary>Ship a spare out of the warehouse against a direct sale. Called once per sale line when the
     /// sale is marked sold — that one action is the point the goods actually leave, so a sale that has not
     /// been marked reserves nothing and an over-sold item fails here rather than silently going negative.</summary>

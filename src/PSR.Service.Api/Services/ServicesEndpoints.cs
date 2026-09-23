@@ -4,6 +4,8 @@ namespace PSR.Service.Api.Services;
 //   ServicesEndpoints.Queries.cs   — list / summary / overview / technicians / get
 //   ServicesEndpoints.Inward.cs    — create + multi-item batch + customer resolve
 //   ServicesEndpoints.Workflow.cs  — state transitions (assign → ... → dispatch/replace)
+//   ServicesEndpoints.Swap.cs      — advance replacement: issue, cancel, and the replacement trail
+//   ServicesEndpoints.Units.cs     — registering an inward item in the serial ledger + its history
 //   ServicesEndpoints.Lines.cs     — add / delete service lines
 //   ServicesEndpoints.Edit.cs      — correct a booked job's descriptive fields (admin-switched)
 //   ServicesEndpoints.Mapping.cs   — shared helpers (detail/line mapping, transition write)
@@ -35,6 +37,17 @@ public static partial class ServicesEndpoints
         group.MapPost("/{id:long}/dispatch", DispatchAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/stock", StockJobAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("DispatchManage");
+        // Advance replacement — the customer leaves with a unit off the shelf today and theirs stays
+        // behind on a job of its own. DispatchManage is admin/manager/supervisor, the same people who
+        // already decide a total-loss replacement; giving away shelf stock is one decision, not two.
+        group.MapPost("/{id:long}/swap", SwapAsync).RequireAuthorization("DispatchManage");
+        group.MapPost("/{id:long}/swap/cancel", CancelSwapAsync).RequireAuthorization("DispatchManage");
+        // "This unit has come back — was it one of ours?" Readable by anyone who can see jobs: it is
+        // the counter's lookup, and it carries nothing a job row does not already show.
+        group.MapGet("/replacements", ReplacementsAsync);
+        // Asked as the serial is keyed in at the counter, BEFORE the job is booked - which is the only
+        // moment a misread serial or a unit that has changed hands can still be sorted out cheaply.
+        group.MapGet("/unit-history", UnitHistoryAsync);
         group.MapPost("/{id:long}/total-loss-close", LeaveTotalLossAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/replacement-reject", RejectReplacementAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");

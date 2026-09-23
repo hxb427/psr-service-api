@@ -35,3 +35,37 @@ public enum PaymentStatus { Pending, Partial, Paid }
 public enum WarrantyStatus { Unknown, InWarranty, OutOfWarranty }
 
 public enum ServiceLineType { Component, ServiceCharge, Replacement }
+
+/// <summary>What a service job IS, as opposed to where it is in the workflow. Defaults to Customer,
+/// which is what every job written before this existed was.
+///
+/// It exists because two kinds of job now sit in the services table holding a unit the SERVICE CENTRE
+/// owns rather than a customer's machine, and both of them must be kept out of the routes that assume
+/// otherwise — dispatch (there is no customer to dispatch to) and billing (there is nobody to bill).
+/// Keeping them apart by status was never possible: they run the same Inward → … → Completed states
+/// as any other job, deliberately, because the bench work on them is identical.</summary>
+public enum JobKind
+{
+    /// <summary>An ordinary job on a customer's or dealer's machine.</summary>
+    Customer,
+
+    /// <summary>Raised automatically by acknowledging a faulty field return. Backfilled onto every
+    /// job carrying a SourceComponentSerialId, which is exactly the set.</summary>
+    FieldReturn,
+
+    /// <summary>Raised by an advance replacement: the customer took a unit off the shelf and left
+    /// theirs behind, so this job carries a unit the shop now owns. Ends Stocked or TotalLoss.</summary>
+    SwapRetained,
+}
+
+/// <summary>Why a replacement was issued. Both kinds hand the customer a unit out of warehouse stock;
+/// they differ in what happens to the unit that came in.</summary>
+public enum ReplacementKind
+{
+    /// <summary>The incoming unit was written off. No retained job; the unit is scrapped.</summary>
+    TotalLoss,
+
+    /// <summary>The incoming unit was kept and a retained job opened on it. The customer is served on
+    /// day one and the shop repairs the unit at its own pace, for its own shelf.</summary>
+    AdvanceSwap,
+}
