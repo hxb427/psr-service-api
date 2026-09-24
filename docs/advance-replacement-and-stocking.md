@@ -94,8 +94,7 @@ So, as of this change:
 
 Three consequences, none of them cosmetic:
 
-**Stocking can now fail.** The unit has to resolve to a catalogue part, by explicit pick or by the
-job's PS code, the same resolution `ReplaceAsync` does. A job whose PS code matches nothing cannot be
+**Stocking can now fail.** The unit has to resolve to a catalogue part by the job's PS code. A job whose PS code matches nothing cannot be
 stocked and says so, naming the code. Before, the button always succeeded, because it was not
 claiming anything.
 
@@ -151,6 +150,30 @@ is repaired onto the shelf or scrapped, made after looking at it, from the seria
 `Partial` is no longer offered on service jobs. It carries no amount, so it recorded that money had
 changed hands without recording how much, and nothing downstream could act on it. The enum and the
 search filters keep it so jobs already sitting on it stay findable; it simply cannot be chosen.
+
+## A swap asks for a serial and nothing else
+
+Simplified 2026-09-24, after the first build reached the counter.
+
+A swap is the SAME item going out that came in: the customer brought a thing and is handed another of
+that thing. So the item is the job's own PS code, at both ends, and the only fact the job does not
+already hold is which physical unit the customer walked out with.
+
+The first build offered two part pickers — one for the unit going out, one for what the kept unit was
+catalogued as — each defaulting to the job's PS code. Both asked the counter to re-answer a question
+the job had already answered, and every wrong answer was a unit taken off the wrong shelf. They are
+gone. So is the free-text note; the reason covers it and is now optional.
+
+`SwapRequest` is `(ReplacementSerialNo, Reason)`.
+
+One consequence: a job whose PS code is missing or matches no catalogue item **cannot be swapped at
+all**, where before the counter could work around it by picking a part. That is the right way round.
+The PS code is what the shelf is decremented by and what the retained job is stocked as, so a job
+that cannot answer it has a data problem to fix on the job, not a choice to make at the counter.
+
+**A different item going back is not a swap.** That is a total loss and a replacement, which keeps its
+own route, its own picker and its own reason for existing: there the incoming unit is written off, so
+what goes back legitimately may be something else.
 
 ## Ownership moves at the swap; quantity moves at the stocking
 

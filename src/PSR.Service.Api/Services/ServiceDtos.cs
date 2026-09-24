@@ -225,8 +225,14 @@ public record ServiceReplacementDto(
     DateTime CreatedAt, DateTime? CancelledAt);
 
 /// <summary>Issue an advance replacement: the customer leaves with a unit off the shelf and their own
-/// stays behind. <paramref name="RetainedPartId"/> defaults to the replacement's part, which is the
-/// normal case — the unit handed over is the same item that came in.</summary>
-public record SwapRequest(
-    string ReplacementSerialNo, long? ReplacementPartId, long? RetainedPartId,
-    string? Reason, string? Note);
+/// stays behind.
+///
+/// A serial and nothing else. A swap is the SAME item going out that came in — the customer brought a
+/// thing and is handed another of that thing — so the only fact that is not already on the job is
+/// which physical unit they walked out with. The item comes from the job's own PS code at both ends.
+/// Offering a part to pick asked the counter to re-answer a question the job had already answered,
+/// and every wrong answer was a unit off the wrong shelf.
+///
+/// A different item is not a swap. That is a total loss and a replacement, which has its own route and
+/// its own part picker.</summary>
+public record SwapRequest(string ReplacementSerialNo, string? Reason);

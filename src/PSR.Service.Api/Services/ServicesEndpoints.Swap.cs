@@ -63,21 +63,13 @@ public static partial class ServicesEndpoints
                 $"{job.ServiceNo} already carries replacement unit {job.ReplacementSerialNo}. Cancel that "
                 + "one before issuing another.");
 
-        // The unit that goes OUT. An explicit pick wins — a unit is occasionally replaced with a
-        // different model — but the normal case supplies none and it is the same item that came in,
-        // which the job carries as its PS code.
-        var (outgoing, outgoingError) = await ResolveReplacementPartAsync(db, job, req.ReplacementPartId, ct);
-        if (outgoing is null) return TypedResults.BadRequest(outgoingError!);
-
-        // The unit that STAYS. Defaults to the same item, because in the normal case the customer is
-        // handed the same thing they brought in — which means nobody has to pick anything for the
-        // usual swap to work.
-        Part? retained = outgoing;
-        if (req.RetainedPartId is { } rpid)
-        {
-            retained = await db.Parts.FirstOrDefaultAsync(p => p.Id == rpid, ct);
-            if (retained is null) return TypedResults.BadRequest("The item the customer's unit is being kept as was not found.");
-        }
+        // One item, both ends. The customer brought a thing and is handed another of that thing, so
+        // the item is the job's own PS code and there is nothing to choose. The unit that stays is
+        // catalogued as the same item for the same reason.
+        var (item, itemError) = await ResolveReplacementPartAsync(db, job, ct);
+        if (item is null) return TypedResults.BadRequest(itemError!);
+        var outgoing = item;
+        var retained = item;
 
         // Read before anything is written so an empty shelf reads as an empty shelf, naming the item
         // and what it actually holds. The ledger guards it again inside the transaction, which is what
@@ -224,8 +216,8 @@ public static partial class ServicesEndpoints
             // 7. The original joins the pending-dispatch queue. A job already sitting there does not
             //    "move" anywhere, so it gets an event rather than a transition — a Completed → Completed
             //    row says nothing and would show up in the status metrics as a change that never was.
-            var note = req.Note
-                ?? $"Advance replacement issued (SN {outgoingSn}) — unit kept on {retainedJob.ServiceNo}";
+            var note = $"Advance replacement issued (SN {outgoingSn}) — unit kept on {retainedJob.ServiceNo}";
+            if (!string.IsNullOrWhiteSpace(req.Reason)) note += $": {req.Reason.Trim()}";
             if (statusBefore is ServiceStatus.Completed) WriteNote(db, job, "Swap", uid, note);
             else WriteTransition(db, job, ServiceStatus.Completed, uid, note);
 
@@ -239,29 +231,26 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
-    /// <summary>The item a replacement comes out of: an explicit pick, else the job's own PS code.
-    /// Shared with the total-loss route so the two cannot drift — resolving this is what makes the
-    /// warehouse move at all, and when it silently failed the shelf count drifted up by one unit
-    /// every time somebody forgot to pick a part.</summary>
+    /// <summary>The item a swap is of: the job's own PS code, and only that. Resolving it is what
+    /// makes the warehouse move at all, so a job that cannot answer it cannot be swapped — the fix is
+    /// to put the right code on the job, not to pick a different item at the counter.
+    ///
+    /// The total-loss replacement route resolves its own part and still offers a picker, because there
+    /// the incoming unit is written off and what goes back may legitimately be something else.</summary>
     private static async Task<(Part? Part, string? Error)> ResolveReplacementPartAsync(
-        AppDbContext db, ServiceJob job, long? explicitPartId, CancellationToken ct)
+        AppDbContext db, ServiceJob job, CancellationToken ct)
     {
-        if (explicitPartId is { } pid)
-        {
-            var picked = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
-            return picked is null ? (null, "Replacement part not found.") : (picked, null);
-        }
         if (string.IsNullOrWhiteSpace(job.PsCode))
-            return (null, "This job carries no PS code, so the replacement cannot be taken out of stock. "
-                        + "Pick the replacement part on the form.");
+            return (null, $"{job.ServiceNo} carries no PS code, so there is no item to take a replacement "
+                        + "out of. Set the PS code on the job first.");
 
         // No IsActive filter: a retired code with units still on the shelf is exactly the case where
         // the count has to be decremented, and refusing it would leave it wrong.
         var code = job.PsCode.Trim();
         var part = await db.Parts.FirstOrDefaultAsync(p => p.ItemCode == code, ct);
         return part is null
-            ? (null, $"No catalogue item matches PS code {code}, so the replacement cannot be taken out "
-                   + "of stock. Pick the replacement part on the form.")
+            ? (null, $"No catalogue item matches PS code {code}, so a replacement cannot be taken out of "
+                   + $"stock for {job.ServiceNo}. Correct the PS code on the job first.")
             : (part, null);
     }
 
