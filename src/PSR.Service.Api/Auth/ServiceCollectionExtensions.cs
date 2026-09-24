@@ -77,6 +77,16 @@ public static class ServiceCollectionExtensions
             // The priced catalogue — parts and service charges. Adding an item or changing a rate is a
             // commercial decision, so it stops at manager; supervisors and below read it only.
             options.AddPolicy("CatalogueManage", p => p.RequireRole(RoleNames.Admin, RoleNames.Manager));
+            // The dealer master: who the shop bills, and on what warranty terms. Kept apart from the
+            // priced catalogue because it is not a pricing decision — a dealer's warranty months and
+            // address are a record of an arrangement somebody made, and the people who take jobs in
+            // over the counter are the ones who find them wrong.
+            //
+            // The bulk import from the legacy database is NOT under this. It scans passtestdata and
+            // creates dealers wholesale, which is the one action here that cannot be undone by
+            // correcting a field, so it stays with the Admin policy on its own route.
+            options.AddPolicy("DealerManage", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             // Flipping serial tracking on a part changes what the shop floor is asked to record, not
             // what anything costs, so it reaches one role further down than the rest of the catalogue.
             options.AddPolicy("SerialTrackingManage", p => p.RequireRole(

@@ -21,12 +21,12 @@ public static class DealersEndpoints
         group.MapGet("/import-candidates", ImportCandidatesAsync).RequireAuthorization("Admin");
         group.MapPost("/import", ImportAsync).RequireAuthorization("Admin");
         group.MapGet("/{id:long}", GetAsync);
-        group.MapPost("/", CreateAsync).RequireAuthorization("Admin");
-        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("Admin");
+        group.MapPost("/", CreateAsync).RequireAuthorization("DealerManage");
+        group.MapPut("/{id:long}", UpdateAsync).RequireAuthorization("DealerManage");
         group.MapPost("/{id:long}/activate", (long id, ClaimsPrincipal u, AppDbContext db, IAuditService a, HttpContext h, CancellationToken ct)
-            => SetActiveAsync(id, true, u, db, a, h, ct)).RequireAuthorization("Admin");
+            => SetActiveAsync(id, true, u, db, a, h, ct)).RequireAuthorization("DealerManage");
         group.MapPost("/{id:long}/deactivate", (long id, ClaimsPrincipal u, AppDbContext db, IAuditService a, HttpContext h, CancellationToken ct)
-            => SetActiveAsync(id, false, u, db, a, h, ct)).RequireAuthorization("Admin");
+            => SetActiveAsync(id, false, u, db, a, h, ct)).RequireAuthorization("DealerManage");
 
         return app;
     }
