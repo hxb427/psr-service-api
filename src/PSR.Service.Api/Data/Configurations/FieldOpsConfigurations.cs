@@ -134,6 +134,8 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.Property(x => x.ServiceNo).HasColumnName("service_no").HasMaxLength(40).IsRequired();
         b.HasIndex(x => x.ServiceNo).IsUnique();
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
+        b.Property(x => x.TicketId).HasColumnName("ticket_id").HasMaxLength(36);
+        b.Property(x => x.TicketNumber).HasColumnName("ticket_number").HasMaxLength(64);
         b.Property(x => x.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
         b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.Phone).HasColumnName("phone").HasMaxLength(50);
@@ -149,6 +151,10 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
             .HasForeignKey(x => x.FieldServiceId).OnDelete(DeleteBehavior.Cascade);
         b.HasIndex(x => x.TechnicianId);
         b.HasIndex(x => x.CreatedAt);
+        // Not unique: a ticket that needs a second visit gets a second service record, and the ticket
+        // only closes once the last of them is done. The index is what makes "has this ticket been
+        // serviced yet" a lookup rather than a scan.
+        b.HasIndex(x => x.TicketId);
     }
 }
 

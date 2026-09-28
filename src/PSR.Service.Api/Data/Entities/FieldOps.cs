@@ -8,6 +8,12 @@ public class FieldService
     public long Id { get; set; }
     public string ServiceNo { get; set; } = string.Empty;   // unique (FSVnnnnn)
     public long TechnicianId { get; set; }
+    /// <summary>The Poornasree ticket this visit was booked against, when the job came from one.
+    /// Null for a walk-in or a call taken directly — the ledger movement stands on its own either way.
+    /// Both halves are kept because the two systems quote different ones: the ticket API is keyed by
+    /// the UUID, while every human names the ticket by its TKT-yyyymmdd-xxxxxxxx number.</summary>
+    public string? TicketId { get; set; }
+    public string? TicketNumber { get; set; }
     public string CustomerName { get; set; } = string.Empty;
     /// <summary>Set when the technician picked an existing customer rather than typing a new name.
     /// Free text stays authoritative for display; this is what carries ownership onto the serial.</summary>

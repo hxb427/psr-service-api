@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +22,7 @@ public static class FieldOpsEndpoints
     {
         var services = app.MapGroup("/field-services").WithTags("field-services").RequireAuthorization();
         services.MapGet("/", ListServicesAsync);
+        services.MapGet("/by-ticket/{ticketId}", TicketServiceStatusAsync);
         services.MapPost("/", CreateServiceAsync).RequireAuthorization("FieldOpsRecord");
 
         var sales = app.MapGroup("/field-sales").WithTags("field-sales").RequireAuthorization();
@@ -54,6 +55,21 @@ public static class FieldOpsEndpoints
         return TypedResults.Ok(dtos);
     }
 
+    /// <summary>Has this ticket been serviced yet, by the caller? Scoped to the caller's own records
+    /// for the same reason the list is: one technician has no business learning what another has
+    /// booked. A manager asking sees every record against the ticket.</summary>
+    private static async Task<Ok<TicketServiceStatusDto>> TicketServiceStatusAsync(
+        string ticketId, AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        var id = ticketId.Trim();
+        var q = db.FieldServices.AsNoTracking().Where(f => f.TicketId == id);
+        if (!StockRoles.CanManage(user)) q = q.Where(f => f.TechnicianId == uid);
+
+        var nos = await q.OrderBy(f => f.Id).Select(f => f.ServiceNo).ToListAsync(ct);
+        return TypedResults.Ok(new TicketServiceStatusDto(id, nos.Count > 0, nos));
+    }
+
     private static async Task<Results<Created<FieldServiceDto>, BadRequest<string>, ForbidHttpResult>> CreateServiceAsync(
         [FromBody] CreateFieldServiceRequest req, ClaimsPrincipal user, AppDbContext db,
         NumberSequenceService seq, StockLedgerService ledger, SerialService serial,
@@ -75,6 +91,8 @@ public static class FieldOpsEndpoints
             {
                 ServiceNo = no, TechnicianId = uid, CustomerName = req.CustomerName.Trim(),
                 CustomerId = customerId,
+                TicketId = NormalizeTicketRef(req.TicketId),
+                TicketNumber = NormalizeTicketRef(req.TicketNumber),
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), MachineSerial = req.MachineSerial?.Trim(),
                 Complaint = req.Complaint?.Trim(), WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
                 CreatedByUserId = uid,
@@ -299,8 +317,19 @@ public static class FieldOpsEndpoints
         return new FieldServiceDto(
             f.Id, f.ServiceNo, f.TechnicianId, techName, f.CustomerName, f.Phone, f.Place,
             f.MachineSerial, f.Complaint, f.WorkDone, f.Remarks, f.CreatedAt,
-            pricing ? f.Lines.Sum(l => l.Amount) : null, lines);
+            pricing ? f.Lines.Sum(l => l.Amount) : null, lines,
+            f.TicketId, f.TicketNumber);
     }
+
+    /// <summary>Trims a ticket reference, and treats an all-whitespace one as absent.
+    ///
+    /// The distinction matters more than it looks. A client that sends "" for a job with no ticket
+    /// would otherwise store an empty string, and an empty string equals every other empty string:
+    /// the by-ticket lookup for one ticketless service would then return every ticketless service on
+    /// record, which the app reads as "this ticket has been serviced" for a ticket nobody attended —
+    /// and that is the one thing standing between an OTP and a close.</summary>
+    internal static string? NormalizeTicketRef(string? s) =>
+        string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     private static async Task<FieldSaleDto> SaleToDtoAsync(
         AppDbContext db, FieldSale f, bool pricing, CancellationToken ct)

@@ -76,7 +76,12 @@ public record CreateFieldServiceRequest(
     List<FieldServiceLineRequest>? Lines = null,
     /// <summary>Set when the technician picked an existing customer instead of typing a new name.
     /// Optional: a walk-in who is not on the list still gets served, and CustomerName carries them.</summary>
-    long? CustomerId = null);
+    long? CustomerId = null,
+    /// <summary>The Poornasree ticket this visit closed out, when the job came from one. The app sends
+    /// both halves; neither is verified here, because the ticket lives in another system that has
+    /// already refused the call if the caller was not its assigned engineer.</summary>
+    [StringLength(36)] string? TicketId = null,
+    [StringLength(64)] string? TicketNumber = null);
 
 public record FieldServiceLineDto(
     long Id, string Kind, long PartId, string ItemCode, string PartName, int Qty,
@@ -86,7 +91,13 @@ public record FieldServiceDto(
     long Id, string ServiceNo, long TechnicianId, string? TechnicianName,
     string CustomerName, string? Phone, string? Place, string? MachineSerial,
     string? Complaint, string? WorkDone, string? Remarks, DateTime CreatedAt,
-    decimal? Total, List<FieldServiceLineDto> Lines);
+    decimal? Total, List<FieldServiceLineDto> Lines,
+    string? TicketId = null, string? TicketNumber = null);
+
+/// <summary>Whether a ticket already has a service recorded against it. The app's OTP step is gated on
+/// this, and asking the server rather than trusting its own memory is what makes the gate survive a
+/// reinstall, a second device, or the technician killing the app between the form and the OTP.</summary>
+public record TicketServiceStatusDto(string TicketId, bool HasService, List<string> ServiceNos);
 
 public record FieldSaleLineRequest(
     [Required] long PartId,
