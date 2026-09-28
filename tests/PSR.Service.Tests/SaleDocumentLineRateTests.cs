@@ -21,7 +21,7 @@ public class SaleDocumentLineRateTests
     [InlineData(100.00, 1, 100.00)]
     [InlineData(0.05, 7, 0.35)]
     public void Stored_exclusive_rate_is_printed_as_is(decimal rate, int qty, decimal taxable)
-        => DocumentPdf.SaleLineRate(Line(rate, qty, taxable)).Should().Be(rate);
+        => DocumentPdf.LineRate(Line(rate, qty, taxable)).Should().Be(rate);
 
     [Theory]
     [InlineData(10.10, 3, 30.30)]
@@ -29,7 +29,7 @@ public class SaleDocumentLineRateTests
     [InlineData(0.05, 7, 0.35)]
     public void Printed_rate_times_qty_is_the_taxable_column(decimal rate, int qty, decimal taxable)
     {
-        var printed = DocumentPdf.SaleLineRate(Line(rate, qty, taxable));
+        var printed = DocumentPdf.LineRate(Line(rate, qty, taxable));
 
         // What a reader checking the document with a calculator does.
         (printed * qty).Should().Be(taxable);
@@ -44,7 +44,7 @@ public class SaleDocumentLineRateTests
         // The row the old code wrote for qty 3 @ 10.10 excl + 12% GST: round(33.94 / 3, 2).
         var legacy = Line(unitRate: 11.31m, qty: 3, taxable: 30.30m);
 
-        var printed = DocumentPdf.SaleLineRate(legacy);
+        var printed = DocumentPdf.LineRate(legacy);
 
         printed.Should().Be(10.10m);
         (printed * legacy.Qty).Should().Be(legacy.TaxableAmount);
@@ -54,5 +54,5 @@ public class SaleDocumentLineRateTests
     /// PDF download rather than a wrong number, so the rule leaves the stored rate alone.</summary>
     [Fact]
     public void Zero_quantity_falls_back_to_the_stored_rate()
-        => DocumentPdf.SaleLineRate(Line(42m, 0, 0m)).Should().Be(42m);
+        => DocumentPdf.LineRate(Line(42m, 0, 0m)).Should().Be(42m);
 }

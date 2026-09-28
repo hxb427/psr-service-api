@@ -424,6 +424,9 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         doc.TaxableAmount = taxable;
         if (doc.IsInterState) doc.IgstAmount = tax;
         else { doc.CgstAmount = Math.Round(tax / 2m, 2); doc.SgstAmount = tax - doc.CgstAmount; }
-        doc.TotalAmount = taxable + tax + doc.CourierCharges;
+        // Rounded up to the next whole rupee — the figure the customer actually pays. The parts above keep
+        // their paise, so the gap is a real number the PDF prints as a Round off line rather than a penny
+        // the document loses track of.
+        doc.TotalAmount = BillMoney.RoundUp(taxable + tax + doc.CourierCharges);
     }
 }

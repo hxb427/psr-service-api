@@ -9,13 +9,22 @@ namespace PSR.Service.Api.Documents;
 /// all three types — only the title and the GST summary differ. Table mirrors the legacy PI/Invoice layout
 /// (a row per unit: Sr / Description / Serial / Warranty / Service Challan / Qty / Rate / Amount).
 ///
-/// The money columns differ by what the document bills. A serviced unit is priced tax-INCLUSIVE, the way the
-/// old app's "Rate (incl. tax)" box has always worked, so its Amount is the line total. A spare sale bills
-/// catalogue goods at tax-exclusive rates beside a printed GST % column, so it shows the taxable value —
-/// which also makes that column add up to the Taxable Value in the totals block underneath it.</summary>
+/// Both kinds of line print their money columns tax-EXCLUSIVE, so the last column adds up to the Taxable
+/// Value in the totals block directly underneath it and the GST is added once, below the table. A serviced
+/// unit is PRICED tax-inclusive — the old app's "Rate (incl. tax)" box, and what BillingService stores — so
+/// its printed rate is derived back out; a spare sale already carries an exclusive rate. Printing the
+/// inclusive figures instead gave a column that summed to nothing shown anywhere on the document.</summary>
 public static class DocumentPdf
 {
     public static byte[] Render(ServiceDocument doc, CompanyInfo company, string? watermark = null, string? sourcePiNo = null)
+        => Build(doc, company, watermark, sourcePiNo).GeneratePdf();
+
+    /// <summary>The laid-out document, before it is turned into a file. Split out from <see cref="Render"/>
+    /// so the same layout can be rasterised to an image and looked at — QuestPDF embeds subset fonts, so a
+    /// generated PDF cannot be read back as text and a wrong figure on the page is otherwise invisible to
+    /// everything except a person opening it.</summary>
+    internal static IDocument Build(ServiceDocument doc, CompanyInfo company, string? watermark = null,
+        string? sourcePiNo = null)
     {
         var title = doc.DocType switch
         {
@@ -130,7 +139,7 @@ public static class DocumentPdf
                             else { Head("Serial"); Head("Warranty"); Head("Service Challan"); }
                             Head("Qty", true);
                             if (showRemarks) Head("Remarks");
-                            if (showMoney) { Head("Rate", true); Head(isSale ? "Taxable" : "Amount", true); }
+                            if (showMoney) { Head("Rate", true); Head("Taxable", true); }
                         });
 
                         var i = 1;
@@ -154,8 +163,8 @@ public static class DocumentPdf
                             if (showRemarks) table.Cell().Element(Body).Text(l.Remarks ?? "").FontSize(8);
                             if (showMoney)
                             {
-                                table.Cell().Element(Body).AlignRight().Text(Money(isSale ? SaleLineRate(l) : l.UnitRate));
-                                table.Cell().Element(Body).AlignRight().Text(Money(isSale ? l.TaxableAmount : l.LineTotal));
+                                table.Cell().Element(Body).AlignRight().Text(Money(LineRate(l)));
+                                table.Cell().Element(Body).AlignRight().Text(Money(l.TaxableAmount));
                             }
                         }
                     });
@@ -165,9 +174,13 @@ public static class DocumentPdf
                         col.Item().PaddingTop(8).AlignRight().Width(230).Column(c =>
                         {
                             TotalRow(c, "Taxable Value", doc.TaxableAmount);
-                            if (doc.IsInterState) TotalRow(c, "IGST", doc.IgstAmount);
+                            if (doc.IsInterState) TotalRow(c, "IGST" + GstRateSuffix(doc), doc.IgstAmount);
                             else { TotalRow(c, "CGST", doc.CgstAmount); TotalRow(c, "SGST", doc.SgstAmount); }
                             if (doc.CourierCharges > 0) TotalRow(c, "Courier", doc.CourierCharges);
+
+                            var roundOff = RoundOff(doc);
+                            if (roundOff != 0) TotalRow(c, "Round off", roundOff);
+
                             c.Item().PaddingTop(2).BorderTop(1).BorderColor(Colors.Grey.Medium);
                             c.Item().Row(r =>
                             {
@@ -197,17 +210,41 @@ public static class DocumentPdf
                         .Text("This is a computer-generated document.").FontSize(7).FontColor(Colors.Grey.Darken1).Italic();
                 });
             });
-        }).GeneratePdf();
+        });
     }
 
-    /// <summary>The tax-exclusive rate to print for a spare-sale line, so Rate × Qty is exactly the Taxable
-    /// column beside it. Documents generated before that convention snapshotted a tax-inclusive rate instead;
-    /// those are spotted by the rate not reproducing the stored taxable amount, and reprint from the taxable
-    /// amount so an old invoice still adds up.</summary>
-    public static decimal SaleLineRate(ServiceDocumentLine l)
+    /// <summary>The tax-exclusive rate to print for a line, so Rate × Qty is exactly the Taxable column
+    /// beside it. The stored rate is used as-is when it already reproduces the stored taxable amount, which
+    /// is a spare-sale line and any line at 0% GST; otherwise the rate is derived from the taxable amount.
+    ///
+    /// That covers both a serviced unit, which is priced tax-inclusive by design, and the spare-sale
+    /// documents generated before the exclusive convention, which snapshotted an inclusive rate — a tax
+    /// invoice gets reprinted years later and still has to add up.</summary>
+    public static decimal LineRate(ServiceDocumentLine l)
         => l.Qty > 0 && Math.Round(l.UnitRate * l.Qty, 2) != l.TaxableAmount
             ? Math.Round(l.TaxableAmount / l.Qty, 2)
             : l.UnitRate;
+
+    /// <summary>What the Round off line prints, or zero when there is nothing to print. The total is rounded
+    /// up to the whole rupee that actually gets collected while the parts above it keep their paise, so the
+    /// gap has to be shown or the column does not add up to the figure under it.
+    ///
+    /// Derived from the document rather than stored on it, which also means a document raised before the
+    /// rounding rule came in reproduces exactly as it was issued, with no line at all.</summary>
+    public static decimal RoundOff(ServiceDocument doc) => doc.TotalAmount
+        - (doc.TaxableAmount + doc.CgstAmount + doc.SgstAmount + doc.IgstAmount + doc.CourierCharges);
+
+    /// <summary>" @ 18%" for the tax line, when every line on the document carries the same GST rate.
+    ///
+    /// The rate goes here rather than into a column of its own: a service table has no width left beside the
+    /// serial, warranty and challan columns, and the money columns are printed tax-exclusive, which only says
+    /// something against a rate shown somewhere. Blank when the lines disagree — one figure would be a lie —
+    /// and blank at 0%, where there is no tax line worth qualifying.</summary>
+    public static string GstRateSuffix(ServiceDocument doc)
+    {
+        var rates = doc.Lines.Select(l => l.GstPercent).Distinct().ToList();
+        return rates.Count == 1 && rates[0] > 0 ? $" @ {rates[0]:0.##}%" : "";
+    }
 
     private static void TotalRow(ColumnDescriptor c, string label, decimal value)
         => c.Item().Row(r =>

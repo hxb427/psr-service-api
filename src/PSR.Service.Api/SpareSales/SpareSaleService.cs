@@ -75,7 +75,10 @@ public class SpareSaleService(AppDbContext db)
 
         sale.TaxableAmount = sale.Lines.Sum(l => l.TaxableAmount);
         sale.TaxAmount = sale.Lines.Sum(l => l.TaxAmount);
-        sale.TotalAmount = sale.TaxableAmount + sale.TaxAmount;
+        // Up to the next whole rupee, the same rule the document totals use — the counter quotes this figure
+        // and then bills it, so the two must not differ by paise. Courier is not on it: that is charged on
+        // the document, which rounds its own total again once the charge is added.
+        sale.TotalAmount = BillMoney.RoundUp(sale.TaxableAmount + sale.TaxAmount);
     }
 
     /// <summary>Sets the sale's party. Returns true when billing a dealer (which picks the dealer rate column).</summary>
