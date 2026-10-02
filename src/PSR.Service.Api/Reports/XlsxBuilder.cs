@@ -5,6 +5,8 @@ namespace PSR.Service.Api.Reports;
 /// <summary>Builds a simple one-sheet XLSX: bold frozen header row + string cells + auto width.</summary>
 public static class XlsxBuilder
 {
+    /// <param name="rows">One list of values per data row, each the same length as
+    /// <paramref name="headers"/> and in the same order.</param>
     /// <param name="localOffsetHours">Hours to add to every timestamp before it is written. The API
     /// stores and works in UTC, but a spreadsheet has nowhere to record a zone — the cell is a bare
     /// wall-clock number — so an unconverted export reads five and a half hours behind the shop that
@@ -23,6 +25,17 @@ public static class XlsxBuilder
         var r = 2;
         foreach (var row in rows)
         {
+            // Every caller builds the headers and the values as two separate array literals, so a
+            // column added to one and not the other is a one-character mistake that writes a
+            // perfectly valid spreadsheet with every value after the gap sitting under the wrong
+            // heading. Nobody reading it would know. A failed export says so; a wrong one does not.
+            if (row.Count != headers.Count)
+                throw new ArgumentException(
+                    $"The \"{sheetName}\" sheet has {headers.Count} column(s), but data row {r - 1} " +
+                    $"carries {row.Count} value(s). The headers and the values are built separately " +
+                    "and have to be kept in step — a row that does not line up files its values " +
+                    "under the wrong headings.", nameof(rows));
+
             for (var c = 0; c < row.Count; c++)
             {
                 var v = row[c];
