@@ -306,34 +306,94 @@ public static class ReportsEndpoints
                           || (x.s.ModelName != null && x.s.ModelName.Contains(v)));
         }
 
-        static ServiceRegisterRow Map(ServiceJob s, string? party, string? tech) => new(
-            s.Id, s.ServiceNo, s.ChallanNo, s.InwardDcNo, party, s.CustomerType,
-            s.SerialNo, s.PsCode, s.ModelName, s.Description, s.ReportedProblem,
-            s.ServiceStatus.ToString(), s.WarrantyStatus.ToString(), s.PaymentStatus.ToString(), s.Priority.ToString(), s.IsTotalLoss,
-            s.PiNo, s.PiDate, s.InvNo, s.InvDate, s.OutwardDcNo, s.OutwardReferenceNo, s.DcDate,
-            tech, s.DateReceived, s.TechnicianRemarks);
-
         if (IsXlsx(format))
         {
-            var all = await q.OrderByDescending(x => x.s.Id).Take(10_000).ToListAsync(ct);
-            var mapped = all.Select(x => Map(x.s, x.Party, x.TechName)).ToList();
+            // The slice stays a query rather than the list just read back from it: it goes in as
+            // the right-hand side of the status-date join, which is what keeps the dates to these
+            // jobs without an ids.Contains(). It costs a second pass over the filter. The two
+            // passes are not one transaction, but dates are looked up BY JOB ID, so a job booked
+            // in between them cannot land a date on the wrong row — at worst the job it pushes
+            // past the 10,000 cap exports with its date columns empty.
+            var slice = q.OrderByDescending(x => x.s.Id).Take(10_000);
+            var all = await slice.ToListAsync(ct);
+            var stamps = await StatusDatesAsync(db, slice.Select(x => x.s.Id), ct);
+            var mapped = all.Select(x => Map(x.s, x.Party, x.TechName, stamps)).ToList();
             return TypedResults.File(XlsxBuilder.Build("Service records",
                 new[] { "Service no", "Challan", "Inward DC", "Customer", "Type", "Serial", "PS code", "Model", "Description",
                         "Problem", "Status", "Warranty", "Payment", "Priority", "Total loss", "PI no", "PI date", "Invoice no",
-                        "Invoice date", "Outward DC", "Outward ref", "DC date", "Technician", "Received", "Remarks" },
+                        "Invoice date", "Outward DC", "Outward ref", "DC date", "Technician", "Received",
+                        "Service completed", "Dispatched", "Stocked", "Replaced", "Written off", "Remarks" },
                 mapped.Select(x => (IReadOnlyList<object?>)new object?[] { x.ServiceNo, x.ChallanNo, x.InwardDcNo, x.CustomerName,
                     x.CustomerType, x.SerialNo, x.PsCode, x.ModelName, x.Description, x.ReportedProblem, x.ServiceStatus,
                     x.WarrantyStatus, x.PaymentStatus, x.Priority, x.IsTotalLoss, x.PiNo, x.PiDate, x.InvNo, x.InvDate,
-                    x.OutwardDcNo, x.OutwardReferenceNo, x.DcDate, x.TechnicianName, x.DateReceived, x.TechnicianRemarks }), shop.Value.LocalUtcOffsetHours),
+                    x.OutwardDcNo, x.OutwardReferenceNo, x.DcDate, x.TechnicianName, x.DateReceived,
+                    x.CompletedAt, x.DispatchedAt, x.StockedAt, x.ReplacedAt, x.WrittenOffAt, x.TechnicianRemarks }),
+                shop.Value.LocalUtcOffsetHours),
                 XlsxMime, "service-register.xlsx");
         }
 
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > 200 ? 50 : pageSize.Value;
         var total = await q.CountAsync(ct);
-        var rows = await q.OrderByDescending(x => x.s.Id).Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
-        var items = rows.Select(x => Map(x.s, x.Party, x.TechName)).ToList();
+        var pageQ = q.OrderByDescending(x => x.s.Id).Skip((pageNum - 1) * size).Take(size);
+        var rows = await pageQ.ToListAsync(ct);
+        var dates = await StatusDatesAsync(db, pageQ.Select(x => x.s.Id), ct);
+        var items = rows.Select(x => Map(x.s, x.Party, x.TechName, dates)).ToList();
         return TypedResults.Ok(new PagedResult<ServiceRegisterRow>(items, pageNum, size, total));
+    }
+
+    private static ServiceRegisterRow Map(
+        ServiceJob s, string? party, string? tech, IReadOnlyDictionary<(long, string), DateTime> firstAt)
+    {
+        DateTime? At(string status) => firstAt.TryGetValue((s.Id, status), out var v) ? v : null;
+
+        // PendingDispatch is the retired spelling of Completed, so a job that stopped there reads as
+        // completed on the day it did rather than leaving the column blank. No job carries both, and
+        // if one did the earlier event is still the day the work finished.
+        var completed = Earliest(At("Completed"), At("PendingDispatch"));
+
+        return new(
+            s.Id, s.ServiceNo, s.ChallanNo, s.InwardDcNo, party, s.CustomerType,
+            s.SerialNo, s.PsCode, s.ModelName, s.Description, s.ReportedProblem,
+            s.ServiceStatus.ToString(), s.WarrantyStatus.ToString(), s.PaymentStatus.ToString(), s.Priority.ToString(), s.IsTotalLoss,
+            s.PiNo, s.PiDate, s.InvNo, s.InvDate, s.OutwardDcNo, s.OutwardReferenceNo, s.DcDate,
+            tech, s.DateReceived,
+            completed, At("Dispatched"), At("Stocked"), At("Replaced"), At("TotalLoss"),
+            s.TechnicianRemarks);
+    }
+
+    /// <summary>Every dated status event belonging to the jobs <paramref name="serviceIds"/> selects,
+    /// in one query. The register wants the day each job was completed and the day it closed, and
+    /// neither is a column on the job — a job carries only the status it is in NOW — so both have to
+    /// come out of the status history.
+    ///
+    /// Exposed so a test can force the provider to translate it, because the shape here is
+    /// load-bearing. History is joined to the register's OWN job query rather than to a list of ids
+    /// read back from the first round trip, which avoids two things at once: an
+    /// <c>ids.Contains()</c>, which hits the EF Core 9 + .NET 10 funcletizer bug this codebase works
+    /// around everywhere (see ServicesEndpoints.BulkIdPredicate), and the min..max id range the TAT
+    /// report uses, which drags in the history of every job that happens to sit between the first and
+    /// last match — on a narrow filter over a long register, very nearly the whole table. A join also
+    /// tolerates the LIMIT paging puts on the right-hand side, where MySQL rejects the same subquery
+    /// under IN.</summary>
+    internal static IQueryable<StatusDateRow> StatusDateQuery(AppDbContext db, IQueryable<long> serviceIds) =>
+        from h in db.ServiceStatusHistory.AsNoTracking()
+        where h.ToStatus == "Completed" || h.ToStatus == "PendingDispatch" || h.ToStatus == "Dispatched"
+              || h.ToStatus == "Stocked" || h.ToStatus == "Replaced" || h.ToStatus == "TotalLoss"
+        join id in serviceIds on h.ServiceId equals id
+        select new StatusDateRow(h.ServiceId, h.ToStatus, h.ChangedAt);
+
+    /// <summary>First event per (job, status), grouped in memory — the house pattern here, and the
+    /// right answer besides: a job can re-enter a status (a dispatched unit that comes back is booked
+    /// in again), and the register means the day it first got there.</summary>
+    private static async Task<Dictionary<(long, string), DateTime>> StatusDatesAsync(
+        AppDbContext db, IQueryable<long> serviceIds, CancellationToken ct)
+    {
+        var firstAt = new Dictionary<(long, string), DateTime>();
+        foreach (var e in await StatusDateQuery(db, serviceIds).ToListAsync(ct))
+            if (!firstAt.TryGetValue((e.ServiceId, e.ToStatus), out var seen) || e.ChangedAt < seen)
+                firstAt[(e.ServiceId, e.ToStatus)] = e.ChangedAt;
+        return firstAt;
     }
 
     // ---------------------------------------------------------------- daily summary
@@ -664,6 +724,10 @@ public static class ReportsEndpoints
 
     private const string XlsxMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     private static bool IsXlsx(string? format) => string.Equals(format, "xlsx", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The earlier of two instants, either of which may be missing.</summary>
+    private static DateTime? Earliest(DateTime? a, DateTime? b)
+        => a is null ? b : b is null ? a : (a <= b ? a : b);
 
     private static async Task<Dictionary<long, string>> TechNamesAsync(AppDbContext db, CancellationToken ct)
         => await db.Users.AsNoTracking().Select(u => new { u.Id, u.Username }).ToDictionaryAsync(x => x.Id, x => x.Username, ct);

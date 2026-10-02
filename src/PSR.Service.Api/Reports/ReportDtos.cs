@@ -23,13 +23,28 @@ public record HeldItemRow(
     long TechnicianId, string TechnicianName, string ItemCode, string PartName, int OnHand);
 
 // ----- service register (master export / global search) -----
+/// <param name="CompletedAt">When the technician's work finished — the job's first Completed event.</param>
+/// <param name="DispatchedAt">When the unit went back to the customer.</param>
+/// <param name="StockedAt">When the unit was taken onto the shop's own shelf instead.</param>
+/// <param name="ReplacedAt">When the unit was written off against a whole-unit replacement.</param>
+/// <param name="WrittenOffAt">When the unit was declared a total loss.</param>
+/// <remarks>The five dates above are read from service_status_history, not from the job: a job stores
+/// only the status it is in NOW, so the day it reached any earlier one is recorded nowhere else. Each
+/// is the FIRST time the job entered that status. Exactly one of the last four is normally set — the
+/// one matching <paramref name="ServiceStatus"/> — and all of them are null on a job still in service.</remarks>
 public record ServiceRegisterRow(
     long Id, string ServiceNo, string? ChallanNo, string? InwardDcNo, string? CustomerName, string? CustomerType,
     string SerialNo, string? PsCode, string? ModelName, string? Description, string? ReportedProblem,
     string ServiceStatus, string WarrantyStatus, string PaymentStatus, string Priority, bool IsTotalLoss,
     string? PiNo, DateTime? PiDate, string? InvNo, DateTime? InvDate,
     string? OutwardDcNo, string? OutwardReferenceNo, DateTime? DcDate,
-    string? TechnicianName, DateTime DateReceived, string? TechnicianRemarks);
+    string? TechnicianName, DateTime DateReceived,
+    DateTime? CompletedAt, DateTime? DispatchedAt, DateTime? StockedAt, DateTime? ReplacedAt, DateTime? WrittenOffAt,
+    string? TechnicianRemarks);
+
+/// <summary>One status event read back for the register: the job, the status it moved INTO, and when.
+/// Internal plumbing for <see cref="ServiceRegisterRow"/>'s dates, never serialized.</summary>
+internal record StatusDateRow(long ServiceId, string ToStatus, DateTime ChangedAt);
 
 // ----- serial ledger (where each deployed serial-tracked unit is) -----
 public record SerialReportRow(
