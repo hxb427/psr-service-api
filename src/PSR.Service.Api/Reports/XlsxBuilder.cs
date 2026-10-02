@@ -5,6 +5,16 @@ namespace PSR.Service.Api.Reports;
 /// <summary>Builds a simple one-sheet XLSX: bold frozen header row + string cells + auto width.</summary>
 public static class XlsxBuilder
 {
+    private const string DateFormat = "yyyy-mm-dd";
+    private const string TimestampFormat = "yyyy-mm-dd hh:mm";
+
+    /// <summary>What each date format needs to render, in the character units Excel measures column
+    /// width in: the format's own length plus a little padding. A date format has no fallback — too
+    /// narrow and the cell shows "####" rather than a shortened date — and its width is fixed, so
+    /// the figure is exact rather than a guess.</summary>
+    private const double DateColumnWidth = 11;
+    private const double TimestampColumnWidth = 17.5;
+
     /// <param name="rows">One list of values per data row, each the same length as
     /// <paramref name="headers"/> and in the same order.</param>
     /// <param name="localOffsetHours">Hours to add to every timestamp before it is written. The API
@@ -21,6 +31,9 @@ public static class XlsxBuilder
             ws.Cell(1, c + 1).Value = headers[c];
         ws.Row(1).Style.Font.Bold = true;
         ws.SheetView.FreezeRows(1);
+
+        // The width each column needs for the widest date format written into it, by column number.
+        var dateColumnWidths = new Dictionary<int, double>();
 
         var r = 2;
         foreach (var row in rows)
@@ -55,11 +68,13 @@ public static class XlsxBuilder
                     // is printed as a bare date, which is the harmless way to be wrong.
                     case DateTime dt when dt.TimeOfDay == TimeSpan.Zero:
                         cell.Value = dt;
-                        cell.Style.DateFormat.Format = "yyyy-mm-dd";
+                        cell.Style.DateFormat.Format = DateFormat;
+                        NeedsWidth(c + 1, DateColumnWidth);
                         break;
                     case DateTime dt:
                         cell.Value = dt.AddHours(localOffsetHours);
-                        cell.Style.DateFormat.Format = "yyyy-mm-dd hh:mm";
+                        cell.Style.DateFormat.Format = TimestampFormat;
+                        NeedsWidth(c + 1, TimestampColumnWidth);
                         break;
                     case bool b: cell.Value = b ? "Yes" : "No"; break;
                     default: cell.Value = v.ToString(); break;
@@ -69,8 +84,27 @@ public static class XlsxBuilder
         }
 
         ws.Columns().AdjustToContents(1, Math.Min(r, 200));   // sample-based autofit, cheap on big sheets
+
+        // The autofit only measured the rows it sampled, so a column whose first value falls past
+        // the sample was measured empty and sized to its heading. A text column merely looks
+        // cramped; a date column narrower than its own format renders as "####", and the date is
+        // unreadable until someone widens it by hand. Several columns hit this reliably rather than
+        // by luck — the register exports newest-first, and a job booked in this morning has no
+        // dispatched, stocked, replaced or written-off date yet, so those columns are empty for as
+        // far down as the sample reaches. Flooring them costs nothing and needs no wider sample,
+        // because a date format's width does not depend on the value.
+        foreach (var (column, width) in dateColumnWidths)
+            if (ws.Column(column).Width < width)
+                ws.Column(column).Width = width;
+
         using var ms = new MemoryStream();
         wb.SaveAs(ms);
         return ms.ToArray();
+
+        void NeedsWidth(int column, double width)
+        {
+            if (!dateColumnWidths.TryGetValue(column, out var seen) || width > seen)
+                dateColumnWidths[column] = width;
+        }
     }
 }
