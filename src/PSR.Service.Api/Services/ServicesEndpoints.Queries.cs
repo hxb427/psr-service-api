@@ -18,7 +18,7 @@ public static partial class ServicesEndpoints
         string? itemName, string? psCode, string? piNo, string? invNo, string? outwardRef,
         string? inwardDcNo, string? outwardDcNo,
         DateTime? fromDate, DateTime? toDate,
-        string? warranty, string? payment, int? minDaysOpen, string? sort, int? page, int? pageSize,
+        string? warranty, string? payment, bool? hasPi, int? minDaysOpen, string? sort, int? page, int? pageSize,
         CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
@@ -137,13 +137,25 @@ public static partial class ServicesEndpoints
             var dc = outwardDcNo.Trim();
             q = q.Where(x => x.s.OutwardDcNo != null && x.s.OutwardDcNo.Contains(dc));
         }
+        // Whether a PI exists at all, which is a different question from which PI it is. The pending
+        // dispatch queue is worked by splitting it in two — the jobs still waiting for a proforma and
+        // the ones already quoted - and the number box above cannot ask that: a blank box means "do
+        // not filter", so there was no way to ask for the jobs carrying no PI.
+        if (hasPi is { } wantPi)
+            q = wantPi
+                ? q.Where(x => x.s.PiNo != null && x.s.PiNo != "")
+                : q.Where(x => x.s.PiNo == null || x.s.PiNo == "");
 
+        // Every sort ends on the id. DateReceived is a DATE and PromisedDate is often null, so a page
+        // of jobs booked the same day is one block of ties — and a tie has no defined order, so the
+        // same job could appear on two pages while another appeared on none. The id is unique and
+        // descending reads as newest-first within the day, which is the order the desk expects.
         var ordered = sort switch
         {
-            "arrived_asc" => q.OrderBy(x => x.s.DateReceived),
-            "arrived_desc" => q.OrderByDescending(x => x.s.DateReceived),
-            "assigned_asc" => q.OrderBy(x => x.s.PromisedDate),
-            "assigned_desc" => q.OrderByDescending(x => x.s.PromisedDate),
+            "arrived_asc" => q.OrderBy(x => x.s.DateReceived).ThenByDescending(x => x.s.Id),
+            "arrived_desc" => q.OrderByDescending(x => x.s.DateReceived).ThenByDescending(x => x.s.Id),
+            "assigned_asc" => q.OrderBy(x => x.s.PromisedDate).ThenByDescending(x => x.s.Id),
+            "assigned_desc" => q.OrderByDescending(x => x.s.PromisedDate).ThenByDescending(x => x.s.Id),
             _ => q.OrderByDescending(x => x.s.Id),
         };
         var total = await q.CountAsync(ct);

@@ -29,6 +29,34 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
+    /// <summary>The line that bills a customer for a unit handed over off the shelf, or null when there
+    /// is nothing to bill.
+    ///
+    /// Both replacement routes end the same way — the customer leaves with a unit the shop owned and
+    /// their own one stays behind — so both have to put the same line on the job, or the PI prices the
+    /// replacement at nothing. It is BILLING-ONLY and never consumes stock: the unit left through its
+    /// own replacement movement, and a job carrying a replacement serial can never be reverted
+    /// (RevertAsync refuses one), so no later step can run over it twice.
+    ///
+    /// In warranty there is nothing to charge, and a null keeps the caller from writing a zero line
+    /// that would read on the document as a unit priced at nothing rather than one given under cover.
+    /// Priced at the customer rate, like every other service line.</summary>
+    internal static ServiceLine? ReplacementBillingLine(ServiceJob job, Part outgoing, string? outgoingSerialNo)
+    {
+        if (job.WarrantyStatus == WarrantyStatus.InWarranty) return null;
+        return new ServiceLine
+        {
+            ServiceId = job.Id,
+            LineType = ServiceLineType.Replacement,
+            PartId = outgoing.Id,
+            Description = $"Replacement unit — {outgoing.Name}",
+            Qty = 1,
+            UnitPrice = outgoing.CustomerRate,
+            Amount = outgoing.CustomerRate,
+            ReplacementSerialNo = string.IsNullOrWhiteSpace(outgoingSerialNo) ? null : outgoingSerialNo.Trim(),
+        };
+    }
+
     /// <summary>Best display name for the job's party (dealer or direct customer), for serial owner_ref.</summary>
     private static async Task<string> PartyLabelAsync(AppDbContext db, ServiceJob job, CancellationToken ct)
     {

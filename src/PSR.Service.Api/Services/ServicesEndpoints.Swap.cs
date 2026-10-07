@@ -176,23 +176,11 @@ public static partial class ServicesEndpoints
                     line.ServiceId = retainedJob.Id;
 
             // 5. The bill. An out-of-warranty customer is being handed a unit off the shelf, and until
-            //    now nothing charged for it — the total-loss route issues a replacement and adds no
-            //    line at all. The line is billing-only and never consumes stock: the unit left through
-            //    its own Replacement movement above, and a job carrying a replacement serial can never
-            //    be reverted (RevertAsync refuses it), so completion can never run over it twice.
-            //    Priced like every other service line, at the customer rate.
-            if (job.WarrantyStatus != WarrantyStatus.InWarranty)
-                db.ServiceLines.Add(new ServiceLine
-                {
-                    ServiceId = job.Id,
-                    LineType = ServiceLineType.Replacement,
-                    PartId = outgoing.Id,
-                    Description = $"Replacement unit — {outgoing.Name}",
-                    Qty = 1,
-                    UnitPrice = outgoing.CustomerRate,
-                    Amount = outgoing.CustomerRate,
-                    ReplacementSerialNo = outgoingSn,
-                });
+            //    this line existed nothing charged for it. Built by the shared helper, which the
+            //    total-loss replacement route also calls — the two are the same handover and must not
+            //    be able to bill it differently.
+            if (ReplacementBillingLine(job, outgoing, outgoingSn) is { } swapBill)
+                db.ServiceLines.Add(swapBill);
 
             // 6. The trail. One row, both ends of the exchange, and what to put back if this is undone.
             db.ServiceReplacements.Add(new ServiceReplacement

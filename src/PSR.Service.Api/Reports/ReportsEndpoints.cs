@@ -283,7 +283,15 @@ public static class ReportsEndpoints
 
         if (from is { } f) q = q.Where(x => x.s.DateReceived >= f.Date);
         if (to is { } t) q = q.Where(x => x.s.DateReceived < t.Date.AddDays(1));
-        if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<ServiceStatus>(status, true, out var st))
+        // PendingDispatch asks for the QUEUE, not the retired status spelling. Nothing has been written
+        // as PendingDispatch since the status was retired in favour of Completed, so matching it exactly
+        // answered "show me everything waiting to go out" with the handful of records old enough to
+        // predate the rename — which reads as the filter being broken. Both spellings come back, which
+        // is the same set the dashboard counts and the service-jobs pending-dispatch tab lists.
+        if (IsPendingDispatchFilter(status))
+            q = q.Where(x => x.s.ServiceStatus == ServiceStatus.Completed
+                          || x.s.ServiceStatus == ServiceStatus.PendingDispatch);
+        else if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<ServiceStatus>(status, true, out var st))
             q = q.Where(x => x.s.ServiceStatus == st);
         if (technicianId is { } tid) q = q.Where(x => x.s.TechnicianId == tid);
         if (!string.IsNullOrWhiteSpace(warranty) && Enum.TryParse<WarrantyStatus>(warranty, true, out var ws))
@@ -341,6 +349,12 @@ public static class ReportsEndpoints
         var items = rows.Select(x => Map(x.s, x.Party, x.TechName, dates)).ToList();
         return TypedResults.Ok(new PagedResult<ServiceRegisterRow>(items, pageNum, size, total));
     }
+
+    /// <summary>Whether the caller asked for the pending-dispatch queue. Its own name is also a retired
+    /// ServiceStatus, so the token has to be recognised BEFORE the enum parse that would otherwise
+    /// narrow it to the legacy rows alone.</summary>
+    private static bool IsPendingDispatchFilter(string? status) =>
+        string.Equals(status?.Trim(), nameof(ServiceStatus.PendingDispatch), StringComparison.OrdinalIgnoreCase);
 
     private static ServiceRegisterRow Map(
         ServiceJob s, string? party, string? tech, IReadOnlyDictionary<(long, string), DateTime> firstAt)

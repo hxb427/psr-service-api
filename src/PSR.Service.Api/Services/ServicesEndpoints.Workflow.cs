@@ -741,6 +741,16 @@ public static partial class ServicesEndpoints
 
             job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
             job.ReplacementPartId = part.Id;
+
+            // The bill for the unit the customer is leaving with. A total-loss job carries no lines of
+            // its own — components and charges are refused once it is marked total loss — so without
+            // this one an OUT-OF-WARRANTY replacement priced to nothing: the generate form opened with
+            // a rate of 0 on the line, and the PI went out billing the customer nothing for a unit
+            // taken off the shelf. Same helper the advance-replacement route uses, so the two cannot
+            // bill the same handover differently.
+            if (ReplacementBillingLine(job, part, job.ReplacementSerialNo) is { } bill)
+                db.ServiceLines.Add(bill);
+
             // Completed, NOT the terminal Replaced. Issuing the replacement finishes the WORK on the
             // job; it does not hand anything to the customer. The unit still has to be billed if it is
             // out of warranty and then physically dispatched, which is exactly what a normally serviced
