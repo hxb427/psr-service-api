@@ -1,0 +1,14 @@
+{
+  "_comment": "Inline policy for the EC2 instance role the API runs under (psr-ec2-ecr-read). The API signs the download URLs that the field portal's updater follows, and a presigned URL carries exactly the permissions of whoever signed it — so without this, /app-versions/latest returns a URL that 403s on the phone while the API itself logs nothing wrong.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadFieldPortalReleasesForPresigning",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::psr-field-portal-releases/*"
+    }
+  ]
+}

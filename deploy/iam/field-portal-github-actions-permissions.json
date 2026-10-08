@@ -1,0 +1,19 @@
+{
+  "_comment": "Attach to the field portal release role. Write-only by design: CI uploads the APK and nothing else. Devices never read the bucket directly — the API presigns a GET for them, which is why no public-read statement belongs here (unlike the WPF Velopack bucket, which is public by necessity).",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteFieldPortalReleasesBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::psr-field-portal-releases",
+        "arn:aws:s3:::psr-field-portal-releases/*"
+      ]
+    }
+  ]
+}
