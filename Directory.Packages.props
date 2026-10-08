@@ -16,6 +16,8 @@
     <PackageVersion Include="MySqlConnector" Version="2.4.0" />
     <!-- Auth & Security -->
     <PackageVersion Include="BCrypt.Net-Next" Version="4.0.3" />
+    <!-- Presigned GET URLs for the field-portal APK feed (AppVersions/S3PresignService). -->
+    <PackageVersion Include="AWSSDK.S3" Version="4.0.23.4" />
     <!-- Pinned transitively via FluentAssertions; current versions still carry GHSA-37gx-xxp4-5rgx +
          GHSA-w3x6-4m5h-cxqf. Used only by test runner — NU1903 suppressed in tests csproj. -->
     <PackageVersion Include="QuestPDF" Version="2026.6.1" />

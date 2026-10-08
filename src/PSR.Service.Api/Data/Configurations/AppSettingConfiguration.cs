@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using PSR.Service.Api.Data.Entities;
 
@@ -18,7 +18,12 @@ public class AppSettingConfiguration : IEntityTypeConfiguration<AppSetting>
             new AppSetting { Key = SettingKeys.InvoiceGenerationEnabled, Value = "true" },
             new AppSetting { Key = SettingKeys.SaleInvoiceGenerationEnabled, Value = "true" });
 
-        // No version floor until an admin sets one — 0.0.0 lets every client through.
-        b.HasData(new AppSetting { Key = SettingKeys.MinClientVersion, Value = "0.0.0" });
+        // No version floor until an admin sets one — 0.0.0 lets every client through. One row per
+        // client: the desktop app and the Android field portal are versioned independently, so they
+        // cannot share a number. The field portal stays at 0.0.0 until its in-app updater is live —
+        // a floor it has no way to satisfy would strand every technician's phone.
+        b.HasData(
+            new AppSetting { Key = SettingKeys.MinClientVersion, Value = "0.0.0" },
+            new AppSetting { Key = SettingKeys.MinFieldPortalVersion, Value = "0.0.0" });
     }
 }

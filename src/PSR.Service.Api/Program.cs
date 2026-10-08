@@ -1,4 +1,6 @@
+﻿using Amazon.S3;
 using Serilog;
+using PSR.Service.Api.AppVersions;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
@@ -30,6 +32,20 @@ builder.Services.AddScoped<SerialService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<SpareSaleService>();
 builder.Services.AddScoped<AppSettingsService>();
+
+// App-versions / in-app updater for the Android field portal. The S3 client picks up credentials
+// from the standard AWS chain — the EC2 instance profile in production — and only ever signs GET
+// URLs, so the release bucket stays private.
+builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
+builder.Services.AddSingleton<IAmazonS3>(sp =>
+{
+    var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3Options>>().Value;
+    return new AmazonS3Client(new AmazonS3Config
+    {
+        RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(opts.Region),
+    });
+});
+builder.Services.AddSingleton<S3PresignService>();
 
 // Passtest (Hostinger MySQL, read-only) — direct connection, results cached.
 builder.Services.Configure<PasstestOptions>(builder.Configuration.GetSection(PasstestOptions.SectionName));
@@ -72,6 +88,7 @@ app.MapServiceEndpoints();
 app.MapSpareSaleEndpoints();
 app.MapDocumentEndpoints();
 app.MapSettingsEndpoints();
+app.MapAppVersionsEndpoints();
 app.MapReportsEndpoints();
 
 await app.ApplyMigrationsAndSeedAsync();

@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,7 +16,8 @@ public record AppSettingsDto(
     bool InvoiceGenerationEnabled, bool SaleInvoiceGenerationEnabled,
     string MinClientVersion, int DefaultWarrantyMonths,
     bool ServiceRecordEditEnabled = false,
-    bool DocumentLineEditEnabled = true);
+    bool DocumentLineEditEnabled = true,
+    string MinFieldPortalVersion = "0.0.0");
 
 /// <summary>Null fields are left untouched, which is what lets an older client that does not know about
 /// the sale switch save the settings it does know without silently turning the other one off.</summary>
@@ -24,10 +25,11 @@ public record UpdateAppSettingsRequest(
     bool InvoiceGenerationEnabled, bool? SaleInvoiceGenerationEnabled,
     string? MinClientVersion, int? DefaultWarrantyMonths,
     bool? ServiceRecordEditEnabled = null,
-    bool? DocumentLineEditEnabled = null);
+    bool? DocumentLineEditEnabled = null,
+    string? MinFieldPortalVersion = null);
 
 /// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
-/// floor. Served on /app-version, which the version gate exempts.</summary>
+/// floor that applies to it. Served on /app-version, which the version gate exempts.</summary>
 public record AppVersionDto(string MinClientVersion);
 
 /// <summary>Reads/writes admin feature toggles. Anyone authenticated can read (so clients can grey out
@@ -66,6 +68,11 @@ public class AppSettingsService(AppDbContext db)
     public Task<string> MinClientVersionAsync(CancellationToken ct)
         => GetStringAsync(SettingKeys.MinClientVersion, "0.0.0", ct);
 
+    /// <summary>The Android field portal's own floor. Separate row from the desktop floor because the
+    /// two apps are numbered independently.</summary>
+    public Task<string> MinFieldPortalVersionAsync(CancellationToken ct)
+        => GetStringAsync(SettingKeys.MinFieldPortalVersion, "0.0.0", ct);
+
     public async Task<int> GetIntAsync(string key, int fallback, CancellationToken ct)
     {
         var v = await db.AppSettings.AsNoTracking().Where(s => s.Key == key).Select(s => s.Value).FirstOrDefaultAsync(ct);
@@ -101,8 +108,17 @@ public static class SettingsEndpoints
         return app;
     }
 
-    private static async Task<Ok<AppVersionDto>> AppVersionAsync(AppSettingsService settings, CancellationToken ct)
-        => TypedResults.Ok(new AppVersionDto(await settings.MinClientVersionAsync(ct)));
+    /// <summary>The floor that applies to the caller, picked by the same X-Client-Id rule the gate
+    /// uses: a client that has just been turned away asks this to learn which version it needs, and
+    /// has to be told its own floor rather than the desktop one. No id sent = the desktop floor, which
+    /// is what every WPF build already in the field expects.</summary>
+    private static async Task<Ok<AppVersionDto>> AppVersionAsync(
+        AppSettingsService settings, HttpContext http, CancellationToken ct)
+    {
+        var clientId = http.Request.Headers[ClientVersionGate.ClientIdHeaderName].FirstOrDefault();
+        var floor = await settings.GetStringAsync(ClientVersionGate.SettingKeyFor(clientId), "0.0.0", ct);
+        return TypedResults.Ok(new AppVersionDto(floor));
+    }
 
     private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
         => TypedResults.Ok(new AppSettingsDto(
@@ -111,7 +127,8 @@ public static class SettingsEndpoints
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct),
             await settings.ServiceRecordEditEnabledAsync(ct),
-            await settings.DocumentLineEditEnabledAsync(ct)));
+            await settings.DocumentLineEditEnabledAsync(ct),
+            await settings.MinFieldPortalVersionAsync(ct)));
 
     private static async Task<Results<Ok<AppSettingsDto>, BadRequest<string>>> UpdateAsync(
         [FromBody] UpdateAppSettingsRequest req, ClaimsPrincipal user,
@@ -121,14 +138,24 @@ public static class SettingsEndpoints
         // Null = older client that doesn't know the field; leave the floor untouched.
         // Empty = clear the floor. Anything else must parse, or a typo like "1..2" would
         // lock every client out of the API at once.
-        string? minToStore = null;
-        if (req.MinClientVersion is not null)
+        static bool TryNormalizeFloor(string? raw, out string? normalized, out string? error)
         {
-            var trimmed = req.MinClientVersion.Trim();
-            if (trimmed.Length == 0) minToStore = "0.0.0";
-            else if (ClientVersionGate.TryParse(trimmed, out var parsed)) minToStore = parsed.ToString(3);
-            else return TypedResults.BadRequest($"'{req.MinClientVersion}' is not a valid version. Use the x.y.z form, e.g. 1.2.0.");
+            normalized = null;
+            error = null;
+            if (raw is null) return true;
+
+            var trimmed = raw.Trim();
+            if (trimmed.Length == 0) { normalized = "0.0.0"; return true; }
+            if (ClientVersionGate.TryParse(trimmed, out var parsed)) { normalized = parsed.ToString(3); return true; }
+
+            error = $"'{raw}' is not a valid version. Use the x.y.z form, e.g. 1.2.0.";
+            return false;
         }
+
+        if (!TryNormalizeFloor(req.MinClientVersion, out var minToStore, out var minError))
+            return TypedResults.BadRequest(minError!);
+        if (!TryNormalizeFloor(req.MinFieldPortalVersion, out var fieldMinToStore, out var fieldMinError))
+            return TypedResults.BadRequest(fieldMinError!);
 
         // Null = older client that doesn't send the field. Negative is meaningless, and an absurd
         // figure would silently mark decade-old machines in warranty, so cap it at 50 years.
@@ -145,6 +172,8 @@ public static class SettingsEndpoints
         {
             if (minToStore is not null && minToStore != await settings.MinClientVersionAsync(ct))
                 return TypedResults.BadRequest("Only an admin can change the minimum allowed app version.");
+            if (fieldMinToStore is not null && fieldMinToStore != await settings.MinFieldPortalVersionAsync(ct))
+                return TypedResults.BadRequest("Only an admin can change the minimum allowed field portal version.");
             if (req.DefaultWarrantyMonths is { } wanted && wanted != await settings.DefaultWarrantyMonthsAsync(ct))
                 return TypedResults.BadRequest("Only an admin can change the default warranty length.");
             // Also admin-only: this one decides whether managers and supervisors may rewrite booked
@@ -164,11 +193,14 @@ public static class SettingsEndpoints
             await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
         if (req.ServiceRecordEditEnabled is { } editFlag && isAdmin)
             await settings.SetBoolAsync(SettingKeys.ServiceRecordEditEnabled, editFlag, ct);
-        if (minToStore is not null && isAdmin)
+        if (isAdmin && (minToStore is not null || fieldMinToStore is not null))
         {
-            await settings.SetStringAsync(SettingKeys.MinClientVersion, minToStore, ct);
-            // The gate caches the floor for 60s; evicting makes a raise bite immediately.
-            cache.Remove(ClientVersionGate.CacheKey);
+            if (minToStore is not null)
+                await settings.SetStringAsync(SettingKeys.MinClientVersion, minToStore, ct);
+            if (fieldMinToStore is not null)
+                await settings.SetStringAsync(SettingKeys.MinFieldPortalVersion, fieldMinToStore, ct);
+            // The gate caches each floor for 60s; evicting makes a raise bite immediately.
+            ClientVersionGate.EvictCachedFloors(cache);
         }
 
         user.TryGetUserId(out var uid);
@@ -177,6 +209,7 @@ public static class SettingsEndpoints
                    + (req.SaleInvoiceGenerationEnabled is { } sf ? $", {SettingKeys.SaleInvoiceGenerationEnabled}={sf}" : "")
                    + (req.DocumentLineEditEnabled is { } le ? $", {SettingKeys.DocumentLineEditEnabled}={le}" : "")
                    + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : "")
+                   + (fieldMinToStore is not null ? $", {SettingKeys.MinFieldPortalVersion}={fieldMinToStore}" : "")
                    + (req.DefaultWarrantyMonths is { } d ? $", {SettingKeys.DefaultWarrantyMonths}={d}" : "")
                    + (req.ServiceRecordEditEnabled is { } e ? $", {SettingKeys.ServiceRecordEditEnabled}={e}" : ""),
             ip: http.GetIp());
@@ -188,6 +221,7 @@ public static class SettingsEndpoints
             await settings.MinClientVersionAsync(ct),
             await settings.DefaultWarrantyMonthsAsync(ct),
             await settings.ServiceRecordEditEnabledAsync(ct),
-            await settings.DocumentLineEditEnabledAsync(ct)));
+            await settings.DocumentLineEditEnabledAsync(ct),
+            await settings.MinFieldPortalVersionAsync(ct)));
     }
 }

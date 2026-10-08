@@ -1,4 +1,4 @@
-namespace PSR.Service.Api.Data.Entities;
+﻿namespace PSR.Service.Api.Data.Entities;
 
 /// <summary>Key/value application settings — admin-editable feature toggles (e.g. whether invoice
 /// generation is allowed). Read by everyone; written only by admins.</summary>
@@ -19,10 +19,21 @@ public static class SettingKeys
     /// continues (or the reverse) is the whole point of having a switch.</summary>
     public const string SaleInvoiceGenerationEnabled = "sale_invoice_generation_enabled";
 
-    /// <summary>Oldest WPF client version allowed to talk to this API. Clients below it get
-    /// 426 Upgrade Required on everything except /health and /app-version, which is what makes a
-    /// mandatory update actually mandatory — the app is useless until updated. "0.0.0" = no floor.</summary>
+    /// <summary>Oldest WPF desktop client allowed to talk to this API. Clients below it get
+    /// 426 Upgrade Required on everything except /health, /app-version and /app-versions, which is what
+    /// makes a mandatory update actually mandatory — the app is useless until updated. "0.0.0" = no floor.
+    ///
+    /// Keeps its original key, and remains the floor applied to any caller that sends no X-Client-Id:
+    /// desktop builds already in the field predate that header and must keep behaving as they did.</summary>
     public const string MinClientVersion = "min_client_version";
+
+    /// <summary>Oldest Android field-portal build allowed to talk to this API. Separate from the desktop
+    /// floor because the two apps are versioned independently — the field portal is on 0.x while the
+    /// desktop app is past 1.2, so one shared number could only ever lock out one of them.
+    ///
+    /// Leave at "0.0.0" until the in-app updater is actually shipping builds: a floor with no delivery
+    /// mechanism is not a mandatory update, it is a brick, and the phone has no other way back.</summary>
+    public const string MinFieldPortalVersion = "min_field_portal_version";
 
     /// <summary>Warranty length in months to assume when a machine's dealer cannot be resolved — a
     /// direct-customer job, or a warranty check typed against a serial that was never inwarded here.

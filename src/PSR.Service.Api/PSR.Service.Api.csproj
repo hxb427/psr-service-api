@@ -25,6 +25,7 @@
     <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" />
     <PackageReference Include="MySqlConnector" />
     <PackageReference Include="BCrypt.Net-Next" />
+    <PackageReference Include="AWSSDK.S3" />
     <PackageReference Include="QuestPDF" />
     <PackageReference Include="Serilog.AspNetCore" />
     <PackageReference Include="Serilog.Sinks.File" />

@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Data;
@@ -43,6 +43,7 @@ public class AppDbContext : DbContext
     public DbSet<ServiceDocument> ServiceDocuments => Set<ServiceDocument>();
     public DbSet<ServiceDocumentLine> ServiceDocumentLines => Set<ServiceDocumentLine>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<AppVersion> AppVersions => Set<AppVersion>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
