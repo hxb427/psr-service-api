@@ -16,6 +16,10 @@ Before applying any of them, do a global find/replace:
 - `REPLACE_ACCOUNT_ID` → your 12-digit AWS account ID
 - `REPLACE_GITHUB_OWNER` → your GitHub username or org name
 
+The three `field-portal-*` / `api-s3-*` files need no find/replace — they are already filled in
+for this account. Every file here carries a `_comment` key for context; strip it before pasting,
+since the IAM console rejects unknown top-level keys.
+
 (The OIDC provider itself — `token.actions.githubusercontent.com` — should already exist in your AWS account from the sales setup. If not, see step 5 in `aws-setup.md`.)
 
 The three `field-portal-*` / `api-s3-*` files belong to the Android update system — see
