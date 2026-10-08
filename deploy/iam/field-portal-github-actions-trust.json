@@ -1,12 +1,12 @@
 {
-  "_comment": "GitHub sends OIDC subjects with immutable numeric IDs appended to the owner and repo (repo:owner@OWNERID/repo@REPOID:ref:...), NOT the plain name form. A trust policy written against names is silently denied with 'Not authorized to perform sts:AssumeRoleWithWebIdentity'. Get the real subject before creating the role: push a tag once, let the job fail at the AWS credentials step, then read CloudTrail > Event history > AssumeRoleWithWebIdentity > userIdentity.userName and paste that value below with the ref wildcarded. The IDs never change, so pinning them is both correct and rename-proof.",
+  "_comment": "Matches BOTH subject forms GitHub may send. The plain form is repo:owner/repo:ref:...; newer tokens carry immutable numeric IDs appended (repo:owner@OWNERID/repo@REPOID:ref:...), and a policy written for only one of them is denied with 'Not authorized to perform sts:AssumeRoleWithWebIdentity' and nothing explaining why. StringLike matches if ANY listed value matches, so listing both is correct rather than lax. The owner id (168718510 = hxb427) is pinned because it is immutable and is what stops another account's same-named repo matching; only the repo id is wildcarded, since it cannot be read without an authenticated API call and the owner+name pair already identifies the repo. Confirm the real subject in CloudTrail > Event history > AssumeRoleWithWebIdentity > userIdentity.userName if the assume ever fails.",
   "Version": "2012-10-17",
   "Statement": [
     {
       "Sid": "AllowGitHubActionsFromFieldPortalRepoTags",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::REPLACE_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::423693203837:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
@@ -14,7 +14,10 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:REPLACE_OWNER@REPLACE_OWNER_ID/field-portal-android@REPLACE_REPO_ID:ref:refs/tags/v*"
+          "token.actions.githubusercontent.com:sub": [
+            "repo:hxb427/field-portal-android:ref:refs/tags/v*",
+            "repo:hxb427@168718510/field-portal-android@*:ref:refs/tags/v*"
+          ]
         }
       }
     }

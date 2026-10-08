@@ -64,37 +64,62 @@ No API restart needed — the SDK picks up instance-role credentials per request
 
 ## Step 3 — Create the GitHub Actions role for the app repo
 
+This role is what lets the release workflow upload to S3 without any long-lived AWS key: GitHub
+mints a short-lived OIDC token per run, AWS checks it against the role's trust policy, and hands
+back temporary credentials.
+
 **Console → IAM → Roles → Create role → Custom trust policy**
 
-Paste [`deploy/iam/field-portal-github-actions-trust.json`](../deploy/iam/field-portal-github-actions-trust.json),
-replacing `REPLACE_ACCOUNT_ID` with `423693203837` and the owner/repo ID placeholders as described
-below. Name the role `psr-field-portal-github-actions`.
+Paste [`deploy/iam/field-portal-github-actions-trust.json`](../deploy/iam/field-portal-github-actions-trust.json)
+(drop the `_comment` key — the console rejects unknown top-level keys). It is already filled in for
+this account, so nothing needs replacing. Next → skip attaching managed policies → name the role
+`psr-field-portal-github-actions` → Create.
 
-Then **Add permissions → Create inline policy → JSON** and paste
-[`field-portal-github-actions-permissions.json`](../deploy/iam/field-portal-github-actions-permissions.json).
+Then open the role → **Add permissions → Create inline policy → JSON**, paste
+[`field-portal-github-actions-permissions.json`](../deploy/iam/field-portal-github-actions-permissions.json),
+name it `psr-field-portal-releases-write`, Create.
 
-### Getting the OIDC subject right
+Copy the role ARN from the top of the page — it goes into `AWS_ROLE_TO_ASSUME` in Step 5. It will
+read `arn:aws:iam::423693203837:role/psr-field-portal-github-actions`.
 
-This is the step that bites. GitHub sends subjects with **immutable numeric IDs** appended:
+### What the trust policy is actually matching
+
+Two conditions have to hold, and the second is where this usually goes wrong.
+
+`aud` must be `sts.amazonaws.com` — fixed, nothing to think about.
+
+`sub` is the identity of the *workflow run*. GitHub builds it from the repo and the git ref, and
+sends one of two shapes:
 
 ```
-repo:hxb427@<OWNER_ID>/field-portal-android@<REPO_ID>:ref:refs/tags/v0.2.0
+repo:hxb427/field-portal-android:ref:refs/tags/v0.2.0                    (plain)
+repo:hxb427@168718510/field-portal-android@<REPO_ID>:ref:refs/tags/v0.2.0 (immutable IDs)
 ```
 
-A trust policy written against plain names is denied with `Not authorized to perform
-sts:AssumeRoleWithWebIdentity`, and nothing in the error says why. Do not guess the IDs — read
-the real subject:
+The template lists **both**, because `StringLike` on a list matches if any one value matches. That
+is why no numeric repo ID is needed: the owner ID `168718510` is pinned (immutable, and it is what
+stops another account's identically-named repo from matching), the repo *name* is pinned, and only
+the repo ID is wildcarded. The `:ref:refs/tags/v*` tail is what restricts this role to tag pushes —
+a push to `master` produces `ref:refs/heads/master`, which matches neither pattern and is correctly
+refused.
 
-1. Create the role with the trust policy as-is (placeholders intact; it will not match yet).
-2. Push a tag so the workflow runs and fails at **Configure AWS credentials**.
-3. **CloudTrail → Event history → Event name `AssumeRoleWithWebIdentity`** → open the failed event
-   → copy `userIdentity.userName`. That is the exact subject.
-4. Paste it into the trust policy, replacing everything up to `:ref:` and leaving `:ref:refs/tags/v*`
-   wildcarded.
+### If the assume still fails
 
-The IDs never change, so pinning them survives a repo or org rename.
+The error is always the same unhelpful line:
 
----
+```
+Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+Do not guess at it — read the subject AWS actually received:
+
+1. **CloudTrail → Event history**, filter **Event name = `AssumeRoleWithWebIdentity`**.
+2. Open the failed event (it is logged even though it was denied).
+3. Read `userIdentity.userName` — that string is the exact `sub` GitHub sent.
+4. Add it to the `sub` list in the trust policy, wildcarding the ref tail.
+
+The same lesson is recorded against the WPF role in `wpf-github-actions-trust.json`; it is the one
+part of this setup that gives no useful feedback on its own.
 
 ## Step 4 — Create the Android signing keystore
 
