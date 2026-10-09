@@ -136,6 +136,12 @@ public static class FieldOpsEndpoints
         if (part is null) return (null, $"Part {partId} not found.");
 
         var sn = serialNo?.Trim();
+
+        // What the line is allowed to say is decided in one place (FieldLineRules), so the rule
+        // reads as a rule rather than as the shape of the ifs below.
+        var ruleError = FieldLineRules.Validate(kind, part, qty, sn);
+        if (ruleError is not null) return (null, ruleError);
+
         var line = new FieldServiceLine
         {
             Kind = kind, PartId = partId, Qty = qty, SerialNo = sn, Defective = defective,
@@ -145,13 +151,8 @@ public static class FieldOpsEndpoints
 
         if (kind == FieldLineKind.Used)
         {
-            // Serial-tracked units are consumed one per line with their serial named.
             if (part.IsSerialTracked)
             {
-                if (string.IsNullOrWhiteSpace(sn))
-                    return (null, $"{part.ItemCode} is serial-tracked — name the fitted serial.");
-                if (qty != 1)
-                    return (null, $"{part.ItemCode} is serial-tracked — one line per unit (qty 1).");
                 var err = await serial.ValidateFittedSerialAsync(partId, sn!, uid, ct, techName, uid, part.Name);
                 if (err is not null) return (null, err);
             }
@@ -162,13 +163,10 @@ public static class FieldOpsEndpoints
         }
         else // Collected — faulty unit taken from the customer; no stock consumption.
         {
-            // Only a tracked part has a unit to follow. A non-tracked one is counted, not identified,
-            // so demanding a serial for it (as this used to, for every part) asked for something that
-            // is not written on the item.
-            if (!part.IsSerialTracked) return (line, null);
-            if (string.IsNullOrWhiteSpace(sn))
-                return (null, $"{part.ItemCode} is serial-tracked — name the collected unit's serial.");
-            await serial.CollectFromCustomerAsync(partId, sn!, part.Name, uid, techName, defective, uid, ct, customerId);
+            // An unnamed unit is recorded as a quantity on the line and stays outside serial
+            // tracking — see FieldLineRules for why that is allowed.
+            if (FieldLineRules.CollectedEntersSerialTracking(part, sn))
+                await serial.CollectFromCustomerAsync(partId, sn!, part.Name, uid, techName, defective, uid, ct, customerId);
         }
         return (line, null);
     }

@@ -40,10 +40,46 @@ public static class StockReturnsEndpoints
             q = q.Where(x => x.r.Status == st);
 
         var rows = await q.OrderByDescending(x => x.r.Id).ToListAsync(ct);
+        var ids = rows.Select(x => x.r.Id).ToList();
+
+        // Serials and the jobs raised off each shipment used to be omitted here and filled in only
+        // on the single-return responses, which left both callers of this list blind: the technician
+        // could not see which units they had shipped, and the service centre could not see what it
+        // was being asked to book in without acknowledging it first. Loaded in two batched reads
+        // rather than per row, so a long list is still two queries.
+        var serialsByReturn = await (from s in db.StockReturnSerials.AsNoTracking()
+                                     where ids.Contains(s.StockReturnId)
+                                     join c in db.ComponentSerials on s.ComponentSerialId equals c.Id
+                                     select new
+                                     {
+                                         s.StockReturnId,
+                                         Dto = new StockReturnSerialDto(
+                                             c.Id, c.SerialNumber, s.Defective, c.Status.ToString()),
+                                     })
+            .ToListAsync(ct);
+        var serialLookup = serialsByReturn
+            .GroupBy(x => x.StockReturnId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Dto).ToList());
+
+        // Keyed off the challan the faulty-return path stamps onto every job it opens.
+        var challanNos = rows.Select(x => $"RTN-{x.r.ReturnNo}").ToList();
+        var jobs = await db.Services.AsNoTracking()
+            .Where(j => j.ChallanNo != null && challanNos.Contains(j.ChallanNo)
+                        && j.SourceComponentSerialId != null)
+            .OrderBy(j => j.Id)
+            .Select(j => new { j.ChallanNo, j.ServiceNo })
+            .ToListAsync(ct);
+        var jobLookup = jobs
+            .GroupBy(j => j.ChallanNo!)
+            .ToDictionary(g => g.Key, g => g.Select(j => j.ServiceNo).ToList());
+
         var items = rows.Select(x => new StockReturnDto(
             x.r.Id, x.r.ReturnNo, x.r.TechnicianId, x.Username, x.r.PartId, x.ItemCode, x.Name,
             x.r.Qty, x.r.Status.ToString(), x.r.AcknowledgedDate, x.r.Remarks, x.r.CreatedAt,
-            x.r.Courier, x.r.TrackingNo, null, x.r.Kind.ToString())).ToList();
+            x.r.Courier, x.r.TrackingNo,
+            serialLookup.TryGetValue(x.r.Id, out var ser) ? ser : null,
+            x.r.Kind.ToString(),
+            jobLookup.TryGetValue($"RTN-{x.r.ReturnNo}", out var nos) ? nos : null)).ToList();
         return TypedResults.Ok(items);
     }
 
