@@ -1,4 +1,4 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -15,9 +15,6 @@ namespace PSR.Service.Api.Stock;
 /// from responses for non-pricing roles.</summary>
 public static class FieldOpsEndpoints
 {
-    private static readonly string[] PricingRoles =
-        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer };
-
     public static IEndpointRouteBuilder MapFieldOpsEndpoints(this IEndpointRouteBuilder app)
     {
         var services = app.MapGroup("/field-services").WithTags("field-services").RequireAuthorization();
@@ -82,6 +79,21 @@ public static class FieldOpsEndpoints
         var techName = tech.FullName ?? tech.Username;
         var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
+        // Everything that can be refused without touching the database is refused first, so a bad
+        // enum spelling cannot leave a half-written visit behind to be rolled back.
+        var (rateType, rateErr) = FieldVisitRules.ParseRateType(req.RateType);
+        if (rateErr is not null) return TypedResults.BadRequest(rateErr);
+        var (payment, payErr) = FieldVisitRules.ParsePaymentMethod(req.PaymentMethod);
+        if (payErr is not null) return TypedResults.BadRequest(payErr);
+        var (warranty, warrErr) = FieldVisitRules.ParseWarrantyStatus(req.WarrantyStatus);
+        if (warrErr is not null) return TypedResults.BadRequest(warrErr);
+        if (FieldVisitRules.ValidateFix(req.Latitude, req.Longitude) is { } fixErr)
+            return TypedResults.BadRequest(fixErr);
+        if (await ValidatePlaceAsync(db, req.StateId, req.DistrictId, ct) is { } placeErr)
+            return TypedResults.BadRequest(placeErr);
+        var (charge, chargeErr) = await ResolveServiceChargeAsync(db, req.ServiceChargeId, ct);
+        if (chargeErr is not null) return TypedResults.BadRequest(chargeErr);
+
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         FieldService fs;
         try
@@ -94,23 +106,49 @@ public static class FieldOpsEndpoints
                 TicketId = NormalizeTicketRef(req.TicketId),
                 TicketNumber = NormalizeTicketRef(req.TicketNumber),
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), MachineSerial = req.MachineSerial?.Trim(),
-                Complaint = req.Complaint?.Trim(), WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
+                Complaint = req.Complaint?.Trim(), Cause = req.Cause?.Trim(),
+                WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
+                RateType = rateType,
+                ServiceChargeId = charge?.Id,
+                // Snapshotted, not joined on read: the charge may be renamed or repriced tomorrow and
+                // this record has to keep saying what the customer was told today.
+                ServiceChargeDescription = charge?.Name,
+                ServiceChargeAmount = charge?.Charge ?? 0m,
+                ServiceChargeTaxPercent = charge?.TaxPercent ?? 0m,
+                PaymentMethod = payment,
+                WarrantyStatus = warranty,
+                LocationLabel = Trimmed(req.LocationLabel),
+                Latitude = req.Latitude, Longitude = req.Longitude,
+                StateId = req.StateId, DistrictId = req.DistrictId,
                 CreatedByUserId = uid,
             };
             db.FieldServices.Add(fs);
             await db.SaveChangesAsync(ct);   // id for line FKs + reference id
 
+            var lines = new List<FieldServiceLine>();
             foreach (var lineReq in req.Lines ?? [])
             {
                 var (line, err) = await BuildLineAsync(db, ledger, serial, lineReq.Kind, lineReq.PartId,
                     lineReq.Qty, lineReq.SerialNo, lineReq.Defective, uid, techName,
-                    fs.CustomerName, customerId, "FIELD_SERVICE", fs.Id, ct);
+                    fs.CustomerName, customerId, "FIELD_SERVICE", fs.Id, rateType, ct);
                 if (err is not null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(err); }
                 line!.FieldServiceId = fs.Id;
                 db.FieldServiceLines.Add(line);
+                lines.Add(line);
             }
 
-            audit.Log(uid, "field-service.create", "field_service", fs.Id, details: fs.ServiceNo, ip: http.GetIp());
+            // Computed here from the lines the server just priced, never from anything the client sent.
+            var totals = FieldVisitRules.Totals(
+                lines.Select(l => (l.Amount, l.TaxAmount)),
+                fs.ServiceChargeAmount, fs.ServiceChargeTaxPercent, warranty);
+            fs.TaxableAmount = totals.Taxable;
+            fs.TaxAmount = totals.Tax;
+            fs.TotalAmount = totals.Total;
+            fs.AmountPayable = totals.Payable;
+
+            audit.Log(uid, "field-service.create", "field_service", fs.Id,
+                details: $"{fs.ServiceNo} {fs.RateType} total {fs.TotalAmount:0.##} payable {fs.AmountPayable:0.##}",
+                ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -128,7 +166,7 @@ public static class FieldOpsEndpoints
         AppDbContext db, StockLedgerService ledger, SerialService serial,
         string kindRaw, long partId, int qty, string? serialNo, bool defective,
         long uid, string techName, string customerName, long? customerId,
-        string referenceType, long referenceId, CancellationToken ct)
+        string referenceType, long referenceId, FieldRateType rateType, CancellationToken ct)
     {
         if (!Enum.TryParse<FieldLineKind>(kindRaw, true, out var kind))
             return (null, $"Unknown line kind '{kindRaw}'.");
@@ -145,9 +183,13 @@ public static class FieldOpsEndpoints
         var line = new FieldServiceLine
         {
             Kind = kind, PartId = partId, Qty = qty, SerialNo = sn, Defective = defective,
-            UnitPrice = kind == FieldLineKind.Used ? part.CustomerRate : 0m,
+            // A collected unit is not billed: it is the customer's own broken part coming off their
+            // machine, and it rides the record for traceability rather than for money.
+            UnitPrice = kind == FieldLineKind.Used ? FieldVisitRules.UnitRate(part, rateType) : 0m,
+            GstPercent = kind == FieldLineKind.Used ? part.GstPercent : 0m,
         };
-        line.Amount = line.UnitPrice * qty;
+        line.Amount = Math.Round(line.UnitPrice * qty, 2);
+        line.TaxAmount = FieldVisitRules.Tax(line.Amount, line.GstPercent);
 
         if (kind == FieldLineKind.Used)
         {
@@ -203,6 +245,15 @@ public static class FieldOpsEndpoints
         var techName = tech.FullName ?? tech.Username;
         var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
+        var (rateType, rateErr) = FieldVisitRules.ParseRateType(req.RateType);
+        if (rateErr is not null) return TypedResults.BadRequest(rateErr);
+        var (payment, payErr) = FieldVisitRules.ParsePaymentMethod(req.PaymentMethod);
+        if (payErr is not null) return TypedResults.BadRequest(payErr);
+        if (FieldVisitRules.ValidateFix(req.Latitude, req.Longitude) is { } fixErr)
+            return TypedResults.BadRequest(fixErr);
+        if (await ValidatePlaceAsync(db, req.StateId, req.DistrictId, ct) is { } placeErr)
+            return TypedResults.BadRequest(placeErr);
+
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         FieldSale sale;
         try
@@ -213,11 +264,16 @@ public static class FieldOpsEndpoints
                 SaleNo = no, TechnicianId = uid, CustomerName = req.CustomerName.Trim(),
                 CustomerId = customerId,
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), Remarks = req.Remarks?.Trim(),
+                RateType = rateType, PaymentMethod = payment,
+                LocationLabel = Trimmed(req.LocationLabel),
+                Latitude = req.Latitude, Longitude = req.Longitude,
+                StateId = req.StateId, DistrictId = req.DistrictId,
                 CreatedByUserId = uid,
             };
             db.FieldSales.Add(sale);
             await db.SaveChangesAsync(ct);
 
+            var saleLines = new List<FieldSaleLine>();
             foreach (var lineReq in req.Lines)
             {
                 var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == lineReq.PartId, ct);
@@ -240,15 +296,27 @@ public static class FieldOpsEndpoints
                     await serial.InstallToCustomerAsync(lineReq.PartId, sn!, part.Name, sale.CustomerName,
                         SerialStatus.Used, uid, ct, customerId);
 
-                var unit = part.CustomerRate;
-                db.FieldSaleLines.Add(new FieldSaleLine
+                var unit = FieldVisitRules.UnitRate(part, rateType);
+                var taxable = Math.Round(unit * lineReq.Qty, 2);
+                saleLines.Add(new FieldSaleLine
                 {
                     FieldSaleId = sale.Id, PartId = lineReq.PartId, Qty = lineReq.Qty,
-                    SerialNo = sn, UnitPrice = unit, Amount = unit * lineReq.Qty,
+                    SerialNo = sn, UnitPrice = unit, Amount = taxable,
+                    GstPercent = part.GstPercent,
+                    TaxAmount = FieldVisitRules.Tax(taxable, part.GstPercent),
                 });
             }
+            db.FieldSaleLines.AddRange(saleLines);
 
-            audit.Log(uid, "field-sale.create", "field_sale", sale.Id, details: sale.SaleNo, ip: http.GetIp());
+            // A sale carries no warranty, so its total IS what the customer pays.
+            var totals = FieldVisitRules.Totals(
+                saleLines.Select(l => (l.Amount, l.TaxAmount)), 0m, 0m, warranty: null);
+            sale.TaxableAmount = totals.Taxable;
+            sale.TaxAmount = totals.Tax;
+            sale.TotalAmount = totals.Total;
+
+            audit.Log(uid, "field-sale.create", "field_sale", sale.Id,
+                details: $"{sale.SaleNo} {sale.RateType} total {sale.TotalAmount:0.##}", ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -257,6 +325,46 @@ public static class FieldOpsEndpoints
         var loaded = await db.FieldSales.AsNoTracking().Include(f => f.Lines).FirstAsync(f => f.Id == sale.Id, ct);
         return TypedResults.Created($"/field-sales/{sale.Id}", await SaleToDtoAsync(db, loaded, CanSeePricing(user), ct));
     }
+
+    /// <summary>The chosen service charge, read from the catalogue so the record is priced by the
+    /// server. An id that does not resolve is refused rather than dropped, unlike a stale customer id
+    /// below: a customer id that no longer exists loses a link, while a charge id that no longer
+    /// exists loses money off the bill, and the technician has already quoted that figure.</summary>
+    private static async Task<(ServiceCharge? charge, string? error)> ResolveServiceChargeAsync(
+        AppDbContext db, long? chargeId, CancellationToken ct)
+    {
+        if (chargeId is not { } id) return (null, null);
+        var sc = await db.ServiceCharges.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (sc is null) return (null, $"Service charge {id} was not found.");
+        // An inactive charge is still honoured if somehow asked for: it was on the list when the
+        // technician opened the form, and refusing the save over a catalogue change made between the
+        // quote and the drive home would be a strange way to find out.
+        return (sc, null);
+    }
+
+    /// <summary>Why the state/district pair cannot be accepted, or null when it can.
+    ///
+    /// The pair is what is checked, not each half: a district id that belongs to a different state is
+    /// the one error worth catching here, because every "how is this technician's district doing"
+    /// question is answered by grouping on these two, and a mismatched pair poisons the grouping
+    /// silently rather than failing.</summary>
+    private static async Task<string?> ValidatePlaceAsync(
+        AppDbContext db, int? stateId, int? districtId, CancellationToken ct)
+    {
+        if (stateId is { } sid && !await db.IndianStates.AsNoTracking().AnyAsync(x => x.Id == sid, ct))
+            return $"State {sid} was not found.";
+        if (districtId is not { } did) return null;
+
+        var district = await db.Districts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == did, ct);
+        if (district is null) return $"District {did} was not found.";
+        if (stateId is null) return "Name the state the district belongs to.";
+        if (district.StateId != stateId)
+            return $"{district.Name} is not a district of the state you picked.";
+        return null;
+    }
+
+    private static string? Trimmed(string? s) =>
+        string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     /// <summary>A field customer may be an existing account picked from the list, or a name typed on
     /// the spot. Only the first kind can be linked, and an id that no longer resolves is dropped
@@ -289,7 +397,19 @@ public static class FieldOpsEndpoints
 
     // ---------------------------------------------------------------- mapping
 
-    private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);
+    /// <summary>Whether this caller reads the money on a field record.
+    ///
+    /// A technician now does, where before they read every figure as null. The widening is safe here
+    /// without any extra scoping, and that is worth saying out loud: the list queries above already
+    /// narrow a non-manage caller to <c>TechnicianId == uid</c>, so the only priced records a
+    /// technician can reach are the ones they wrote. They are also the person who quoted those figures
+    /// to the customer and took the money for them, so there is nothing on their own record they have
+    /// not already seen.
+    ///
+    /// Purchase rates are a different matter and never appear here — a field line carries a selling
+    /// rate and its tax, not what the shop paid. See <see cref="PricingVisibility"/>.</summary>
+    private static bool CanSeePricing(ClaimsPrincipal user) =>
+        PricingVisibility.For(user) != PricingScope.None;
 
     /// <summary>The second half of the field-ops gate. The route's policy has already established that
     /// the caller is a technician; this establishes that they are the kind who carries stock off-site.
@@ -307,16 +427,50 @@ public static class FieldOpsEndpoints
     {
         var techName = await TechNameAsync(db, f.TechnicianId, ct);
         var parts = await PartsForAsync(db, f.Lines.Select(l => l.PartId), ct);
+        var (stateName, districtName) = await PlaceNamesAsync(db, f.StateId, f.DistrictId, ct);
         var lines = f.Lines.Select(l => new FieldServiceLineDto(
             l.Id, l.Kind.ToString(), l.PartId,
             parts.TryGetValue(l.PartId, out var p) ? p.ItemCode : $"#{l.PartId}", p?.Name ?? string.Empty,
             l.Qty, l.SerialNo, l.Defective,
-            pricing ? l.UnitPrice : null, pricing ? l.Amount : null)).ToList();
+            pricing ? l.UnitPrice : null, pricing ? l.Amount : null,
+            pricing ? l.GstPercent : null, pricing ? l.TaxAmount : null,
+            pricing ? l.Amount + l.TaxAmount : null,
+            // HSN comes off the live part rather than a snapshot: a part's HSN is a tax
+            // classification that does not change with a price, and carrying a column for it would
+            // be a column that never differs from the master.
+            pricing ? p?.HsnCode : null)).ToList();
         return new FieldServiceDto(
             f.Id, f.ServiceNo, f.TechnicianId, techName, f.CustomerName, f.Phone, f.Place,
             f.MachineSerial, f.Complaint, f.WorkDone, f.Remarks, f.CreatedAt,
-            pricing ? f.Lines.Sum(l => l.Amount) : null, lines,
-            f.TicketId, f.TicketNumber);
+            pricing ? f.TotalAmount : null, lines,
+            f.TicketId, f.TicketNumber,
+            f.Cause,
+            f.RateType.ToString(),
+            f.ServiceChargeId, f.ServiceChargeDescription,
+            pricing ? f.ServiceChargeAmount : null,
+            pricing ? f.ServiceChargeTaxPercent : null,
+            f.PaymentMethod?.ToString(), f.WarrantyStatus?.ToString(),
+            pricing ? f.TaxableAmount : null, pricing ? f.TaxAmount : null,
+            pricing ? f.AmountPayable : null,
+            f.LocationLabel, f.Latitude, f.Longitude,
+            f.StateId, stateName, f.DistrictId, districtName);
+    }
+
+    /// <summary>State and district names for a record, in one round trip each. Resolved on read rather
+    /// than snapshotted onto the record: unlike a rate, a district is not renamed to mean something
+    /// different, and an id that still points at the same place is the more honest thing to store.</summary>
+    private static async Task<(string? state, string? district)> PlaceNamesAsync(
+        AppDbContext db, int? stateId, int? districtId, CancellationToken ct)
+    {
+        var state = stateId is { } sid
+            ? await db.IndianStates.AsNoTracking().Where(x => x.Id == sid)
+                .Select(x => (string?)x.Name).FirstOrDefaultAsync(ct)
+            : null;
+        var district = districtId is { } did
+            ? await db.Districts.AsNoTracking().Where(x => x.Id == did)
+                .Select(x => (string?)x.Name).FirstOrDefaultAsync(ct)
+            : null;
+        return (state, district);
     }
 
     /// <summary>Trims a ticket reference, and treats an all-whitespace one as absent.
@@ -334,14 +488,22 @@ public static class FieldOpsEndpoints
     {
         var techName = await TechNameAsync(db, f.TechnicianId, ct);
         var parts = await PartsForAsync(db, f.Lines.Select(l => l.PartId), ct);
+        var (stateName, districtName) = await PlaceNamesAsync(db, f.StateId, f.DistrictId, ct);
         var lines = f.Lines.Select(l => new FieldSaleLineDto(
             l.Id, l.PartId,
             parts.TryGetValue(l.PartId, out var p) ? p.ItemCode : $"#{l.PartId}", p?.Name ?? string.Empty,
             l.Qty, l.SerialNo,
-            pricing ? l.UnitPrice : null, pricing ? l.Amount : null)).ToList();
+            pricing ? l.UnitPrice : null, pricing ? l.Amount : null,
+            pricing ? l.GstPercent : null, pricing ? l.TaxAmount : null,
+            pricing ? l.Amount + l.TaxAmount : null,
+            pricing ? p?.HsnCode : null)).ToList();
         return new FieldSaleDto(
             f.Id, f.SaleNo, f.TechnicianId, techName, f.CustomerName, f.Phone, f.Place, f.Remarks, f.CreatedAt,
-            pricing ? f.Lines.Sum(l => l.Amount) : null, lines);
+            pricing ? f.TotalAmount : null, lines,
+            f.RateType.ToString(), f.PaymentMethod?.ToString(),
+            pricing ? f.TaxableAmount : null, pricing ? f.TaxAmount : null,
+            f.LocationLabel, f.Latitude, f.Longitude,
+            f.StateId, stateName, f.DistrictId, districtName);
     }
 
     private static Task<string?> TechNameAsync(AppDbContext db, long id, CancellationToken ct)

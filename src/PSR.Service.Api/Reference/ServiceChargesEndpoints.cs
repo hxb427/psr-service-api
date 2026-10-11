@@ -11,12 +11,10 @@ namespace PSR.Service.Api.Reference;
 
 public static class ServiceChargesEndpoints
 {
-    /// <summary>Who sees what a charge costs. Same list as the parts master's, and for the same reason:
-    /// the shop floor records what was done, the office decides what it is worth.</summary>
-    private static readonly string[] PricingRoles =
-        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer };
-
-    private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);
+    /// <summary>Who sees what a charge costs. Same rule as the parts master's, now that a field
+    /// technician picks the charge AND collects for it — see <see cref="PricingVisibility"/>. A charge
+    /// has no cost column, so there is nothing here the quoting scope withholds.</summary>
+    private static bool CanSeePricing(ClaimsPrincipal user) => PricingVisibility.SellingRates(user);
 
     public static IEndpointRouteBuilder MapServiceChargeEndpoints(this IEndpointRouteBuilder app)
     {

@@ -1,4 +1,4 @@
-﻿using Amazon.S3;
+using Amazon.S3;
 using Serilog;
 using PSR.Service.Api.AppVersions;
 using PSR.Service.Api.Audit;
@@ -74,6 +74,8 @@ app.MapAuditEndpoints();
 app.MapPartEndpoints();
 app.MapServiceChargeEndpoints();
 app.MapTopUsedEndpoints();
+app.MapFieldPhraseEndpoints();
+app.MapGeographyEndpoints();
 app.MapDealerEndpoints();
 app.MapStockEndpoints();
 app.MapStockRequestEndpoints();

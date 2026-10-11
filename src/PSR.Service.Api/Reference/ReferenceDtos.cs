@@ -71,6 +71,17 @@ public record TopUsedChargeRow(long ServiceChargeId, string Name, int UseCount, 
 
 public record TopUsedResponse(List<TopUsedPartRow> Parts, List<TopUsedChargeRow> ServiceCharges);
 
+/// <summary>One previously-written complaint or cause, with how often the caller has used it. The text
+/// IS the key - there is no catalogue of causes to carry an id for.</summary>
+public record TopPhraseRow(string Text, int UseCount, DateTime LastUsedAt);
+
+public record TopPhrasesResponse(List<TopPhraseRow> Complaints, List<TopPhraseRow> Causes);
+
+// Geography reference, for the field forms' state/district pickers. No pricing, no role projection.
+public record StateDto(int Id, string Name);
+
+public record DistrictDto(int Id, int StateId, string Name);
+
 public record DealerDto(long Id, string Name, int WarrantyMonths,
     string? Address, string? Gstin, string? State, string? StateCode, string? Remarks, bool IsActive);
 

@@ -14,9 +14,6 @@ public static class PartsEndpoints
 {
     private const int MaxPageSize = 200;
 
-    private static readonly string[] PricingRoles =
-        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer };
-
     public static IEndpointRouteBuilder MapPartEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/parts").WithTags("parts").RequireAuthorization();
@@ -39,7 +36,7 @@ public static class PartsEndpoints
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
-        var pricing = CanSeePricing(user);
+        var scope = PricingVisibility.For(user);
 
         var q = db.Parts.AsNoTracking().AsQueryable();
         if (activeOnly == true) q = q.Where(p => p.IsActive);
@@ -56,21 +53,21 @@ public static class PartsEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         return TypedResults.Ok(new PagedResult<PartDto>(
-            items.Select(p => ToDto(p, pricing)).ToList(), pageNum, size, total));
+            items.Select(p => ToDto(p, scope)).ToList(), pageNum, size, total));
     }
 
     private static async Task<Results<Ok<PartDto>, NotFound>> GetAsync(
         long id, AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
     {
         var p = await db.Parts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
-        return p is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(p, CanSeePricing(user)));
+        return p is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(p, PricingVisibility.For(user)));
     }
 
     private static async Task<Results<Ok<PartDto>, NotFound>> GetByCodeAsync(
         string code, AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
     {
         var p = await db.Parts.AsNoTracking().FirstOrDefaultAsync(x => x.ItemCode == code, ct);
-        return p is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(p, CanSeePricing(user)));
+        return p is null ? TypedResults.NotFound() : TypedResults.Ok(ToDto(p, PricingVisibility.For(user)));
     }
 
     private static async Task<Results<Created<PartDto>, Conflict<string>, ValidationProblem>> CreateAsync(
@@ -106,7 +103,7 @@ public static class PartsEndpoints
             ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
-        return TypedResults.Created($"/parts/{part.Id}", ToDto(part, true));
+        return TypedResults.Created($"/parts/{part.Id}", ToDto(part, PricingScope.Full));
     }
 
     private static async Task<Results<Ok<PartDto>, NotFound, ValidationProblem>> UpdateAsync(
@@ -134,7 +131,7 @@ public static class PartsEndpoints
         audit.Log(actor, "part.update", "part", id, details: diff.Describe(p.ItemCode), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
-        return TypedResults.Ok(ToDto(p, true));
+        return TypedResults.Ok(ToDto(p, PricingScope.Full));
     }
 
     private static Task<Results<NoContent, NotFound>> ActivateAsync(
@@ -172,16 +169,16 @@ public static class PartsEndpoints
         audit.Log(actor, "part.serial-tracking", "part", id,
             details: req.Enabled ? "enabled" : "disabled", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
-        return TypedResults.Ok(ToDto(p, CanSeePricing(user)));
+        return TypedResults.Ok(ToDto(p, PricingVisibility.For(user)));
     }
 
-    private static bool CanSeePricing(ClaimsPrincipal user) => PricingRoles.Any(user.IsInRole);
-
-    private static PartDto ToDto(Part p, bool pricing) => new(
+    /// <summary>The purchase rate is the only field here that a technician does not get — see
+    /// <see cref="PricingVisibility"/> for why the list is split rather than widened.</summary>
+    private static PartDto ToDto(Part p, PricingScope scope) => new(
         p.Id, p.ItemCode, p.Name, p.Category, p.Unit, p.IsSerialTracked, p.Remarks, p.IsActive,
-        pricing ? p.PurchaseRate : null,
-        pricing ? p.DealerRate : null,
-        pricing ? p.CustomerRate : null,
-        pricing ? p.GstPercent : null,
-        pricing ? p.HsnCode : null);
+        PricingVisibility.CostRates(scope) ? p.PurchaseRate : null,
+        PricingVisibility.SellingRates(scope) ? p.DealerRate : null,
+        PricingVisibility.SellingRates(scope) ? p.CustomerRate : null,
+        PricingVisibility.SellingRates(scope) ? p.GstPercent : null,
+        PricingVisibility.SellingRates(scope) ? p.HsnCode : null);
 }

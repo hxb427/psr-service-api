@@ -65,6 +65,10 @@ public record FieldServiceLineRequest(
     [StringLength(128)] string? SerialNo = null,
     bool Defective = false);
 
+/// <summary>Everything about a visit except what it cost. There is deliberately no field on this
+/// request for a rate, a tax or a total: the caller names the parts, the quantity, which rate column to
+/// bill at and which service charge was agreed, and the server prices all of it from its own catalogue.
+/// A client that could send a figure is a client that could send any figure.</summary>
 public record CreateFieldServiceRequest(
     [Required, StringLength(200)] string CustomerName,
     [StringLength(50)] string? Phone,
@@ -81,18 +85,55 @@ public record CreateFieldServiceRequest(
     /// both halves; neither is verified here, because the ticket lives in another system that has
     /// already refused the call if the caller was not its assigned engineer.</summary>
     [StringLength(36)] string? TicketId = null,
-    [StringLength(64)] string? TicketNumber = null);
+    [StringLength(64)] string? TicketNumber = null,
+    /// <summary>What the technician found behind the complaint, as opposed to how the customer
+    /// described the symptom.</summary>
+    [StringLength(1000)] string? Cause = null,
+    /// <summary>Customer | Dealer. Absent means Customer.</summary>
+    [StringLength(16)] string? RateType = null,
+    /// <summary>The agreed service charge, by id. Its description and figure are read from the
+    /// catalogue and snapshotted onto the record - the request does not get to say what it cost.</summary>
+    long? ServiceChargeId = null,
+    /// <summary>Cash | Upi | BankTransfer. Absent for a visit nobody paid for on the spot.</summary>
+    [StringLength(20)] string? PaymentMethod = null,
+    /// <summary>In | Out | Unknown. Optional - the app offers the factory record's answer as a default
+    /// and the technician may leave it alone, change it, or not answer.</summary>
+    [StringLength(10)] string? WarrantyStatus = null,
+    /// <summary>The place name the technician picked from the reverse-geocoded candidates.</summary>
+    [StringLength(200)] string? LocationLabel = null,
+    /// <summary>The fix behind that label. Both halves or neither.</summary>
+    decimal? Latitude = null,
+    decimal? Longitude = null,
+    int? StateId = null,
+    int? DistrictId = null);
 
+/// <summary>Money is nullable throughout and that is the role projection, not missing data - see
+/// <see cref="PSR.Service.Api.Auth.PricingVisibility"/>. <c>Amount</c> is tax-exclusive;
+/// <c>LineTotal</c> is what the line contributes to the bill.</summary>
 public record FieldServiceLineDto(
     long Id, string Kind, long PartId, string ItemCode, string PartName, int Qty,
-    string? SerialNo, bool Defective, decimal? UnitPrice, decimal? Amount);
+    string? SerialNo, bool Defective, decimal? UnitPrice, decimal? Amount,
+    decimal? GstPercent = null, decimal? TaxAmount = null, decimal? LineTotal = null,
+    string? HsnCode = null);
 
+/// <summary><c>Total</c> is the stored visit total, not a sum taken on read, so it still says what the
+/// customer was told after the parts master moves on. <c>AmountPayable</c> is what they owed for it -
+/// nil on an in-warranty job, where the work still has a value but the customer does not pay it.</summary>
 public record FieldServiceDto(
     long Id, string ServiceNo, long TechnicianId, string? TechnicianName,
     string CustomerName, string? Phone, string? Place, string? MachineSerial,
     string? Complaint, string? WorkDone, string? Remarks, DateTime CreatedAt,
     decimal? Total, List<FieldServiceLineDto> Lines,
-    string? TicketId = null, string? TicketNumber = null);
+    string? TicketId = null, string? TicketNumber = null,
+    string? Cause = null,
+    string RateType = "Customer",
+    long? ServiceChargeId = null, string? ServiceChargeDescription = null,
+    decimal? ServiceChargeAmount = null, decimal? ServiceChargeTaxPercent = null,
+    string? PaymentMethod = null, string? WarrantyStatus = null,
+    decimal? TaxableAmount = null, decimal? TaxAmount = null, decimal? AmountPayable = null,
+    string? LocationLabel = null, decimal? Latitude = null, decimal? Longitude = null,
+    int? StateId = null, string? StateName = null,
+    int? DistrictId = null, string? DistrictName = null);
 
 /// <summary>Whether a ticket already has a service recorded against it. The app's OTP step is gated on
 /// this, and asking the server rather than trusting its own memory is what makes the gate survive a
@@ -104,22 +145,39 @@ public record FieldSaleLineRequest(
     [Range(1, 1_000_000)] int Qty = 1,
     [StringLength(128)] string? SerialNo = null);
 
+/// <summary>As with a service visit, the request carries no figure of its own - see
+/// <see cref="CreateFieldServiceRequest"/>. A sale has no complaint, cause, warranty or service charge:
+/// goods changed hands, and that is all there is to say about it.</summary>
 public record CreateFieldSaleRequest(
     [Required, StringLength(200)] string CustomerName,
     [StringLength(50)] string? Phone,
     [StringLength(200)] string? Place,
     [StringLength(500)] string? Remarks,
     [MinLength(1)] List<FieldSaleLineRequest> Lines,
-    long? CustomerId = null);
+    long? CustomerId = null,
+    [StringLength(16)] string? RateType = null,
+    [StringLength(20)] string? PaymentMethod = null,
+    [StringLength(200)] string? LocationLabel = null,
+    decimal? Latitude = null,
+    decimal? Longitude = null,
+    int? StateId = null,
+    int? DistrictId = null);
 
 public record FieldSaleLineDto(
     long Id, long PartId, string ItemCode, string PartName, int Qty,
-    string? SerialNo, decimal? UnitPrice, decimal? Amount);
+    string? SerialNo, decimal? UnitPrice, decimal? Amount,
+    decimal? GstPercent = null, decimal? TaxAmount = null, decimal? LineTotal = null,
+    string? HsnCode = null);
 
 public record FieldSaleDto(
     long Id, string SaleNo, long TechnicianId, string? TechnicianName,
     string CustomerName, string? Phone, string? Place, string? Remarks, DateTime CreatedAt,
-    decimal? Total, List<FieldSaleLineDto> Lines);
+    decimal? Total, List<FieldSaleLineDto> Lines,
+    string RateType = "Customer", string? PaymentMethod = null,
+    decimal? TaxableAmount = null, decimal? TaxAmount = null,
+    string? LocationLabel = null, decimal? Latitude = null, decimal? Longitude = null,
+    int? StateId = null, string? StateName = null,
+    int? DistrictId = null, string? DistrictName = null);
 
 public record TransferTechnicianDto(long Id, string Username, string? FullName, bool IsFieldTechnician);
 

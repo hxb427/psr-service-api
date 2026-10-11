@@ -142,10 +142,43 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.Property(x => x.Place).HasColumnName("place").HasMaxLength(200);
         b.Property(x => x.MachineSerial).HasColumnName("machine_serial").HasMaxLength(100);
         b.Property(x => x.Complaint).HasColumnName("complaint").HasMaxLength(1000);
+        b.Property(x => x.Cause).HasColumnName("cause").HasMaxLength(1000);
         b.Property(x => x.WorkDone).HasColumnName("work_done").HasMaxLength(1000);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
+
+        // Existing rows predate the commercial half; Customer is what they were priced at, so the
+        // default is the truth about them rather than a placeholder.
+        b.Property(x => x.RateType).HasColumnName("rate_type").HasConversion<string>()
+            .HasMaxLength(16).HasDefaultValue(FieldRateType.Customer);
+        b.Property(x => x.ServiceChargeId).HasColumnName("service_charge_id");
+        b.Property(x => x.ServiceChargeDescription).HasColumnName("service_charge_description").HasMaxLength(200);
+        b.Property(x => x.ServiceChargeAmount).HasColumnName("service_charge_amount").HasPrecision(12, 2);
+        b.Property(x => x.ServiceChargeTaxPercent).HasColumnName("service_charge_tax_percent").HasPrecision(5, 2);
+        b.Property(x => x.PaymentMethod).HasColumnName("payment_method").HasConversion<string>().HasMaxLength(20);
+        b.Property(x => x.WarrantyStatus).HasColumnName("warranty_status").HasConversion<string>().HasMaxLength(10);
+
+        b.Property(x => x.TaxableAmount).HasColumnName("taxable_amount").HasPrecision(12, 2);
+        b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
+        b.Property(x => x.TotalAmount).HasColumnName("total_amount").HasPrecision(12, 2);
+        b.Property(x => x.AmountPayable).HasColumnName("amount_payable").HasPrecision(12, 2);
+
+        b.Property(x => x.LocationLabel).HasColumnName("location_label").HasMaxLength(200);
+        // 6 decimal places is about 11 cm at the equator - finer than any phone's fix, and far finer
+        // than the question "was the technician at this dairy" needs answered.
+        b.Property(x => x.Latitude).HasColumnName("latitude").HasPrecision(9, 6);
+        b.Property(x => x.Longitude).HasColumnName("longitude").HasPrecision(9, 6);
+        b.Property(x => x.StateId).HasColumnName("state_id");
+        b.Property(x => x.DistrictId).HasColumnName("district_id");
+
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
+
+        // Restrict, not Cascade: a reference row that field records point at must not be deletable out
+        // from under them, and the service charge keeps its own snapshotted description and figure so
+        // the record still reads correctly even if the catalogue row is later deactivated.
+        b.HasOne<ServiceCharge>().WithMany().HasForeignKey(x => x.ServiceChargeId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<IndianState>().WithMany().HasForeignKey(x => x.StateId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<District>().WithMany().HasForeignKey(x => x.DistrictId).OnDelete(DeleteBehavior.Restrict);
 
         b.HasMany(x => x.Lines).WithOne(x => x.FieldService)
             .HasForeignKey(x => x.FieldServiceId).OnDelete(DeleteBehavior.Cascade);
@@ -171,6 +204,8 @@ public class FieldServiceLineConfiguration : IEntityTypeConfiguration<FieldServi
         b.Property(x => x.Qty).HasColumnName("qty");
         b.Property(x => x.UnitPrice).HasColumnName("unit_price").HasPrecision(12, 2);
         b.Property(x => x.Amount).HasColumnName("amount").HasPrecision(12, 2);
+        b.Property(x => x.GstPercent).HasColumnName("gst_percent").HasPrecision(5, 2);
+        b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(128);
         b.Property(x => x.Defective).HasColumnName("defective");
 
@@ -193,8 +228,24 @@ public class FieldSaleConfiguration : IEntityTypeConfiguration<FieldSale>
         b.Property(x => x.Phone).HasColumnName("phone").HasMaxLength(50);
         b.Property(x => x.Place).HasColumnName("place").HasMaxLength(200);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
+
+        b.Property(x => x.RateType).HasColumnName("rate_type").HasConversion<string>()
+            .HasMaxLength(16).HasDefaultValue(FieldRateType.Customer);
+        b.Property(x => x.PaymentMethod).HasColumnName("payment_method").HasConversion<string>().HasMaxLength(20);
+        b.Property(x => x.TaxableAmount).HasColumnName("taxable_amount").HasPrecision(12, 2);
+        b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
+        b.Property(x => x.TotalAmount).HasColumnName("total_amount").HasPrecision(12, 2);
+        b.Property(x => x.LocationLabel).HasColumnName("location_label").HasMaxLength(200);
+        b.Property(x => x.Latitude).HasColumnName("latitude").HasPrecision(9, 6);
+        b.Property(x => x.Longitude).HasColumnName("longitude").HasPrecision(9, 6);
+        b.Property(x => x.StateId).HasColumnName("state_id");
+        b.Property(x => x.DistrictId).HasColumnName("district_id");
+
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
+
+        b.HasOne<IndianState>().WithMany().HasForeignKey(x => x.StateId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<District>().WithMany().HasForeignKey(x => x.DistrictId).OnDelete(DeleteBehavior.Restrict);
 
         b.HasMany(x => x.Lines).WithOne(x => x.FieldSale)
             .HasForeignKey(x => x.FieldSaleId).OnDelete(DeleteBehavior.Cascade);
@@ -215,6 +266,8 @@ public class FieldSaleLineConfiguration : IEntityTypeConfiguration<FieldSaleLine
         b.Property(x => x.Qty).HasColumnName("qty");
         b.Property(x => x.UnitPrice).HasColumnName("unit_price").HasPrecision(12, 2);
         b.Property(x => x.Amount).HasColumnName("amount").HasPrecision(12, 2);
+        b.Property(x => x.GstPercent).HasColumnName("gst_percent").HasPrecision(5, 2);
+        b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(128);
 
         b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
