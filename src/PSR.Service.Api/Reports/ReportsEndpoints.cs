@@ -267,12 +267,15 @@ public static class ReportsEndpoints
 
     private static async Task<Results<Ok<PagedResult<ServiceRegisterRow>>, FileContentHttpResult>> ServiceRegisterAsync(
         AppDbContext db, IOptions<JwtOptions> shop,
-        DateTime? from, DateTime? to, string? status, long? technicianId, string? customer, string? serial,
+        DateTime? from, DateTime? to, string? status, string? dispatch, long? technicianId, string? customer, string? serial,
         string? challan, string? inwardDc, string? outwardDc, string? piNo, string? invNo,
         string? warranty, string? payment, string? search, int? page, int? pageSize, string? format, CancellationToken ct)
     {
-        var q = from s in db.Services.AsNoTracking()
-                where !s.IsDeleted
+        // The dispatch narrowing goes on before the joins so it is one testable step over the jobs
+        // themselves; EF composes it into the same statement either way.
+        var jobs = ApplyDispatchFilter(db.Services.AsNoTracking().Where(s => !s.IsDeleted), dispatch);
+
+        var q = from s in jobs
                 join c in db.Customers on s.CustomerId equals c.Id into cg
                 from c in cg.DefaultIfEmpty()
                 join d in db.Dealers on s.DealerId equals d.Id into dg
@@ -288,6 +291,10 @@ public static class ReportsEndpoints
         // answered "show me everything waiting to go out" with the handful of records old enough to
         // predate the rename — which reads as the filter being broken. Both spellings come back, which
         // is the same set the dashboard counts and the service-jobs pending-dispatch tab lists.
+        //
+        // Kept for the clients that still send it as a status, and because Completed is a stage in its
+        // own right: picked on the service-status filter it means the queue of finished work, which is
+        // narrower than the dispatch filter's "still here".
         if (IsPendingDispatchFilter(status))
             q = q.Where(x => x.s.ServiceStatus == ServiceStatus.Completed
                           || x.s.ServiceStatus == ServiceStatus.PendingDispatch);
@@ -349,6 +356,28 @@ public static class ReportsEndpoints
         var items = rows.Select(x => Map(x.s, x.Party, x.TechName, dates)).ToList();
         return TypedResults.Ok(new PagedResult<ServiceRegisterRow>(items, pageNum, size, total));
     }
+
+    /// <summary>Narrow the register to what is still here, or to what has gone out.
+    ///
+    /// Where a job is in the workflow and whether it has left the building are two different questions,
+    /// and this is the second one. Asked as a single status filter they were alternatives — "everything
+    /// waiting to go out" OR "everything in service" — so the desk could not ask the question it
+    /// actually has, which is which of the jobs still here are at which stage. The two filters now
+    /// narrow independently and AND together.
+    ///
+    /// "Still here" is everything that has neither been dispatched nor closed out some other way. A
+    /// stocked, replaced or written-off job is never going out, so it belongs to neither half and the
+    /// service-status filter is what reaches it.</summary>
+    internal static IQueryable<ServiceJob> ApplyDispatchFilter(IQueryable<ServiceJob> q, string? dispatch)
+        => dispatch?.Trim().ToLowerInvariant() switch
+        {
+            "pending" => q.Where(s => s.ServiceStatus != ServiceStatus.Dispatched
+                                   && s.ServiceStatus != ServiceStatus.Stocked
+                                   && s.ServiceStatus != ServiceStatus.Replaced
+                                   && s.ServiceStatus != ServiceStatus.TotalLoss),
+            "dispatched" => q.Where(s => s.ServiceStatus == ServiceStatus.Dispatched),
+            _ => q,
+        };
 
     /// <summary>Whether the caller asked for the pending-dispatch queue. Its own name is also a retired
     /// ServiceStatus, so the token has to be recognised BEFORE the enum parse that would otherwise
