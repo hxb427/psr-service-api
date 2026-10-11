@@ -174,8 +174,17 @@ public static class DocumentPdf
                         col.Item().PaddingTop(8).AlignRight().Width(230).Column(c =>
                         {
                             TotalRow(c, "Taxable Value", doc.TaxableAmount);
-                            if (doc.IsInterState) TotalRow(c, "IGST" + GstRateSuffix(doc), doc.IgstAmount);
-                            else { TotalRow(c, "CGST", doc.CgstAmount); TotalRow(c, "SGST", doc.SgstAmount); }
+                            if (doc.IsInterState)
+                            {
+                                TotalRow(c, "IGST" + GstRateSuffix(doc), doc.IgstAmount);
+                            }
+                            else
+                            {
+                                // Half the line rate on each head, because that is how the one rate splits.
+                                var half = GstRateSuffix(doc, 0.5m);
+                                TotalRow(c, "CGST" + half, doc.CgstAmount);
+                                TotalRow(c, "SGST" + half, doc.SgstAmount);
+                            }
                             if (doc.CourierCharges > 0) TotalRow(c, "Courier", doc.CourierCharges);
 
                             var roundOff = RoundOff(doc);
@@ -240,10 +249,12 @@ public static class DocumentPdf
     /// serial, warranty and challan columns, and the money columns are printed tax-exclusive, which only says
     /// something against a rate shown somewhere. Blank when the lines disagree — one figure would be a lie —
     /// and blank at 0%, where there is no tax line worth qualifying.</summary>
-    public static string GstRateSuffix(ServiceDocument doc)
+    /// <param name="share">The part of the rate this line carries. An intra-state document splits the
+    /// same rate over two heads, so CGST and SGST each print half of it: 18% GST is 9% + 9%.</param>
+    public static string GstRateSuffix(ServiceDocument doc, decimal share = 1m)
     {
         var rates = doc.Lines.Select(l => l.GstPercent).Distinct().ToList();
-        return rates.Count == 1 && rates[0] > 0 ? $" @ {rates[0]:0.##}%" : "";
+        return rates.Count == 1 && rates[0] > 0 ? $" @ {rates[0] * share:0.##}%" : "";
     }
 
     private static void TotalRow(ColumnDescriptor c, string label, decimal value)

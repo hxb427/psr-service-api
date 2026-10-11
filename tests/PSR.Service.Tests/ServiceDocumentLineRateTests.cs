@@ -153,4 +153,14 @@ public class DocumentTotalsBlockTests
     [Fact]
     public void Zero_rated_document_prints_no_figure()
         => DocumentPdf.GstRateSuffix(Doc(2000m, 0m, 0m, 2000m, 0m)).Should().BeEmpty();
+
+    /// <summary>An intra-state document splits one rate over two heads, so each prints half of it —
+    /// "CGST @ 9%" and "SGST @ 9%" against 18% GST, which is what the heads actually are.</summary>
+    [Fact]
+    public void Intra_state_heads_each_print_half_the_rate()
+        => DocumentPdf.GstRateSuffix(Doc(6000m, 1080m, 0m, 7080m, 18m, 18m), 0.5m).Should().Be(" @ 9%");
+
+    [Fact]
+    public void Mixed_rates_print_no_figure_on_the_split_heads_either()
+        => DocumentPdf.GstRateSuffix(Doc(2000m, 300m, 0m, 2300m, 18m, 12m), 0.5m).Should().BeEmpty();
 }

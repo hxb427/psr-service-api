@@ -26,10 +26,10 @@ internal readonly record struct JobPrice(decimal BlendedGst, decimal UnitInclusi
 /// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter).
 /// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
 /// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
-// CompanyInfo used to be injected here to compare the party's state against the company's; every
-// document now bills IGST, so there is nothing left to compare it with. The PDF still takes it, for
-// the letterhead.
-public class BillingService(AppDbContext db, NumberSequenceService seq, AppSettingsService settings)
+// CompanyInfo is injected to compare the party's state against the company's own — see GstStates. The
+// PDF takes it as well, for the letterhead.
+public class BillingService(AppDbContext db, NumberSequenceService seq, AppSettingsService settings,
+    CompanyInfo company)
 {
     /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
     public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
@@ -392,6 +392,17 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         }
 
         if (string.IsNullOrWhiteSpace(partyName)) throw new BillingException("Party name is required.");
+
+        // Settle the state once, here, so the document carries the code its tax was decided on and the PDF
+        // has a name to print beside it. A party can arrive with a code and no name (an API caller), a name
+        // and no code (typed before the picker existed), or neither and a GSTIN that opens with one. A name
+        // already filled in is left alone — what somebody typed is not ours to rewrite.
+        if (GstStates.ResolveCode(partyStateCode, partyState, partyGstin) is { } resolvedCode)
+        {
+            partyStateCode = resolvedCode;
+            if (string.IsNullOrWhiteSpace(partyState)) partyState = GstStates.ByCode(resolvedCode)?.Name;
+        }
+
         return new PartySnapshot(partyName, partyAddress, partyGstin, partyState, partyStateCode);
     }
 
@@ -408,11 +419,11 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
             PartyGstin = party.Gstin,
             PartyState = party.State,
             PartyStateCode = party.StateCode,
-            // Every document bills IGST, in or out of state — a business decision, not a derived one, so
-            // the state code no longer changes what the tax is called. The flag and the split stay on the
-            // record: documents raised before this still carry the CGST + SGST they were issued with, and
-            // a reprint has to show what the customer was actually given.
-            IsInterState = true,
+            // CGST + SGST inside the company's state, IGST across a state line — read off the party's own
+            // state code (see GstStates). It is stamped onto the record rather than worked out at print
+            // time, so a reprint years later shows the heads the customer was actually billed under,
+            // including the stretch when every document went out as IGST whatever the state code said.
+            IsInterState = GstStates.IsInterState(party.StateCode, party.State, party.Gstin, company.StateCode),
             CourierMode = courierMode?.Trim(),
             CourierCharges = courierCharges ?? 0m,
             Remarks = remarks?.Trim(),

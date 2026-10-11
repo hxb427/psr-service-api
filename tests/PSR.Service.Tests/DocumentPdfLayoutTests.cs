@@ -124,4 +124,23 @@ public class DocumentPdfLayoutTests
 
         act.Should().NotThrow();
     }
+
+    /// <summary>A Kerala document prints two tax rows where an inter-state one prints one, which is a row
+    /// more in a totals block that has to stay on the page with the signature under it.</summary>
+    [Fact]
+    public void Intra_state_document_fits_the_page_with_both_tax_heads()
+    {
+        var doc = ServiceInvoice(withRemarks: true);
+        doc.PartyState = "Kerala";
+        doc.PartyStateCode = "32";
+        doc.IsInterState = false;
+        doc.CgstAmount = Math.Round(doc.IgstAmount / 2m, 2);
+        doc.SgstAmount = doc.IgstAmount - doc.CgstAmount;
+        doc.IgstAmount = 0m;
+
+        var act = () => DocumentPdf.Render(doc, new CompanyInfo(), sourcePiNo: "PI-2026-0119");
+
+        act.Should().NotThrow();
+        act().Should().NotBeEmpty();
+    }
 }
