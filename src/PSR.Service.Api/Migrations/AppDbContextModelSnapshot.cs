@@ -378,6 +378,33 @@ namespace PSR.Service.Api.Migrations
                     b.ToTable("dealers", (string)null);
                 });
 
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.District", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)")
+                        .HasColumnName("name");
+
+                    b.Property<int>("StateId")
+                        .HasColumnType("int")
+                        .HasColumnName("state_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StateId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("districts", (string)null);
+                });
+
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSale", b =>
                 {
                     b.Property<long>("Id")
@@ -405,6 +432,30 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(200)")
                         .HasColumnName("customer_name");
 
+                    b.Property<int?>("DistrictId")
+                        .HasColumnType("int")
+                        .HasColumnName("district_id");
+
+                    b.Property<decimal?>("Latitude")
+                        .HasPrecision(9, 6)
+                        .HasColumnType("decimal(9,6)")
+                        .HasColumnName("latitude");
+
+                    b.Property<string>("LocationLabel")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .HasColumnName("location_label");
+
+                    b.Property<decimal?>("Longitude")
+                        .HasPrecision(9, 6)
+                        .HasColumnType("decimal(9,6)")
+                        .HasColumnName("longitude");
+
+                    b.Property<string>("PaymentMethod")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
+                        .HasColumnName("payment_method");
+
                     b.Property<string>("Phone")
                         .HasMaxLength(50)
                         .HasColumnType("varchar(50)")
@@ -414,6 +465,14 @@ namespace PSR.Service.Api.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)")
                         .HasColumnName("place");
+
+                    b.Property<string>("RateType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("Customer")
+                        .HasColumnName("rate_type");
 
                     b.Property<string>("Remarks")
                         .HasMaxLength(500)
@@ -426,16 +485,39 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(40)")
                         .HasColumnName("sale_no");
 
+                    b.Property<int?>("StateId")
+                        .HasColumnType("int")
+                        .HasColumnName("state_id");
+
+                    b.Property<decimal>("TaxAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("tax_amount");
+
+                    b.Property<decimal>("TaxableAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("taxable_amount");
+
                     b.Property<long>("TechnicianId")
                         .HasColumnType("bigint")
                         .HasColumnName("technician_id");
+
+                    b.Property<decimal>("TotalAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("total_amount");
 
                     b.HasKey("Id");
 
                     b.HasIndex("CreatedAt");
 
+                    b.HasIndex("DistrictId");
+
                     b.HasIndex("SaleNo")
                         .IsUnique();
+
+                    b.HasIndex("StateId");
 
                     b.HasIndex("TechnicianId");
 
@@ -460,6 +542,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("field_sale_id");
 
+                    b.Property<decimal>("GstPercent")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("decimal(5,2)")
+                        .HasColumnName("gst_percent");
+
                     b.Property<long>("PartId")
                         .HasColumnType("bigint")
                         .HasColumnName("part_id");
@@ -472,6 +559,11 @@ namespace PSR.Service.Api.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)")
                         .HasColumnName("serial_no");
+
+                    b.Property<decimal>("TaxAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("tax_amount");
 
                     b.Property<decimal>("UnitPrice")
                         .HasPrecision(12, 2)
@@ -496,6 +588,16 @@ namespace PSR.Service.Api.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
 
+                    b.Property<decimal>("AmountPayable")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("amount_payable");
+
+                    b.Property<string>("Cause")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)")
+                        .HasColumnName("cause");
+
                     b.Property<string>("Complaint")
                         .HasMaxLength(1000)
                         .HasColumnType("varchar(1000)")
@@ -519,10 +621,34 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(200)")
                         .HasColumnName("customer_name");
 
+                    b.Property<int?>("DistrictId")
+                        .HasColumnType("int")
+                        .HasColumnName("district_id");
+
+                    b.Property<decimal?>("Latitude")
+                        .HasPrecision(9, 6)
+                        .HasColumnType("decimal(9,6)")
+                        .HasColumnName("latitude");
+
+                    b.Property<string>("LocationLabel")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .HasColumnName("location_label");
+
+                    b.Property<decimal?>("Longitude")
+                        .HasPrecision(9, 6)
+                        .HasColumnType("decimal(9,6)")
+                        .HasColumnName("longitude");
+
                     b.Property<string>("MachineSerial")
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)")
                         .HasColumnName("machine_serial");
+
+                    b.Property<string>("PaymentMethod")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
+                        .HasColumnName("payment_method");
 
                     b.Property<string>("Phone")
                         .HasMaxLength(50)
@@ -534,16 +660,57 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(200)")
                         .HasColumnName("place");
 
+                    b.Property<string>("RateType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("Customer")
+                        .HasColumnName("rate_type");
+
                     b.Property<string>("Remarks")
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)")
                         .HasColumnName("remarks");
+
+                    b.Property<decimal>("ServiceChargeAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("service_charge_amount");
+
+                    b.Property<string>("ServiceChargeDescription")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .HasColumnName("service_charge_description");
+
+                    b.Property<long?>("ServiceChargeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("service_charge_id");
+
+                    b.Property<decimal>("ServiceChargeTaxPercent")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("decimal(5,2)")
+                        .HasColumnName("service_charge_tax_percent");
 
                     b.Property<string>("ServiceNo")
                         .IsRequired()
                         .HasMaxLength(40)
                         .HasColumnType("varchar(40)")
                         .HasColumnName("service_no");
+
+                    b.Property<int?>("StateId")
+                        .HasColumnType("int")
+                        .HasColumnName("state_id");
+
+                    b.Property<decimal>("TaxAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("tax_amount");
+
+                    b.Property<decimal>("TaxableAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("taxable_amount");
 
                     b.Property<long>("TechnicianId")
                         .HasColumnType("bigint")
@@ -559,6 +726,16 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(64)")
                         .HasColumnName("ticket_number");
 
+                    b.Property<decimal>("TotalAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("total_amount");
+
+                    b.Property<string>("WarrantyStatus")
+                        .HasMaxLength(10)
+                        .HasColumnType("varchar(10)")
+                        .HasColumnName("warranty_status");
+
                     b.Property<string>("WorkDone")
                         .HasMaxLength(1000)
                         .HasColumnType("varchar(1000)")
@@ -568,8 +745,14 @@ namespace PSR.Service.Api.Migrations
 
                     b.HasIndex("CreatedAt");
 
+                    b.HasIndex("DistrictId");
+
+                    b.HasIndex("ServiceChargeId");
+
                     b.HasIndex("ServiceNo")
                         .IsUnique();
+
+                    b.HasIndex("StateId");
 
                     b.HasIndex("TechnicianId");
 
@@ -600,6 +783,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("field_service_id");
 
+                    b.Property<decimal>("GstPercent")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("decimal(5,2)")
+                        .HasColumnName("gst_percent");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -619,6 +807,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(128)")
                         .HasColumnName("serial_no");
 
+                    b.Property<decimal>("TaxAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("tax_amount");
+
                     b.Property<decimal>("UnitPrice")
                         .HasPrecision(12, 2)
                         .HasColumnType("decimal(12,2)")
@@ -631,6 +824,35 @@ namespace PSR.Service.Api.Migrations
                     b.HasIndex("PartId");
 
                     b.ToTable("field_service_lines", (string)null);
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.IndianState", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)")
+                        .HasColumnName("name");
+
+                    b.Property<int>("SortOrder")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0)
+                        .HasColumnName("sort_order");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("indian_states", (string)null);
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.NumberSequence", b =>
@@ -696,6 +918,13 @@ namespace PSR.Service.Api.Migrations
                             Key = "DC",
                             NextValue = 1L,
                             Prefix = "DC",
+                            Year = 2026
+                        },
+                        new
+                        {
+                            Key = "STOCK_ISSUE_DC",
+                            NextValue = 1L,
+                            Prefix = "SDC",
                             Year = 2026
                         },
                         new
@@ -2180,6 +2409,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("datetime(6)")
                         .HasColumnName("created_at");
 
+                    b.Property<string>("DcNo")
+                        .HasMaxLength(40)
+                        .HasColumnType("varchar(40)")
+                        .HasColumnName("dc_no");
+
                     b.Property<long?>("IssuedByUserId")
                         .HasColumnType("bigint")
                         .HasColumnName("issued_by_user_id");
@@ -2237,6 +2471,8 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnName("updated_at");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("DcNo");
 
                     b.HasIndex("PartId");
 
@@ -2616,6 +2852,30 @@ namespace PSR.Service.Api.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.District", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.IndianState", "State")
+                        .WithMany()
+                        .HasForeignKey("StateId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("State");
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSale", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.District", null)
+                        .WithMany()
+                        .HasForeignKey("DistrictId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.IndianState", null)
+                        .WithMany()
+                        .HasForeignKey("StateId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSaleLine", b =>
                 {
                     b.HasOne("PSR.Service.Api.Data.Entities.FieldSale", "FieldSale")
@@ -2631,6 +2891,24 @@ namespace PSR.Service.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("FieldSale");
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldService", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.District", null)
+                        .WithMany()
+                        .HasForeignKey("DistrictId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.ServiceCharge", null)
+                        .WithMany()
+                        .HasForeignKey("ServiceChargeId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.IndianState", null)
+                        .WithMany()
+                        .HasForeignKey("StateId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldServiceLine", b =>

@@ -14,6 +14,10 @@ public class StockRequest : ITimestamps
     public DateTime? IssuedDate { get; set; }
     public string? Courier { get; set; }                     // field-tech dispatch courier (set on issue)
     public string? TrackingNo { get; set; }                  // AWB / tracking (set on issue)
+    /// <summary>The delivery challan the stock left the store on (set on issue). One consignment to one
+    /// field technician is one DC, and an issue covering six parts writes six request rows — so the
+    /// SAME number lands on every row of that issue. It is what ties them back together as one docket.</summary>
+    public string? DcNo { get; set; }
     public string? Remarks { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

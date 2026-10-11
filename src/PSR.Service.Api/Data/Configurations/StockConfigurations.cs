@@ -73,6 +73,9 @@ public class StockRequestConfiguration : IEntityTypeConfiguration<StockRequest>
         b.Property(x => x.IssuedDate).HasColumnName("issued_date");
         b.Property(x => x.Courier).HasColumnName("courier").HasMaxLength(80);
         b.Property(x => x.TrackingNo).HasColumnName("tracking_no").HasMaxLength(80);
+        b.Property(x => x.DcNo).HasColumnName("dc_no").HasMaxLength(40);
+        // Every row of one issue carries the same number, so this is looked up as a group, not a key.
+        b.HasIndex(x => x.DcNo);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
@@ -134,6 +137,7 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
             new NumberSequence { Key = SequenceKeys.ProformaInvoice, Prefix = "PI", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.Invoice, Prefix = "INV", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.DeliveryChallan, Prefix = "DC", NextValue = 1, Year = 2026 },
+            new NumberSequence { Key = SequenceKeys.StockIssueDc, Prefix = "SDC", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.Transfer, Prefix = "TRF", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldService, Prefix = "FSV", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldSale, Prefix = "FSL", NextValue = 1 },

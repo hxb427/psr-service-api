@@ -30,4 +30,10 @@ public static class SequenceKeys
     public const string ProformaInvoice = "PI";
     public const string Invoice = "INVOICE";
     public const string DeliveryChallan = "DC";
+
+    /// <summary>The challan stock leaves the store on when it is issued to a field technician. Its own
+    /// book, not <see cref="DeliveryChallan"/>: that one is the customer's outward challan for a repaired
+    /// unit going back, and interleaving the two would put a technician's parts docket in the middle of
+    /// the numbering a customer document is audited on.</summary>
+    public const string StockIssueDc = "STOCK_ISSUE_DC";
 }
