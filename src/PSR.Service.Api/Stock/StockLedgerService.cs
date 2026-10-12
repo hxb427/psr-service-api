@@ -70,20 +70,38 @@ public class StockLedgerService(AppDbContext db)
         return movement;
     }
 
+    /// <summary>How much of an acknowledged issue lands on the technician's balance.
+    ///
+    /// Just the received count — see <see cref="AcknowledgeReceiptAsync"/> for why the defective
+    /// and missing counts are not subtracted from it. Pulled out as a pure function so the arithmetic
+    /// can be pinned by tests without a database behind it; it is one line, and it was wrong for
+    /// every mixed acknowledgement until something checked it.</summary>
+    internal static int UsableOnReceipt(int received, int defective, int missing) =>
+        Math.Max(received, 0);
+
     /// <summary>Apply a technician's acknowledgement of an issue to their balance.
     ///
-    /// Only what actually arrived AND is usable is credited: <paramref name="received"/> minus
-    /// <paramref name="defective"/>, the same figure the legacy app derived from the movement ledger.
-    /// A defective unit is physically with the technician - they can send it in for service - but it
-    /// is not stock they can fit, so counting it as on-hand would offer it on the next job.
+    /// The three quantities are a PARTITION of what was issued, not overlapping tallies: the
+    /// endpoint refuses an acknowledgement unless they sum to the issued quantity, and on a
+    /// serial-tracked issue each unit is counted into exactly one of Received / Defective /
+    /// Missing. So <paramref name="received"/> already excludes the defective ones, and it is the
+    /// usable figure on its own.
     ///
-    /// The shortfall is not silently dropped. Missing and defective quantities each get their own
-    /// movement, so the gap between what left the warehouse and what became usable stock is a row
-    /// somebody can look at rather than an unexplained difference between two numbers.</summary>
+    /// This used to credit <c>received - defective</c>, which subtracted the faulty units a second
+    /// time. A clean shipment was unaffected, so it looked fine in testing -- but any mixed
+    /// acknowledgement silently under-credited the technician, and two received plus one defective
+    /// out of three credited one part instead of two. The missing stock had no movement explaining
+    /// it, because as far as the ledger was concerned nothing had gone wrong.
+    ///
+    /// A defective unit is physically with the technician - they can send it in for service - but it
+    /// is not stock they can fit, so it is deliberately not on-hand. It gets its own audit movement
+    /// below rather than a balance change, as does a missing one, so the gap between what left the
+    /// warehouse and what became usable stock is a row somebody can look at rather than an
+    /// unexplained difference between two numbers.</summary>
     public async Task AcknowledgeReceiptAsync(long partId, long technicianId, int received, int defective,
         int missing, long byUser, string referenceType, long referenceId, CancellationToken ct)
     {
-        var usable = Math.Max(received - defective, 0);
+        var usable = UsableOnReceipt(received, defective, missing);
         if (usable > 0)
         {
             await IncrementAsync(partId, technicianId, usable, ct);

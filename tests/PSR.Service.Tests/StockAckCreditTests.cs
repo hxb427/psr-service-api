@@ -64,4 +64,44 @@ public class StockAckCreditTests
     {
         new StockMovement().CreditedOnIssue.Should().BeTrue();
     }
+
+    // ---- what actually lands on the balance -------------------------------------------------
+
+    /// <summary>The plain case, and the only one that ever worked: everything turned up fine.</summary>
+    [Fact]
+    public void A_clean_shipment_credits_all_of_it()
+    {
+        StockLedgerService.UsableOnReceipt(3, 0, 0).Should().Be(3);
+    }
+
+    /// <summary>The regression this guards. Received / defective / missing partition the issued
+    /// quantity -- the endpoint refuses an acknowledgement unless they sum to it -- so `received`
+    /// already excludes the faulty units. Crediting `received - defective` took them off twice and
+    /// silently under-credited every mixed acknowledgement; two good out of three credited one.</summary>
+    [Theory]
+    [InlineData(2, 1, 0, 2)]
+    [InlineData(1, 2, 0, 1)]
+    [InlineData(5, 3, 2, 5)]
+    public void Defective_units_are_not_subtracted_from_the_received_count(
+        int received, int defective, int missing, int expected)
+    {
+        StockLedgerService.UsableOnReceipt(received, defective, missing).Should().Be(expected);
+    }
+
+    /// <summary>A unit that never arrived is not on the balance and not deducted from what did.</summary>
+    [Fact]
+    public void Missing_units_do_not_touch_what_arrived()
+    {
+        StockLedgerService.UsableOnReceipt(2, 0, 1).Should().Be(2);
+    }
+
+    /// <summary>Nothing usable turned up: no credit, and nothing negative either.</summary>
+    [Theory]
+    [InlineData(0, 3, 0)]
+    [InlineData(0, 0, 3)]
+    [InlineData(0, 1, 2)]
+    public void A_shipment_with_nothing_good_in_it_credits_nothing(int received, int defective, int missing)
+    {
+        StockLedgerService.UsableOnReceipt(received, defective, missing).Should().Be(0);
+    }
 }
