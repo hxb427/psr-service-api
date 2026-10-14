@@ -1255,6 +1255,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("decimal(14,2)")
                         .HasColumnName("courier_charges");
 
+                    b.Property<string>("CourierHsnCode")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
+                        .HasColumnName("courier_hsn_code");
+
                     b.Property<string>("CourierMode")
                         .HasMaxLength(80)
                         .HasColumnType("varchar(80)")
@@ -1427,6 +1432,11 @@ namespace PSR.Service.Api.Migrations
                         .HasPrecision(14, 2)
                         .HasColumnType("decimal(14,2)")
                         .HasColumnName("taxable_amount");
+
+                    b.Property<string>("Unit")
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
+                        .HasColumnName("unit");
 
                     b.Property<decimal>("UnitRate")
                         .HasPrecision(14, 2)
