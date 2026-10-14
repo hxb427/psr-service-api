@@ -32,6 +32,7 @@ public class ServiceDocumentConfiguration : IEntityTypeConfiguration<ServiceDocu
         b.Property(x => x.CourierCharges).HasColumnName("courier_charges").HasPrecision(14, 2);
         b.Property(x => x.TotalAmount).HasColumnName("total_amount").HasPrecision(14, 2);
         b.Property(x => x.CourierMode).HasColumnName("courier_mode").HasMaxLength(80);
+        b.Property(x => x.CourierHsnCode).HasColumnName("courier_hsn_code").HasMaxLength(20);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
 
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
@@ -61,6 +62,7 @@ public class ServiceDocumentLineConfiguration : IEntityTypeConfiguration<Service
         b.Property(x => x.Warranty).HasColumnName("warranty").HasMaxLength(30);
         b.Property(x => x.ServiceChallan).HasColumnName("service_challan").HasMaxLength(50);
         b.Property(x => x.HsnCode).HasColumnName("hsn_code").HasMaxLength(20);
+        b.Property(x => x.Unit).HasColumnName("unit").HasMaxLength(20);
         b.Property(x => x.Qty).HasColumnName("qty");
         b.Property(x => x.UnitRate).HasColumnName("unit_rate").HasPrecision(14, 2);
         b.Property(x => x.TaxableAmount).HasColumnName("taxable_amount").HasPrecision(14, 2);

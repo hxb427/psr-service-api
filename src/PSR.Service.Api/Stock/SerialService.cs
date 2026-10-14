@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 
@@ -19,10 +19,17 @@ public class SerialService(AppDbContext db)
     // back is stock the technician was issued and still holds, while a faulty return is a customer's
     // unit they collected and never had on their balance. Acknowledging the two does different things
     // to the ledger, so letting one shipment carry both would leave the quantity half-right.
-    private static readonly SerialStatus[] GoodStockShippable = { SerialStatus.Received };
-    private static readonly SerialStatus[] FaultyShippable = { SerialStatus.Collected, SerialStatus.Defective };
+    // Typed as IReadOnlyList, not SerialStatus[], and that is load-bearing rather than style.
+    // On .NET 10 `array.Contains(x)` binds to MemoryExtensions.Contains(ReadOnlySpan<T>, T) through
+    // the implicit array-to-span conversion, in preference to Enumerable.Contains. Inside an
+    // expression tree EF then tries to evaluate a parameter whose type is a ref struct and throws
+    // "ReadOnlySpan<SerialStatus> ... violates the constraint of type 'TRet'" while compiling the
+    // query — a 500 on /serials/available with nothing wrong in the data. An interface-typed field
+    // has no span conversion, so Contains resolves to Enumerable.Contains and translates to IN.
+    private static readonly IReadOnlyList<SerialStatus> GoodStockShippable = new[] { SerialStatus.Received };
+    private static readonly IReadOnlyList<SerialStatus> FaultyShippable = new[] { SerialStatus.Collected, SerialStatus.Defective };
 
-    internal static SerialStatus[] ShippableFor(StockReturnKind kind) =>
+    internal static IReadOnlyList<SerialStatus> ShippableFor(StockReturnKind kind) =>
         kind == StockReturnKind.Faulty ? FaultyShippable : GoodStockShippable;
 
     /// <summary>Returns serial → reason for any serial that cannot be issued for this part

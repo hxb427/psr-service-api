@@ -21,10 +21,14 @@ public record GenerateDocumentRequest(
     List<DocLineOverride>? Lines);
 
 // Per-unit override (manager edit). Rate is tax-INCLUSIVE (matches the old "Rate (incl. tax)" field).
+// HsnCode and Unit are typed on the form rather than derived: a serviced unit is not a catalogue row, so
+// there is nothing on the job to read either of them off.
 public record DocLineOverride(
     long ServiceId,
     [StringLength(300)] string? Description,
     [StringLength(30)] string? Warranty,
+    [StringLength(20)] string? HsnCode,
+    [StringLength(20)] string? Unit,
     decimal? Rate,
     int? Qty,
     [StringLength(300)] string? Remarks);
@@ -51,7 +55,7 @@ public record GenerateSaleDocumentRequest(
 public record DocumentLineDto(
     long Id, long? ServiceJobId, string Description, string? Warranty, string? ServiceChallan, string? HsnCode,
     int Qty, decimal UnitRate, decimal TaxableAmount, decimal GstPercent, decimal TaxAmount, decimal LineTotal,
-    string? Remarks, long? PartId, string? SerialNo = null);
+    string? Remarks, long? PartId, string? SerialNo = null, string? Unit = null);
 
 // What the selected jobs will be billed if nobody edits anything — asked for by the generate form so the
 // rates are on screen before the document exists. UnitRate is tax-inclusive per unit, at quantity 1.
@@ -65,7 +69,7 @@ public record DocumentDto(
     long Id, string DocType, string DocNo, DateTime DocDate, List<long> ServiceIds, List<string> ServiceNos,
     string PartyName, string? PartyAddress, string? PartyGstin, string? PartyState, string? PartyStateCode, bool IsInterState,
     decimal TaxableAmount, decimal CgstAmount, decimal SgstAmount, decimal IgstAmount, decimal CourierCharges, decimal TotalAmount,
-    string? CourierMode, string? Remarks, DateTime CreatedAt, List<DocumentLineDto> Lines,
+    string? CourierMode, string? CourierHsnCode, string? Remarks, DateTime CreatedAt, List<DocumentLineDto> Lines,
     long? SpareSaleId, string? SaleNo);
 
 // Source is "Service" or "Sale" — one register lists both, and JobCount is 0 on a sale document.

@@ -118,7 +118,13 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
             // In-warranty units are free unless a manager set an explicit rate.
             var unitInclusive = ov?.Rate ?? price.UnitInclusive;
 
-            if (!lineEditAllowed && (unitInclusive != price.UnitInclusive || qty != 1))
+            // The switch guards a document against being priced at something other than what the job's own
+            // service lines add up to. A delivery challan covers in-warranty units, which add up to nothing,
+            // so there is no server figure for a typed one to depart from — the value on a DC is a declared
+            // one for transit and has to be entered by hand or the challan goes out blank. Gating it would
+            // make the pricing a DC now carries unusable.
+            if (!lineEditAllowed && docType != DocumentType.DC
+                && (unitInclusive != price.UnitInclusive || qty != 1))
                 throw new BillingException(
                     $"{job.ServiceNo}: editing the rate or quantity on a document is currently disabled by an "
                     + "administrator, so the document has to bill what the job's own service lines add up to.");
@@ -138,7 +144,10 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 SerialNo = job.SerialNo,
                 Warranty = ov?.Warranty?.Trim() ?? job.WarrantyStatus.ToString(),
                 ServiceChallan = job.ChallanNo,
-                HsnCode = null,
+                // Typed on the generate form. A serviced unit is not a catalogue row, so there is nothing
+                // on the job to read either of these off, and a document has to carry an HSN/SAC per line.
+                HsnCode = ov?.HsnCode?.Trim(),
+                Unit = ov?.Unit?.Trim(),
                 Qty = qty,
                 UnitRate = unitInclusive,
                 TaxableAmount = lineTaxable,
@@ -255,6 +264,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 Warranty = null,                 // meaningless on a spare sale — the PDF drops the column
                 ServiceChallan = null,
                 HsnCode = l.HsnCode,
+                Unit = l.Unit,
                 Qty = l.Qty,
                 // The tax-EXCLUSIVE rate the line was priced at, carried over unchanged. Deriving an
                 // inclusive rate here instead (LineTotal / Qty) lost paise to rounding, so the printed
@@ -426,6 +436,11 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
             IsInterState = GstStates.IsInterState(party.StateCode, party.State, party.Gstin, company.StateCode),
             CourierMode = courierMode?.Trim(),
             CourierCharges = courierCharges ?? 0m,
+            // Fixed by the tax schedule, so it is applied here rather than asked for on the form — and
+            // stamped on the record, like the tax heads above, so a reprint shows what was billed.
+            CourierHsnCode = courierCharges is > 0m || !string.IsNullOrWhiteSpace(courierMode)
+                ? ServiceDocument.CourierSacCode
+                : null,
             Remarks = remarks?.Trim(),
             CreatedByUserId = userId,
         };

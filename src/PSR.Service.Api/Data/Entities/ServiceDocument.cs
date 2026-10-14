@@ -13,6 +13,11 @@ public enum DocumentType
 /// the printed figures never drift if the underlying job/lines change later.</summary>
 public class ServiceDocument
 {
+    /// <summary>The SAC a courier charge is billed under. Courier is a support service, not goods, so it
+    /// carries its own code rather than the HSN of anything in the table — and it is fixed by the tax
+    /// schedule, not a choice, so it is applied rather than asked for on the generate form.</summary>
+    public const string CourierSacCode = "9985";
+
     public long Id { get; set; }
     public DocumentType DocType { get; set; }
     public string DocNo { get; set; } = string.Empty;   // unique per type (PI-2026-0001, INV-2026-0001, DC-2026-0001)
@@ -42,6 +47,11 @@ public class ServiceDocument
     public decimal CourierCharges { get; set; }
     public decimal TotalAmount { get; set; }
     public string? CourierMode { get; set; }
+    /// <summary>The SAC the courier charge went out under — <see cref="CourierSacCode"/>, stamped
+    /// whenever a courier is put on the document. Snapshotted like every other printed figure rather
+    /// than filled in at print time, so a document reprinted after the code ever changes still shows the
+    /// one the customer was billed under.</summary>
+    public string? CourierHsnCode { get; set; }
     public string? Remarks { get; set; }
 
     public long CreatedByUserId { get; set; }
@@ -67,6 +77,10 @@ public class ServiceDocumentLine
     public string? Warranty { get; set; }                // snapshot of the unit's warranty status (Active units bill at 0)
     public string? ServiceChallan { get; set; }          // the unit's inward challan no
     public string? HsnCode { get; set; }
+    /// <summary>The unit the quantity is counted in (Nos, Set, Pcs...). Typed on the generate form for a
+    /// serviced unit, which has no catalogue row to read one off, and carried over from the sale line for
+    /// spare-sale goods. A quantity column with no unit beside it says how many but not of what.</summary>
+    public string? Unit { get; set; }
     public int Qty { get; set; } = 1;
     public decimal UnitRate { get; set; }                // tax-inclusive rate for the unit (manager-editable)
     public decimal TaxableAmount { get; set; }

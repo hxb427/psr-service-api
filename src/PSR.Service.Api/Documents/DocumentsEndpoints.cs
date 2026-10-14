@@ -210,7 +210,7 @@ public static class DocumentsEndpoints
         var lines = doc.Lines.OrderBy(l => l.Id).Select(l => new DocumentLineDto(
             l.Id, l.ServiceJobId, l.Description, l.Warranty, l.ServiceChallan, l.HsnCode,
             l.Qty, l.UnitRate, l.TaxableAmount, l.GstPercent, l.TaxAmount, l.LineTotal, l.Remarks, l.PartId,
-            l.SerialNo)).ToList();
+            l.SerialNo, l.Unit)).ToList();
 
         // Join lines→services for the covered job numbers (no List.Contains — funcletizer bug).
         var jobs = await (from l in db.ServiceDocumentLines.AsNoTracking()
@@ -228,6 +228,6 @@ public static class DocumentsEndpoints
             doc.Id, doc.DocType.ToString(), doc.DocNo, doc.DocDate, serviceIds, serviceNos,
             doc.PartyName, doc.PartyAddress, doc.PartyGstin, doc.PartyState, doc.PartyStateCode, doc.IsInterState,
             doc.TaxableAmount, doc.CgstAmount, doc.SgstAmount, doc.IgstAmount, doc.CourierCharges, doc.TotalAmount,
-            doc.CourierMode, doc.Remarks, doc.CreatedAt, lines, doc.SpareSaleId, saleNo);
+            doc.CourierMode, doc.CourierHsnCode, doc.Remarks, doc.CreatedAt, lines, doc.SpareSaleId, saleNo);
     }
 }

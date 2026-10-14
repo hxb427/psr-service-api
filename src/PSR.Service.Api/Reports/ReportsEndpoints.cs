@@ -12,7 +12,7 @@ namespace PSR.Service.Api.Reports;
 /// <summary>Phase 6 reporting. All aggregation is server-side over the enum/status-history/ledger tables
 /// (the legacy app scanned whole tables client-side). Queries filter narrow projections in SQL and group
 /// small result sets in memory — deliberately avoids EF GroupBy/Contains translation pitfalls.</summary>
-public static class ReportsEndpoints
+public static partial class ReportsEndpoints
 {
     public static IEndpointRouteBuilder MapReportsEndpoints(this IEndpointRouteBuilder app)
     {
@@ -29,6 +29,9 @@ public static class ReportsEndpoints
         group.MapGet("/tat", TatAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/stock-ledger", StockLedgerAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/stock-analysis", StockAnalysisAsync).RequireAuthorization("ReportsFull");
+        // What was actually used up, month by month, and who used it - see ReportsEndpoints.Consumption.cs.
+        group.MapGet("/consumption", ConsumptionAsync).RequireAuthorization("ReportsFull");
+        group.MapGet("/consumption/{partId:long}", ConsumptionItemAsync).RequireAuthorization("ReportsFull");
 
         return app;
     }
