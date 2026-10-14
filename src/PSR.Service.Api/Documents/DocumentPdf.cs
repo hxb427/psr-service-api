@@ -7,7 +7,12 @@ namespace PSR.Service.Api.Documents;
 
 /// <summary>Renders a <see cref="ServiceDocument"/> (one or more serviced units) to an A4 PDF. One layout serves
 /// all three types — only the title and the GST summary differ. Table mirrors the legacy PI/Invoice layout
-/// (a row per unit: Sr / Description / Serial / Warranty / Service Challan / Qty / Rate / Amount).
+/// (a row per unit: Sr / Description / HSN / Serial / Warranty / Service Challan / Qty / Unit / Rate / Amount).
+///
+/// A delivery challan prices its units too. It covers in-warranty work, so nothing on it is being charged
+/// for — the figures are the declared value of what is in the box, which is what transit needs and what a
+/// customer receiving a free replacement signs against. A challan raised before that existed carries no
+/// value at all, and reprints as it was issued: without the money columns rather than with a page of zeros.
 ///
 /// Both kinds of line print their money columns tax-EXCLUSIVE, so the last column adds up to the Taxable
 /// Value in the totals block directly underneath it and the GST is added once, below the table. A serviced
@@ -32,14 +37,15 @@ public static class DocumentPdf
             DocumentType.Invoice => "Tax Invoice",
             _ => "Delivery Challan",
         };
-        var showMoney = doc.DocType != DocumentType.DC;   // a delivery challan lists units without pricing
+        var showMoney = ShowsMoney(doc);
         // A spare sale bills catalogue items, so warranty and inward-challan columns are meaningless —
         // it prints HSN instead, which a serviced unit doesn't carry.
         var isSale = doc.SpareSaleId is not null;
-        // Per-line remarks are optional and usually unused (a spare-sale line never has any), and an
-        // empty column still costs the width the description and the serial want. Dropped unless at
-        // least one line actually says something.
-        var showRemarks = doc.Lines.Any(l => !string.IsNullOrWhiteSpace(l.Remarks));
+        // A per-line remark prints under its own description rather than in a column of its own. It is
+        // optional and usually unused (a spare-sale line never has one), so a column for it spent width
+        // on nothing most of the time — and with HSN and Unit now on the table there was no width spare
+        // to spend. Under the description it reads against the line it belongs to and costs nothing when
+        // it is absent.
 
         return Document.Create(container =>
         {
@@ -104,53 +110,66 @@ public static class DocumentPdf
                     // ---- unit table ----
                     col.Item().PaddingTop(8).Table(table =>
                     {
+                        // Ten columns at their widest (a priced serviced document) against 539pt of usable
+                        // A4 width, so every constant below is cut to the longest value it has to hold and
+                        // the cell padding is 3 rather than 4 — ten columns pay for that twice over.
+                        // Description takes whatever is left. QuestPDF throws instead of clipping when a
+                        // row cannot fit, so widening one of these without taking the width off another
+                        // fails the download rather than looking cramped.
                         table.ColumnsDefinition(c =>
                         {
-                            c.ConstantColumn(24);    // sr
-                            c.RelativeColumn(3);     // description
+                            c.ConstantColumn(18);    // sr
+                            c.RelativeColumn(1);     // description (+ the line's remark under it)
+                            c.ConstantColumn(46);    // hsn / sac
                             if (isSale)
                             {
-                                c.ConstantColumn(56);    // hsn
-                                c.ConstantColumn(44);    // gst %
+                                c.ConstantColumn(40);    // gst %
                             }
                             else
                             {
-                                // Wide enough for a 15-character serial and for "OutOfWarranty" on one
-                                // line — both of them wrapped mid-word at the old widths.
-                                c.ConstantColumn(84);    // serial no
-                                c.ConstantColumn(68);    // warranty
-                                c.ConstantColumn(64);    // service challan
+                                // Wide enough for a 15-character serial, for "OutOfWarranty" and for a
+                                // full inward challan number on one line each — all three wrapped
+                                // mid-value at narrower widths.
+                                c.ConstantColumn(74);    // serial no
+                                c.ConstantColumn(64);    // warranty
+                                c.ConstantColumn(68);    // service challan
                             }
-                            c.ConstantColumn(26);    // qty
-                            if (showRemarks) c.RelativeColumn(1);
-                            if (showMoney) { c.ConstantColumn(58); c.ConstantColumn(64); }   // rate, amount
+                            c.ConstantColumn(22);    // qty
+                            c.ConstantColumn(30);    // unit
+                            if (showMoney) { c.ConstantColumn(46); c.ConstantColumn(50); }   // rate, amount
                         });
 
                         table.Header(h =>
                         {
                             void Head(string text, bool right = false)
                             {
-                                var cell = h.Cell().Background(Colors.Grey.Lighten3).Padding(4);
+                                var cell = h.Cell().Background(Colors.Grey.Lighten3).Padding(3);
                                 (right ? cell.AlignRight() : cell.AlignLeft()).Text(text).FontSize(8).Bold();
                             }
                             Head("#");
                             Head("Description");
-                            if (isSale) { Head("HSN"); Head("GST %", true); }
+                            Head("HSN/SAC");
+                            if (isSale) { Head("GST %", true); }
                             else { Head("Serial"); Head("Warranty"); Head("Service Challan"); }
                             Head("Qty", true);
-                            if (showRemarks) Head("Remarks");
+                            Head("Unit");
                             if (showMoney) { Head("Rate", true); Head("Taxable", true); }
                         });
 
                         var i = 1;
                         foreach (var l in doc.Lines)
                         {
-                            static IContainer Body(IContainer c) => c.BorderBottom(0.5f).BorderColor(Colors.Grey.Lighten2).Padding(4);
+                            static IContainer Body(IContainer c) => c.BorderBottom(0.5f).BorderColor(Colors.Grey.Lighten2).Padding(3);
                             table.Cell().Element(Body).Text(i++.ToString());
-                            table.Cell().Element(Body).Text(l.Description).FontSize(8);
+                            table.Cell().Element(Body).Column(d =>
+                            {
+                                d.Item().Text(l.Description).FontSize(8);
+                                if (!string.IsNullOrWhiteSpace(l.Remarks))
+                                    d.Item().Text(l.Remarks).FontSize(7.5f).Italic().FontColor(Colors.Grey.Darken1);
+                            });
+                            table.Cell().Element(Body).Text(l.HsnCode ?? "-").FontSize(8);
                             if (isSale)
                             {
-                                table.Cell().Element(Body).Text(l.HsnCode ?? "-").FontSize(8);
                                 table.Cell().Element(Body).AlignRight().Text(l.GstPercent.ToString("0.##")).FontSize(8);
                             }
                             else
@@ -160,11 +179,11 @@ public static class DocumentPdf
                                 table.Cell().Element(Body).Text(l.ServiceChallan ?? "-").FontSize(8);
                             }
                             table.Cell().Element(Body).AlignRight().Text(l.Qty.ToString());
-                            if (showRemarks) table.Cell().Element(Body).Text(l.Remarks ?? "").FontSize(8);
+                            table.Cell().Element(Body).Text(l.Unit ?? "-").FontSize(8);
                             if (showMoney)
                             {
-                                table.Cell().Element(Body).AlignRight().Text(Money(LineRate(l)));
-                                table.Cell().Element(Body).AlignRight().Text(Money(l.TaxableAmount));
+                                table.Cell().Element(Body).AlignRight().Text(Num(LineRate(l)));
+                                table.Cell().Element(Body).AlignRight().Text(Num(l.TaxableAmount));
                             }
                         }
                     });
@@ -185,7 +204,7 @@ public static class DocumentPdf
                                 TotalRow(c, "CGST" + half, doc.CgstAmount);
                                 TotalRow(c, "SGST" + half, doc.SgstAmount);
                             }
-                            if (doc.CourierCharges > 0) TotalRow(c, "Courier", doc.CourierCharges);
+                            if (doc.CourierCharges > 0) TotalRow(c, CourierLabel(doc), doc.CourierCharges);
 
                             var roundOff = RoundOff(doc);
                             if (roundOff != 0) TotalRow(c, "Round off", roundOff);
@@ -221,6 +240,23 @@ public static class DocumentPdf
             });
         });
     }
+
+    /// <summary>Whether a document prints its money columns and its totals block.
+    ///
+    /// A delivery challan is priced like the other two now — it covers in-warranty work, so nothing on it
+    /// is being charged for and the figures are the declared value of what is in the box. The guard is on
+    /// the figures rather than on the type, so a challan issued before that existed, or one deliberately
+    /// sent out with nothing declared, prints as it always did instead of growing a page of zeros under a
+    /// Total Amount of Rs. 0.00.</summary>
+    public static bool ShowsMoney(ServiceDocument doc) => doc.DocType != DocumentType.DC || doc.TotalAmount > 0;
+
+    /// <summary>What the courier row in the totals block is labelled. The charge carries its own SAC, which
+    /// the table cannot show it under because it sits on the document rather than on any line of it — so it
+    /// goes on the label. Read off the document rather than from the constant, so a challan raised before
+    /// the code was stamped reprints without one instead of claiming a code it never carried.</summary>
+    public static string CourierLabel(ServiceDocument doc) => string.IsNullOrWhiteSpace(doc.CourierHsnCode)
+        ? "Courier"
+        : $"Courier (HSN {doc.CourierHsnCode})";
 
     /// <summary>The tax-exclusive rate to print for a line, so Rate × Qty is exactly the Taxable column
     /// beside it. The stored rate is used as-is when it already reproduces the stored taxable amount, which
@@ -265,4 +301,9 @@ public static class DocumentPdf
         });
 
     private static string Money(decimal v) => "Rs. " + v.ToString("N2");
+
+    /// <summary>A money figure inside the table, with no currency on it. There are eleven columns to fit
+    /// across A4 now, and "Rs." repeated down two of them cost more width than it carried: the totals block
+    /// sits directly under the last column and prints the currency, under a letterhead carrying the GSTIN.</summary>
+    private static string Num(decimal v) => v.ToString("N2");
 }

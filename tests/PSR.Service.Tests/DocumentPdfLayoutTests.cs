@@ -40,6 +40,8 @@ public class DocumentPdfLayoutTests
             SerialNo = "H26020000006",
             Warranty = nameof(WarrantyStatus.OutOfWarranty),
             ServiceChallan = "CH-2026-0771",
+            HsnCode = "84239090",
+            Unit = "Nos",
             Qty = 1, UnitRate = 4720m, TaxableAmount = 4000m, GstPercent = 18m, TaxAmount = 720m,
             LineTotal = 4720m,
             Remarks = withRemarks ? "Board no. 44" : null,
@@ -52,6 +54,8 @@ public class DocumentPdfLayoutTests
             SerialNo = "TSC-TE244-77120",
             Warranty = nameof(WarrantyStatus.InWarranty),
             ServiceChallan = "CH-2026-0772",
+            HsnCode = "998719",
+            Unit = "Set",
             Qty = 1, UnitRate = 0m, TaxableAmount = 0m, GstPercent = 18m, TaxAmount = 0m, LineTotal = 0m,
         });
         return doc;
@@ -78,6 +82,7 @@ public class DocumentPdfLayoutTests
         doc.Lines.Add(new ServiceDocumentLine
         {
             PartId = 9, Description = "Load cell cable gland 12mm (LC-GLD-12)", HsnCode = "84239090",
+            Unit = "Pcs",
             Qty = 3, UnitRate = 10.10m, TaxableAmount = 30.30m, GstPercent = 12m, TaxAmount = 3.64m,
             LineTotal = 33.94m,
         });
@@ -95,16 +100,67 @@ public class DocumentPdfLayoutTests
         act().Should().NotBeEmpty();
     }
 
-    [Fact]
-    public void Delivery_challan_fits_the_page()
+    /// <summary>A priced delivery challan is the widest service table there is: every column the invoice
+    /// carries, including the money ones, on a type that used to print without them.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Delivery_challan_fits_the_page(bool withRemarks)
     {
-        var doc = ServiceInvoice(withRemarks: true);
+        var doc = ServiceInvoice(withRemarks);
         doc.DocType = DocumentType.DC;
+        doc.DocNo = "DC-2026-0088";
 
         var act = () => DocumentPdf.Render(doc, new CompanyInfo());
 
         act.Should().NotThrow();
+        act().Should().NotBeEmpty();
     }
+
+    /// <summary>A challan raised before a DC carried any value: no declared figures, so nothing to total.
+    /// It has to reprint the way it was issued rather than under a Total Amount of Rs. 0.00.</summary>
+    [Fact]
+    public void An_unvalued_delivery_challan_prints_without_money()
+    {
+        var doc = ServiceInvoice(withRemarks: true);
+        doc.DocType = DocumentType.DC;
+        doc.DocNo = "DC-2026-0001";
+        foreach (var l in doc.Lines)
+        {
+            l.UnitRate = 0m;
+            l.TaxableAmount = 0m;
+            l.TaxAmount = 0m;
+            l.LineTotal = 0m;
+        }
+        doc.TaxableAmount = doc.CgstAmount = doc.SgstAmount = doc.IgstAmount = 0m;
+        doc.CourierCharges = 0m;
+        doc.TotalAmount = 0m;
+
+        DocumentPdf.ShowsMoney(doc).Should().BeFalse();
+
+        var act = () => DocumentPdf.Render(doc, new CompanyInfo());
+        act.Should().NotThrow();
+    }
+
+    /// <summary>A challan that declares a value prints the same money columns the invoice does — that is
+    /// the whole point of putting prices on it.</summary>
+    [Fact]
+    public void A_valued_delivery_challan_prints_its_money()
+        => DocumentPdf.ShowsMoney(new ServiceDocument { DocType = DocumentType.DC, TotalAmount = 7330m })
+            .Should().BeTrue();
+
+    /// <summary>The courier charge is on the document, not on a line, so the only place its SAC can print
+    /// is the label of its own totals row.</summary>
+    [Fact]
+    public void The_courier_row_is_labelled_with_its_sac()
+        => DocumentPdf.CourierLabel(new ServiceDocument { CourierHsnCode = ServiceDocument.CourierSacCode })
+            .Should().Be("Courier (HSN 9985)");
+
+    /// <summary>A document raised before the code was stamped never carried one, and must not be reprinted
+    /// claiming it did.</summary>
+    [Fact]
+    public void A_courier_row_with_no_stamped_sac_prints_bare()
+        => DocumentPdf.CourierLabel(new ServiceDocument { CourierCharges = 250m }).Should().Be("Courier");
 
     [Fact]
     public void Sale_document_fits_the_page()

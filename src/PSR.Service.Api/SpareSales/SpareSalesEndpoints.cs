@@ -72,8 +72,8 @@ public static class SpareSalesEndpoints
 
     private static async Task<Ok<PagedResult<SpareSaleListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user, string? status, string? payment, string? search,
-        string? customer, DateTime? fromDate, DateTime? toDate, int? page, int? pageSize,
-        CancellationToken ct)
+        string? customer, DateTime? fromDate, DateTime? toDate, bool? excludeCancelled,
+        int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -100,6 +100,11 @@ public static class SpareSalesEndpoints
             q = q.Where(x => x.Sale.SoldAt == null && x.Sale.Status != SpareSaleStatus.Cancelled);
         else if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<SpareSaleStatus>(status, true, out var st))
             q = q.Where(x => x.Sale.Status == st);
+        // A cancelled sale is the record of something that did not happen, and it sat in the middle of the
+        // register the counter reads every day. The Show cancelled toggle is what asks for them — off, the
+        // list leaves them out; on, it asks for nothing else, which the status filter above already does.
+        if (excludeCancelled == true)
+            q = q.Where(x => x.Sale.Status != SpareSaleStatus.Cancelled);
         if (!string.IsNullOrWhiteSpace(payment) && Enum.TryParse<PaymentStatus>(payment, true, out var pay))
             q = q.Where(x => x.Sale.PaymentStatus == pay);
         if (fromDate is { } fd) q = q.Where(x => x.Sale.SaleDate >= fd.Date);
