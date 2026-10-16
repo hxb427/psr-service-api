@@ -81,42 +81,90 @@ public static class SerialsEndpoints
             ToDto(row.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo), audit));
     }
 
+    /// <summary>Apply a manual status change, and move the warehouse count with it.
+    ///
+    /// The count follows the status here, and only here, because this is the one screen where a
+    /// person asserts where a unit is rather than recording something that happened to it. A unit
+    /// put back on the shelf is a unit the shelf has; a unit taken off it - lost, scrapped, sent to
+    /// the bench - is one it does not. Every other path through the serial ledger already carries
+    /// its own quantity, which is why <see cref="SerialService.WarehouseDeltaFor"/> is applied here
+    /// and not inside the service.</summary>
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ChangeStatusAsync(
         long id, [FromBody] ChangeSerialStatusRequest req, ClaimsPrincipal user, AppDbContext db,
-        SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
+        SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
+        CancellationToken ct)
     {
         if (!Enum.TryParse<SerialStatus>(req.Status, true, out var newStatus))
             return TypedResults.BadRequest($"Unknown serial status '{req.Status}'.");
         if (string.IsNullOrWhiteSpace(req.Remarks))
             return TypedResults.BadRequest("Remarks are required for a manual status change.");
 
+        var before = await db.ComponentSerials.AsNoTracking()
+            .Where(c => c.Id == id)
+            .Select(c => new { c.Status, c.PartId, c.SerialNumber })
+            .FirstOrDefaultAsync(ct);
+        if (before is null) return TypedResults.NotFound();
+        if (SerialService.ManualChangeBlocked(before.Status, newStatus, before.SerialNumber) is { } blocked)
+            return TypedResults.BadRequest(blocked);
+
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var updated = await serial.ChangeStatusAsync(id, newStatus, uid, req.Remarks.Trim(), ct);
-        if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
-        audit.Log(uid, "serial.status", "component_serial", id, details: newStatus.ToString(), ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+        try
+        {
+            var updated = await serial.ChangeStatusAsync(id, newStatus, uid, req.Remarks.Trim(), ct);
+            if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
+
+            var delta = SerialService.WarehouseDeltaFor(before.Status, newStatus);
+            await ledger.SerialStatusCorrectionAsync(before.PartId, delta, uid, id,
+                $"{before.SerialNumber}: {before.Status} -> {newStatus} (manual)", ct);
+
+            audit.Log(uid, "serial.status", "component_serial", id,
+                details: delta == 0 ? newStatus.ToString() : $"{newStatus} ({delta:+#;-#;0} warehouse)",
+                ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var row = await SingleRowAsync(db, id, ct);
         return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));
     }
 
+    /// <summary>Receive a unit back at the counter by hand. The same correction as a manual status
+    /// change and for the same reason: booking a unit in as RETURNED_TO_SC puts it on the shelf, so
+    /// the shelf has to count it. Received as defective it is at the service centre but is not
+    /// sellable stock, so nothing is credited.</summary>
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ReceiveAsync(
         long id, [FromBody] ReceiveSerialReturnRequest req, ClaimsPrincipal user, AppDbContext db,
-        SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
+        SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Remarks))
             return TypedResults.BadRequest("Remarks are required to receive a return.");
 
+        var before = await db.ComponentSerials.AsNoTracking()
+            .Where(c => c.Id == id)
+            .Select(c => new { c.Status, c.PartId, c.SerialNumber })
+            .FirstOrDefaultAsync(ct);
+        if (before is null) return TypedResults.NotFound();
+
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var updated = await serial.ReceiveReturnAsync(id, req.Defective, uid, req.Remarks.Trim(), ct);
-        if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
-        audit.Log(uid, "serial.receive", "component_serial", id,
-            details: req.Defective ? "DEFECTIVE" : "RETURNED_TO_SC", ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+        try
+        {
+            var updated = await serial.ReceiveReturnAsync(id, req.Defective, uid, req.Remarks.Trim(), ct);
+            if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
+
+            var delta = SerialService.WarehouseDeltaFor(before.Status, updated.Status);
+            await ledger.SerialStatusCorrectionAsync(before.PartId, delta, uid, id,
+                $"{before.SerialNumber}: {before.Status} -> {updated.Status} (received at counter)", ct);
+
+            audit.Log(uid, "serial.receive", "component_serial", id,
+                details: req.Defective ? "DEFECTIVE" : "RETURNED_TO_SC", ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         var row = await SingleRowAsync(db, id, ct);
         return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));

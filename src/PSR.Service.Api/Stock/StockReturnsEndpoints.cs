@@ -54,7 +54,8 @@ public static class StockReturnsEndpoints
                                      {
                                          s.StockReturnId,
                                          Dto = new StockReturnSerialDto(
-                                             c.Id, c.SerialNumber, s.Defective, c.Status.ToString()),
+                                             c.Id, c.SerialNumber, s.Defective, c.Status.ToString(),
+                                             s.AckStatus != null ? s.AckStatus.ToString() : null),
                                      })
             .ToListAsync(ct);
         var serialLookup = serialsByReturn
@@ -79,7 +80,8 @@ public static class StockReturnsEndpoints
             x.r.Courier, x.r.TrackingNo,
             serialLookup.TryGetValue(x.r.Id, out var ser) ? ser : null,
             x.r.Kind.ToString(),
-            jobLookup.TryGetValue($"RTN-{x.r.ReturnNo}", out var nos) ? nos : null)).ToList();
+            jobLookup.TryGetValue($"RTN-{x.r.ReturnNo}", out var nos) ? nos : null,
+            x.r.QtyReceived, x.r.QtyMissing)).ToList();
         return TypedResults.Ok(items);
     }
 
@@ -154,53 +156,93 @@ public static class StockReturnsEndpoints
         return TypedResults.Created($"/stock-returns/{ret.Id}", await ToDtoAsync(db, ret.Id, ct));
     }
 
-    /// <summary>Receive a technician shipment at the service center.
+    /// <summary>Receive a technician shipment at the service center - all of it, or the part of it
+    /// that has actually turned up.
     ///
     /// The two kinds are genuinely different events and the split is the point of this endpoint:
     ///
-    /// GOOD STOCK - unused units the technician was issued and still carries. Acknowledging moves the
-    /// quantity off them and back onto the warehouse shelf, and their serials become re-issuable.
-    /// Unchanged from how this always worked.
+    /// GOOD STOCK - unused units the technician was issued and still carries. Booking one in moves its
+    /// quantity off them and back onto the warehouse shelf, and its serial becomes re-issuable.
     ///
     /// FAULTY - customers' units collected in the field. These were never on the technician's balance,
     /// so there is nothing to decrement and nothing to shelve: putting them on the warehouse count
     /// would be booking broken stock as sellable. Instead custody moves to the service center and each
     /// unit opens its own repair job, which is what puts it in front of a technician. The quantity
-    /// comes back only when that job is stocked.</summary>
+    /// comes back only when that job is stocked.
+    ///
+    /// A shipment is the envelope, not the thing being received. Ten units in one box can arrive as
+    /// eight good, one smashed and one absent, and the old all-or-nothing acknowledgement could only
+    /// say "all ten arrived perfectly" - so the shelf gained two units nobody had, and the serial
+    /// ledger swore two broken or missing units were re-issuable stock. Now each unit carries its own
+    /// verdict, the shipment stays Pending until its last unit is resolved, and a quantity-only
+    /// shipment takes a received count that may not exceed what was sent.
+    ///
+    /// An empty body still means what it always meant: everything arrived exactly as sent.</summary>
     private static async Task<Results<Ok<StockReturnDto>, NotFound, BadRequest<string>>> AcknowledgeAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
-        SerialService serial, NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, [FromBody] AckStockReturnRequest? req, ClaimsPrincipal user, AppDbContext db,
+        StockLedgerService ledger, SerialService serial, NumberSequenceService seq, IAuditService audit,
+        HttpContext http, CancellationToken ct)
     {
         var r = await db.StockReturns.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (r is null) return TypedResults.NotFound();
         if (r.Status != StockReturnStatus.Pending) return TypedResults.BadRequest($"Return is already {r.Status}.");
 
         user.TryGetUserId(out var uid);
+        var serialLines = await db.StockReturnSerials.Where(s => s.StockReturnId == r.Id).ToListAsync(ct);
+
+        return serialLines.Count > 0
+            ? await ReceiveUnitsAsync(r, serialLines, req, uid, db, ledger, serial, seq, audit, http, ct)
+            : await ReceiveQuantityAsync(r, req, uid, db, ledger, audit, http, ct);
+    }
+
+    /// <summary>Book in the serial-tracked units this call names, or every outstanding one when it
+    /// names none. Each unit is resolved exactly once: a verdict already recorded is not up for
+    /// revision here, because the shelf and the serial ledger have already moved on it.</summary>
+    private static async Task<Results<Ok<StockReturnDto>, NotFound, BadRequest<string>>> ReceiveUnitsAsync(
+        StockReturn r, List<StockReturnSerial> serialLines, AckStockReturnRequest? req, long uid,
+        AppDbContext db, StockLedgerService ledger, SerialService serial, NumberSequenceService seq,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        if (req?.QtyReceived is not null)
+            return TypedResults.BadRequest(
+                "This shipment is serial-tracked: book its units in by serial, not by quantity.");
+
+        var open = serialLines.Where(l => l.AckStatus is null).ToList();
+        if (open.Count == 0)
+            return TypedResults.BadRequest("Every unit on this shipment has already been booked in.");
+
+        var (verdicts, error) = PlanUnitReceipt([.. open.Select(l => l.ComponentSerialId)], req?.Serials);
+        if (error is not null) return TypedResults.BadRequest(error);
+        var plan = verdicts
+            .Select(v => (Line: open.First(l => l.ComponentSerialId == v.ComponentSerialId), v.Verdict))
+            .ToList();
+
+        var now = DateTime.UtcNow;
+        var opened = new List<string>();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            var serialLines = await db.StockReturnSerials.AsNoTracking()
-                .Where(s => s.StockReturnId == r.Id).ToListAsync(ct);
+            foreach (var (line, verdict) in plan)
+            {
+                if (await ApplyVerdictAsync(db, ledger, serial, seq, r, line, verdict, uid, ct)
+                    is { } serviceNo)
+                    opened.Add(serviceNo);
 
-            if (r.Kind == StockReturnKind.Faulty)
-            {
-                var opened = await OpenRepairJobsAsync(db, serial, seq, r, serialLines, uid, ct);
-                audit.Log(uid, "stock-return.acknowledge", "stock_return", r.Id,
-                    details: $"faulty, {opened} repair job(s) opened", ip: http.GetIp());
-            }
-            else
-            {
-                await ledger.ReturnToStockAsync(r.PartId, r.TechnicianId, r.Qty, uid, "STOCK_RETURN", r.Id, ct,
-                    debitTechnician: !r.TechnicianDebitedOnShip);
-                foreach (var line in serialLines)
-                    await serial.ReceiveReturnAsync(line.ComponentSerialId, line.Defective, uid,
-                        $"Return {r.ReturnNo} received at service center", ct);
-                audit.Log(uid, "stock-return.acknowledge", "stock_return", r.Id, ip: http.GetIp());
+                line.AckStatus = verdict;
+                line.AckedByUserId = uid;
+                line.AckedAt = now;
+                if (verdict == SerialAckStatus.Missing) r.QtyMissing++; else r.QtyReceived++;
             }
 
-            r.Status = StockReturnStatus.Stocked;
-            r.AcknowledgedByUserId = uid;
-            r.AcknowledgedDate = DateTime.UtcNow;
+            CloseIfSettled(r, serialLines, uid, now);
+            AppendReceiptNote(r, req?.Remarks);
+            audit.Log(uid, "stock-return.acknowledge", "stock_return", r.Id,
+                details: string.Join(", ", plan.GroupBy(p => p.Verdict).Select(g => $"{g.Count()} {g.Key}"))
+                    + (opened.Count > 0 ? $"; {opened.Count} repair job(s) opened" : "")
+                    + (r.Status == StockReturnStatus.Pending
+                        ? $"; {serialLines.Count(l => l.AckStatus is null)} unit(s) still outstanding"
+                        : ""),
+                ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -209,8 +251,165 @@ public static class StockReturnsEndpoints
         return TypedResults.Ok(await ToDtoAsync(db, r.Id, ct));
     }
 
-    /// <summary>Open one service job per unit on an acknowledged faulty return, and move each unit to
-    /// UNDER_REPAIR pointing at its job.
+    /// <summary>Work out which units this call resolves and to what, without touching the database.
+    ///
+    /// Naming no units means the whole outstanding remainder arrived as sent, which is what an empty
+    /// body has always meant here. Naming units restricts the call to exactly those - and a name that
+    /// is not outstanding is an error rather than a no-op, because the two ways that happens are a
+    /// unit someone else already booked in and a serial id from a different shipment, and silently
+    /// doing nothing would report both as success.
+    ///
+    /// Returns the verdicts to apply, or the message to hand back.</summary>
+    internal static (List<(long ComponentSerialId, SerialAckStatus Verdict)> Verdicts, string? Error) PlanUnitReceipt(
+        IReadOnlyList<long> outstanding, IReadOnlyList<AckStockReturnSerialLine>? asked)
+    {
+        var plan = new List<(long ComponentSerialId, SerialAckStatus Verdict)>();
+        if (asked is null || asked.Count == 0)
+        {
+            plan.AddRange(outstanding.Select(id => (id, SerialAckStatus.Received)));
+            return (plan, null);
+        }
+
+        foreach (var ask in asked)
+        {
+            if (!outstanding.Contains(ask.ComponentSerialId))
+                return (plan,
+                    $"Serial id {ask.ComponentSerialId} is not a unit of this shipment still awaiting receipt.");
+            if (plan.Any(p => p.ComponentSerialId == ask.ComponentSerialId))
+                return (plan, $"Serial id {ask.ComponentSerialId} is named twice.");
+            if (!Enum.TryParse<SerialAckStatus>(ask.Status, true, out var verdict))
+                return (plan, $"Unknown serial ack status '{ask.Status}'.");
+            plan.Add((ask.ComponentSerialId, verdict));
+        }
+
+        return (plan, null);
+    }
+
+    /// <summary>What a receiver may claim arrived. Capped at what was sent, because a receipt is a
+    /// statement about one shipment and not a way to conjure stock that was never dispatched.</summary>
+    internal static string? QuantityReceiptError(int received, int sent, string returnNo) =>
+        received < 0 || received > sent
+            ? $"Received quantity must be between 0 and the {sent} sent on {returnNo}."
+            : null;
+
+    /// <summary>One unit, booked in as the receiver found it. Returns the repair job opened for it,
+    /// or null when none was.
+    ///
+    /// The envelope a unit travelled in does not decide what it is. A unit the receiver calls broken
+    /// is a broken unit now in the service centre's hands whether it rode in on a faulty shipment or
+    /// turned up smashed among unused stock, so both get a repair job: it is the only thing that puts
+    /// the unit in front of a technician, and UNDER_REPAIR is deliberately not re-issuable, so it
+    /// cannot be offered on the next issue while it is in pieces. The quantity follows from that -
+    /// the unit comes off the technician now and reaches the warehouse only when its job is stocked.
+    ///
+    /// Without this, a Defective verdict would leave the unit at the service centre in a status
+    /// nothing acts on: not on the shelf, not on anyone's worklist, waiting for somebody to notice it
+    /// by hand.</summary>
+    private static async Task<string?> ApplyVerdictAsync(
+        AppDbContext db, StockLedgerService ledger, SerialService serial, NumberSequenceService seq,
+        StockReturn r, StockReturnSerial line, SerialAckStatus verdict, long uid, CancellationToken ct)
+    {
+        // Shipments raised before dispatch and receipt were split out still carry their quantity on
+        // the technician, so whatever became of the unit, this is where it comes off them. A faulty
+        // shipment never had a quantity to move in the first place.
+        var owes = r.Kind == StockReturnKind.GoodStock && !r.TechnicianDebitedOnShip;
+
+        switch (verdict)
+        {
+            case SerialAckStatus.Received when r.Kind == StockReturnKind.GoodStock:
+                await serial.ReceiveReturnAsync(line.ComponentSerialId, line.Defective, uid,
+                    $"Return {r.ReturnNo} received at service center", ct);
+                await ledger.ReturnToStockAsync(r.PartId, r.TechnicianId, 1, uid, "STOCK_RETURN", r.Id, ct,
+                    debitTechnician: owes);
+                return null;
+
+            case SerialAckStatus.Missing:
+                await serial.ChangeStatusAsync(line.ComponentSerialId, SerialStatus.Missing, uid,
+                    $"Return {r.ReturnNo}: unit never arrived at the service centre", ct);
+                await ledger.ReturnLostAsync(r.PartId, r.TechnicianId, r.Kind == StockReturnKind.GoodStock ? 1 : 0,
+                    uid, "STOCK_RETURN", r.Id, $"Return {r.ReturnNo}: unit never arrived", ct,
+                    debitTechnician: owes);
+                return null;
+
+            // Received on a faulty shipment, or Defective on either: a unit for the bench.
+            default:
+                if (r.Kind == StockReturnKind.GoodStock)
+                    await ledger.ReturnDefectiveAsync(r.PartId, r.TechnicianId, 1, uid, "STOCK_RETURN", r.Id,
+                        $"Return {r.ReturnNo}: unit arrived faulty, booked in for repair", ct,
+                        debitTechnician: owes);
+                return await OpenRepairJobAsync(db, serial, seq, r, line, uid, ct);
+        }
+    }
+
+    /// <summary>Book in a quantity-only shipment. One shot, because there are no units to resolve one
+    /// at a time - but the count is the receiver's, capped at what was sent, and the shortfall is
+    /// written off rather than quietly shelved.</summary>
+    private static async Task<Results<Ok<StockReturnDto>, NotFound, BadRequest<string>>> ReceiveQuantityAsync(
+        StockReturn r, AckStockReturnRequest? req, long uid, AppDbContext db, StockLedgerService ledger,
+        IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        // Only reachable if a shipment's serial rows were deleted underneath it: a faulty return is
+        // refused at creation unless the part is serial-tracked, and then carries one unit per qty.
+        if (r.Kind == StockReturnKind.Faulty)
+            return TypedResults.BadRequest(
+                $"Return {r.ReturnNo} is a faulty shipment with no units on it; there is nothing to book in.");
+
+        var received = req?.QtyReceived ?? r.Qty;
+        if (QuantityReceiptError(received, r.Qty, r.ReturnNo) is { } bad) return TypedResults.BadRequest(bad);
+        var missing = r.Qty - received;
+
+        var now = DateTime.UtcNow;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            var owes = !r.TechnicianDebitedOnShip;
+            if (received > 0)
+                await ledger.ReturnToStockAsync(r.PartId, r.TechnicianId, received, uid, "STOCK_RETURN", r.Id, ct,
+                    debitTechnician: owes);
+            await ledger.ReturnLostAsync(r.PartId, r.TechnicianId, missing, uid, "STOCK_RETURN", r.Id,
+                $"Return {r.ReturnNo}: {missing} of {r.Qty} never arrived", ct, debitTechnician: owes);
+
+            r.QtyReceived = received;
+            r.QtyMissing = missing;
+            r.Status = received > 0 ? StockReturnStatus.Stocked : StockReturnStatus.Missing;
+            r.AcknowledgedByUserId = uid;
+            r.AcknowledgedDate = now;
+            AppendReceiptNote(r, req?.Remarks);
+            audit.Log(uid, "stock-return.acknowledge", "stock_return", r.Id,
+                details: $"{received} of {r.Qty} received"
+                    + (missing > 0 ? $", {missing} written off as never arrived" : ""),
+                ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
+
+        return TypedResults.Ok(await ToDtoAsync(db, r.Id, ct));
+    }
+
+    /// <summary>A shipment closes when its last unit has a verdict, and not before - leaving it open is
+    /// what lets a straggler be booked in tomorrow against the same shipment. Missing rather than
+    /// Stocked when nothing on it ever turned up.</summary>
+    private static void CloseIfSettled(StockReturn r, List<StockReturnSerial> lines, long uid, DateTime now)
+    {
+        if (lines.Any(l => l.AckStatus is null)) return;
+        r.Status = r.QtyReceived > 0 ? StockReturnStatus.Stocked : StockReturnStatus.Missing;
+        r.AcknowledgedByUserId = uid;
+        r.AcknowledgedDate = now;
+    }
+
+    /// <summary>Keep the receiver's note on the shipment, where the technician who sent it can read it,
+    /// instead of only in an audit log they cannot see.</summary>
+    private static void AppendReceiptNote(StockReturn r, string? note)
+    {
+        note = note?.Trim();
+        if (string.IsNullOrEmpty(note)) return;
+        var combined = string.IsNullOrWhiteSpace(r.Remarks) ? $"Receipt: {note}" : $"{r.Remarks}\nReceipt: {note}";
+        r.Remarks = combined.Length <= 500 ? combined : combined[..500];
+    }
+
+    /// <summary>Open the repair job for one unit of a faulty return and move that unit to UNDER_REPAIR
+    /// pointing at it. Returns the job number, or null when the unit's record has gone.
     ///
     /// One job per unit, not one per shipment: a job carries a single serial, a single verdict and a
     /// single set of lines, and the shipment is only how the units travelled. The legacy app made the
@@ -221,67 +420,56 @@ public static class StockReturnsEndpoints
     /// is the difference between a repair history that reads as one machine's story and a pile of
     /// anonymous return rows. Only when the customer is genuinely unknown (units that entered tracking
     /// before this existed) does it fall back to a per-technician returns account.</summary>
-    private static async Task<int> OpenRepairJobsAsync(
+    private static async Task<string?> OpenRepairJobAsync(
         AppDbContext db, SerialService serial, NumberSequenceService seq, StockReturn r,
-        List<StockReturnSerial> serialLines, long uid, CancellationToken ct)
+        StockReturnSerial line, long uid, CancellationToken ct)
     {
-        if (serialLines.Count == 0) return 0;
+        var unit = await db.ComponentSerials.FirstOrDefaultAsync(c => c.Id == line.ComponentSerialId, ct);
+        if (unit is null) return null;
 
         var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == r.PartId, ct);
         var techName = await db.Users.AsNoTracking().Where(u => u.Id == r.TechnicianId)
             .Select(u => u.FullName ?? u.Username).FirstOrDefaultAsync(ct) ?? $"technician #{r.TechnicianId}";
-        var today = Common.ShopClock.Today;
-        long? fallbackCustomerId = null;
-        var opened = 0;
 
-        foreach (var line in serialLines)
+        var priorStatus = unit.Status.ToString();
+        var customerId = unit.CustomerId;
+        if (customerId is { } cid && !await db.Customers.AnyAsync(c => c.Id == cid, ct)) customerId = null;
+        customerId ??= await ReturnsAccountAsync(db, techName, ct);
+
+        var job = new ServiceJob
         {
-            var unit = await db.ComponentSerials.FirstOrDefaultAsync(c => c.Id == line.ComponentSerialId, ct);
-            if (unit is null) continue;
+            ServiceNo = await seq.NextAsync(SequenceKeys.Service, ct),
+            ChallanNo = $"RTN-{r.ReturnNo}",
+            CustomerType = "Direct",
+            CustomerId = customerId,
+            SerialNo = unit.SerialNumber,
+            PsCode = part?.ItemCode,
+            ModelName = part?.Name,
+            Description = unit.ItemName ?? part?.Name,
+            ReportedProblem = $"Field return inspection - unit was {priorStatus} with {techName}",
+            WarrantyStatus = WarrantyStatus.Unknown,
+            InwardDcNo = r.TrackingNo,
+            DateReceived = Common.ShopClock.Today,
+            Priority = Priority.Normal,
+            ServiceStatus = ServiceStatus.Inward,
+            AckStatus = AckStatus.Pending,
+            SourceComponentSerialId = unit.Id,
+            CreatedByUserId = uid,
+        };
+        db.Services.Add(job);
+        await db.SaveChangesAsync(ct);   // job id, for the history row and the serial back-reference
 
-            var priorStatus = unit.Status.ToString();
-            var customerId = unit.CustomerId;
-            if (customerId is { } cid && !await db.Customers.AnyAsync(c => c.Id == cid, ct)) customerId = null;
-            if (customerId is null)
-                customerId = fallbackCustomerId ??= await ReturnsAccountAsync(db, techName, ct);
+        db.ServiceStatusHistory.Add(new ServiceStatusHistory
+        {
+            ServiceId = job.Id, FromStatus = null, ToStatus = ServiceStatus.Inward.ToString(),
+            ChangedByUserId = uid,
+            Note = $"Inward created from field return {r.ReturnNo} ({techName})",
+        });
 
-            var job = new ServiceJob
-            {
-                ServiceNo = await seq.NextAsync(SequenceKeys.Service, ct),
-                ChallanNo = $"RTN-{r.ReturnNo}",
-                CustomerType = "Direct",
-                CustomerId = customerId,
-                SerialNo = unit.SerialNumber,
-                PsCode = part?.ItemCode,
-                ModelName = part?.Name,
-                Description = unit.ItemName ?? part?.Name,
-                ReportedProblem = $"Field return inspection - unit was {priorStatus} with {techName}",
-                WarrantyStatus = WarrantyStatus.Unknown,
-                InwardDcNo = r.TrackingNo,
-                DateReceived = today,
-                Priority = Priority.Normal,
-                ServiceStatus = ServiceStatus.Inward,
-                AckStatus = AckStatus.Pending,
-                SourceComponentSerialId = unit.Id,
-                CreatedByUserId = uid,
-            };
-            db.Services.Add(job);
-            await db.SaveChangesAsync(ct);   // job id, for the history row and the serial back-reference
-
-            db.ServiceStatusHistory.Add(new ServiceStatusHistory
-            {
-                ServiceId = job.Id, FromStatus = null, ToStatus = ServiceStatus.Inward.ToString(),
-                ChangedByUserId = uid,
-                Note = $"Inward created from field return {r.ReturnNo} ({techName})",
-            });
-
-            await serial.ReceiveFaultyReturnAsync(unit.Id, uid,
-                $"Return {r.ReturnNo} received at service center; job {job.ServiceNo} opened", ct);
-            unit.CurrentServiceJobId = job.Id;
-            opened++;
-        }
-
-        return opened;
+        await serial.ReceiveFaultyReturnAsync(unit.Id, uid,
+            $"Return {r.ReturnNo} received at service center; job {job.ServiceNo} opened", ct);
+        unit.CurrentServiceJobId = job.Id;
+        return job.ServiceNo;
     }
 
     /// <summary>The party a returned unit is booked against when its original customer is unknown.
@@ -299,6 +487,9 @@ public static class StockReturnsEndpoints
         return created.Id;
     }
 
+    /// <summary>The shipment never arrived. Only the units still outstanding are written off: one
+    /// that was already booked onto the shelf last week is on the shelf, and retrospectively calling
+    /// it lost would take a unit out of stock that is sitting in the building.</summary>
     private static async Task<Results<Ok<StockReturnDto>, NotFound, BadRequest<string>>> MissingAsync(
         long id, ClaimsPrincipal user, AppDbContext db, SerialService serial, StockLedgerService ledger,
         IAuditService audit, HttpContext http, CancellationToken ct)
@@ -308,25 +499,44 @@ public static class StockReturnsEndpoints
         if (r.Status != StockReturnStatus.Pending) return TypedResults.BadRequest($"Return is already {r.Status}.");
 
         user.TryGetUserId(out var uid);
+        var now = DateTime.UtcNow;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            var serialLines = await db.StockReturnSerials
+                .Where(s => s.StockReturnId == r.Id).ToListAsync(ct);
+            var open = serialLines.Where(l => l.AckStatus is null).ToList();
 
-        // Shipment never arrived — its serial-tracked units are lost in transit.
-        var serialLines = await db.StockReturnSerials.AsNoTracking()
-            .Where(s => s.StockReturnId == r.Id).ToListAsync(ct);
-        foreach (var line in serialLines)
-            await serial.ChangeStatusAsync(line.ComponentSerialId, SerialStatus.Missing, uid,
-                $"Return {r.ReturnNo} reported missing in transit", ct);
+            foreach (var line in open)
+            {
+                await serial.ChangeStatusAsync(line.ComponentSerialId, SerialStatus.Missing, uid,
+                    $"Return {r.ReturnNo} reported missing in transit", ct);
+                line.AckStatus = SerialAckStatus.Missing;
+                line.AckedByUserId = uid;
+                line.AckedAt = now;
+            }
 
-        if (r.TechnicianDebitedOnShip)
-            ledger.LostInTransit(r.PartId, r.TechnicianId, r.Qty, uid, "STOCK_RETURN", r.Id,
-                $"Return {r.ReturnNo} reported missing in transit");
+            // Units, when the shipment has them; otherwise whatever quantity is still unaccounted for.
+            var lost = serialLines.Count > 0 ? open.Count : r.Qty - r.QtyReceived - r.QtyMissing;
 
-        r.Status = StockReturnStatus.Missing;
-        r.AcknowledgedByUserId = uid;
-        r.AcknowledgedDate = DateTime.UtcNow;
-        audit.Log(uid, "stock-return.missing", "stock_return", r.Id, ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+            // A faulty shipment carries customers' units that were never on the technician's balance,
+            // so there is no quantity to write off - only the units' own statuses change.
+            if (r.Kind == StockReturnKind.GoodStock)
+                await ledger.ReturnLostAsync(r.PartId, r.TechnicianId, lost, uid, "STOCK_RETURN", r.Id,
+                    $"Return {r.ReturnNo} reported missing in transit", ct,
+                    debitTechnician: !r.TechnicianDebitedOnShip);
+
+            r.QtyMissing += lost;
+            r.Status = r.QtyReceived > 0 ? StockReturnStatus.Stocked : StockReturnStatus.Missing;
+            r.AcknowledgedByUserId = uid;
+            r.AcknowledgedDate = now;
+            audit.Log(uid, "stock-return.missing", "stock_return", r.Id,
+                details: $"{lost} of {r.Qty} never arrived", ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
+
         return TypedResults.Ok(await ToDtoAsync(db, r.Id, ct));
     }
 
@@ -342,7 +552,8 @@ public static class StockReturnsEndpoints
         var serials = await (from s in db.StockReturnSerials.AsNoTracking()
                              where s.StockReturnId == id
                              join c in db.ComponentSerials on s.ComponentSerialId equals c.Id
-                             select new StockReturnSerialDto(c.Id, c.SerialNumber, s.Defective, c.Status.ToString()))
+                             select new StockReturnSerialDto(c.Id, c.SerialNumber, s.Defective,
+                                 c.Status.ToString(), s.AckStatus != null ? s.AckStatus.ToString() : null))
             .ToListAsync(ct);
         // Jobs raised off this shipment, so the acknowledging user sees what was opened without
         // having to go looking for it on the service board.
@@ -353,6 +564,6 @@ public static class StockReturnsEndpoints
         return new StockReturnDto(x.r.Id, x.r.ReturnNo, x.r.TechnicianId, x.Username, x.r.PartId, x.ItemCode, x.Name,
             x.r.Qty, x.r.Status.ToString(), x.r.AcknowledgedDate, x.r.Remarks, x.r.CreatedAt,
             x.r.Courier, x.r.TrackingNo, serials, x.r.Kind.ToString(),
-            serviceNos.Count > 0 ? serviceNos : null);
+            serviceNos.Count > 0 ? serviceNos : null, x.r.QtyReceived, x.r.QtyMissing);
     }
 }

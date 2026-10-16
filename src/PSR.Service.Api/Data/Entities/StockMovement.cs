@@ -14,7 +14,7 @@ public class StockMovement
     public MovementType MovementType { get; set; }
     public int Quantity { get; set; }
     public long? TechnicianId { get; set; }     // set for Issue/Return/Consumption
-    public string? ReferenceType { get; set; }   // STOCK_REQUEST / STOCK_RETURN / SERVICE / MANUAL
+    public string? ReferenceType { get; set; }   // STOCK_REQUEST / STOCK_RETURN / SERVICE / MANUAL / SERIAL_STATUS
     public long? ReferenceId { get; set; }
     public string? InvoiceNo { get; set; }       // supplier invoice no (receipts)
     public string? Source { get; set; }          // supplier / source (receipts)

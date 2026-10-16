@@ -9,4 +9,12 @@ public class StockReturnSerial
     public long ComponentSerialId { get; set; }
     /// <summary>Technician declared the unit faulty when shipping (COLLECTED/DEFECTIVE stock).</summary>
     public bool Defective { get; set; }
+
+    /// <summary>What the service centre found when it opened the box, per unit; null until that unit
+    /// is booked in. The shipment is the envelope, not the thing being received - units in one box
+    /// can arrive in different states, and one of them missing must not hold the other nine out of
+    /// stock. The shipment closes when the last unit here is resolved.</summary>
+    public SerialAckStatus? AckStatus { get; set; }
+    public long? AckedByUserId { get; set; }
+    public DateTime? AckedAt { get; set; }
 }

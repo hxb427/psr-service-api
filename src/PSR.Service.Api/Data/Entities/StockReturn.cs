@@ -15,6 +15,14 @@ public class StockReturn : ITimestamps
     /// split out — those are still carrying their quantity, so acknowledging one has to debit it.</summary>
     public bool TechnicianDebitedOnShip { get; set; }
     public StockReturnStatus Status { get; set; } = StockReturnStatus.Pending;
+
+    /// <summary>What the service centre actually took in, and what never arrived. A shipment is no
+    /// longer all-or-nothing: a box of ten can turn up with eight in it, and booking that in as ten
+    /// is how the warehouse count starts lying. Both stay 0 while the shipment is still Pending, and
+    /// on a serial-tracked shipment they are the tally of the per-unit verdicts rather than a second
+    /// number anyone types.</summary>
+    public int QtyReceived { get; set; }
+    public int QtyMissing { get; set; }
     public long? AcknowledgedByUserId { get; set; }
     public DateTime? AcknowledgedDate { get; set; }
     public string? Remarks { get; set; }

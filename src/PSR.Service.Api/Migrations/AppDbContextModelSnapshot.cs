@@ -2538,6 +2538,18 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("int")
                         .HasColumnName("qty");
 
+                    b.Property<int>("QtyMissing")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0)
+                        .HasColumnName("qty_missing");
+
+                    b.Property<int>("QtyReceived")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0)
+                        .HasColumnName("qty_received");
+
                     b.Property<string>("Remarks")
                         .HasMaxLength(500)
                         .HasColumnType("varchar(500)")
@@ -2596,6 +2608,19 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnName("id");
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AckStatus")
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasColumnName("ack_status");
+
+                    b.Property<DateTime?>("AckedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("acked_at");
+
+                    b.Property<long?>("AckedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("acked_by_user_id");
 
                     b.Property<long>("ComponentSerialId")
                         .HasColumnType("bigint")

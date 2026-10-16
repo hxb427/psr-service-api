@@ -161,4 +161,5 @@ public record StockReturnDto(
     string? Courier = null, string? TrackingNo = null,
     List<StockReturnSerialDto>? Serials = null,
     string Kind = nameof(StockReturnKind.GoodStock),
-    List<string>? CreatedServiceNos = null);
+    List<string>? CreatedServiceNos = null,
+    int QtyReceived = 0, int QtyMissing = 0);

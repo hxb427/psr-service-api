@@ -55,6 +55,9 @@ public class StockReturnSerialConfiguration : IEntityTypeConfiguration<StockRetu
         b.Property(x => x.StockReturnId).HasColumnName("stock_return_id");
         b.Property(x => x.ComponentSerialId).HasColumnName("component_serial_id");
         b.Property(x => x.Defective).HasColumnName("defective");
+        b.Property(x => x.AckStatus).HasColumnName("ack_status").HasConversion<string>().HasMaxLength(16);
+        b.Property(x => x.AckedByUserId).HasColumnName("acked_by_user_id");
+        b.Property(x => x.AckedAt).HasColumnName("acked_at");
 
         b.HasOne<StockReturn>().WithMany().HasForeignKey(x => x.StockReturnId).OnDelete(DeleteBehavior.Cascade);
         b.HasOne<ComponentSerial>().WithMany().HasForeignKey(x => x.ComponentSerialId).OnDelete(DeleteBehavior.Restrict);

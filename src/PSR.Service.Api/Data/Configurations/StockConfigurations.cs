@@ -104,6 +104,10 @@ public class StockReturnConfiguration : IEntityTypeConfiguration<StockReturn>
         b.Property(x => x.TechnicianDebitedOnShip).HasColumnName("technician_debited_on_ship")
             .HasDefaultValue(false);
         b.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20);
+        // 0 on existing rows, which is what they mean: a shipment booked in before this existed was
+        // all-or-nothing, so its received count is read off Qty and Status, not off these.
+        b.Property(x => x.QtyReceived).HasColumnName("qty_received").HasDefaultValue(0);
+        b.Property(x => x.QtyMissing).HasColumnName("qty_missing").HasDefaultValue(0);
         b.Property(x => x.AcknowledgedByUserId).HasColumnName("acknowledged_by_user_id");
         b.Property(x => x.AcknowledgedDate).HasColumnName("acknowledged_date");
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);

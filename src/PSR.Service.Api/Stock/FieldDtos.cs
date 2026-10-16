@@ -22,7 +22,32 @@ public record AckIssueRequest(
 
 // ---------- returns with serials + courier ----------
 
-public record StockReturnSerialDto(long ComponentSerialId, string SerialNumber, bool Defective, string Status);
+/// <param name="Defective">What the technician said when they shipped it.</param>
+/// <param name="Status">The unit's current lifecycle status.</param>
+/// <param name="AckStatus">What the service centre found when it opened the box, or null while this
+/// unit is still awaiting booking. Per unit, because a box of ten can arrive with eight in it.</param>
+public record StockReturnSerialDto(
+    long ComponentSerialId, string SerialNumber, bool Defective, string Status, string? AckStatus = null);
+
+/// <summary>One unit's verdict at the receiving end: Received | Defective | Missing.</summary>
+public record AckStockReturnSerialLine(long ComponentSerialId, [Required] string Status);
+
+/// <summary>Book a return shipment in, whole or in part.
+///
+/// An empty body means what this endpoint has always meant - everything arrived exactly as sent -
+/// so clients built before partial receipt existed keep working unchanged.
+///
+/// <para><paramref name="Serials"/> books in only the units it names, on a serial-tracked shipment.
+/// The shipment stays Pending until the last unit is resolved, so a box that turns up a day late
+/// does not force the nine that arrived to wait.</para>
+///
+/// <para><paramref name="QtyReceived"/> is the quantity-only equivalent and is refused on a
+/// serial-tracked shipment, where the units are the count. It may not exceed what was sent: a
+/// receipt is a statement about a shipment, not a way to conjure stock.</para></summary>
+public record AckStockReturnRequest(
+    [Range(0, 1_000_000)] int? QtyReceived = null,
+    List<AckStockReturnSerialLine>? Serials = null,
+    [StringLength(500)] string? Remarks = null);
 
 // ---------- technician transfers ----------
 

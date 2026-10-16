@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 
@@ -31,6 +31,47 @@ public class SerialService(AppDbContext db)
 
     internal static IReadOnlyList<SerialStatus> ShippableFor(StockReturnKind kind) =>
         kind == StockReturnKind.Faulty ? FaultyShippable : GoodStockShippable;
+
+    /// <summary>Whether a unit in this status is counted in the WAREHOUSE balance.
+    ///
+    /// Defined as "may be issued from the shelf", not as a second list that happens to match today:
+    /// the shelf count and the issue pick list have to be the same set of units, or the warehouse is
+    /// offering stock it cannot give out, or holding stock it will not offer.</summary>
+    internal static bool IsWarehouseStock(SerialStatus status) => ReIssuable.Contains(status);
+
+    /// <summary>How a MANUAL status change moves the warehouse count: +1 when the unit joins the
+    /// shelf, -1 when it leaves it, 0 when the shelf was never involved either side.
+    ///
+    /// This is the join the manual screen used to skip. A unit written off as missing had its
+    /// quantity written off with it; flipping it to RETURNED_TO_SC made it issuable again while the
+    /// count stayed one short for ever, so the next issue of that part either failed on a guard
+    /// nobody could explain or quietly ran the balance down against a unit that was sitting on the
+    /// shelf. The reverse matters just as much: without the -1, flipping a unit missing and found
+    /// and missing again would mint a unit of stock on every lap.
+    ///
+    /// Only the manual endpoints use this. Every ordinary path - acknowledging a return, stocking a
+    /// repair job, cancelling a swap - already moves its own quantity alongside the status, and
+    /// applying this there as well would count each of those twice.</summary>
+    internal static int WarehouseDeltaFor(SerialStatus from, SerialStatus to) =>
+        (IsWarehouseStock(from), IsWarehouseStock(to)) switch
+        {
+            (false, true) => 1,
+            (true, false) => -1,
+            _ => 0,
+        };
+
+    /// <summary>Why this manual status change must not be applied, or null when it may be.
+    ///
+    /// One transition is refused: shelf stock straight into a technician's hands. It is the only
+    /// change where the quantity would leave the warehouse and arrive nowhere, because a technician's
+    /// usable holding is credited by issuing - a status edit has no issue, no quantity and no
+    /// technician balance behind it. Handing a unit over is an issue; saying so is more use than
+    /// silently losing one from the count.</summary>
+    internal static string? ManualChangeBlocked(SerialStatus from, SerialStatus to, string serialNumber) =>
+        IsWarehouseStock(from) && to == SerialStatus.Received
+            ? $"{serialNumber} is on the warehouse shelf. Issue it to the technician instead - that is "
+              + "what moves the quantity onto their holding, which a status change cannot do."
+            : null;
 
     /// <summary>Returns serial → reason for any serial that cannot be issued for this part
     /// (duplicated in the request, or currently deployed elsewhere). Empty ⇒ all issuable.</summary>

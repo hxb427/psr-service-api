@@ -38,6 +38,32 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
+    /// <summary>Follow a manual serial status change with the warehouse movement it implies.
+    ///
+    /// Written as an Adjustment because that is exactly what it is - a correction to the shelf count
+    /// made by a person, carrying its own signed quantity - and because the stock report already
+    /// reads Adjustment as a warehouse movement. The reference points at the unit, so the row says
+    /// which serial moved the count and the remark says which way it went.</summary>
+    public async Task SerialStatusCorrectionAsync(long partId, int delta, long byUser, long serialId,
+        string remarks, CancellationToken ct)
+    {
+        if (delta == 0) return;
+        if (delta > 0)
+            await IncrementAsync(partId, StockBalance.Warehouse, delta, ct);
+        else if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, -delta, ct))
+            throw new StockException(
+                "The warehouse count for this part is already lower than the units on the shelf say it "
+                + "should be, so this change would take it negative. Correct the count with a stock "
+                + "adjustment first.");
+
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.Adjustment, Quantity = delta,
+            PerformedByUserId = byUser, ReferenceType = "SERIAL_STATUS", ReferenceId = serialId,
+            Remarks = remarks,
+        });
+    }
+
     /// <summary>Dispatch stock to a technician.
     ///
     /// The warehouse is always debited here - the goods have left the shelf, whatever happens next.
@@ -171,6 +197,43 @@ public class StockLedgerService(AppDbContext db)
             TechnicianId = technicianId, PerformedByUserId = byUser,
             ReferenceType = referenceType, ReferenceId = referenceId, Remarks = remarks,
         });
+
+    /// <summary>Units from a return shipment that arrived, but arrived broken. Recorded and NOT put
+    /// back on the shelf: the point of inspecting a shipment is that what the receiver found governs,
+    /// and shelving a unit the receiver has just called faulty would book broken stock as sellable -
+    /// the same mistake the faulty-return path exists to avoid.
+    ///
+    /// <paramref name="debitTechnician"/> covers shipments raised before dispatch and receipt were
+    /// split out: those still carry their quantity on the technician, and a unit that is now at the
+    /// service centre in pieces is not theirs to hold either.</summary>
+    public async Task ReturnDefectiveAsync(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, string remarks, CancellationToken ct,
+        bool debitTechnician = false)
+    {
+        if (qty <= 0) return;
+        if (debitTechnician && !await GuardedDecrementAsync(partId, technicianId, qty, ct))
+            throw new StockException("Technician does not hold enough of this part to return.");
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.DefectiveOnArrival, Quantity = qty,
+            TechnicianId = technicianId, PerformedByUserId = byUser,
+            ReferenceType = referenceType, ReferenceId = referenceId, Remarks = remarks,
+        });
+    }
+
+    /// <summary>Units from a return shipment that never arrived. Same shape as
+    /// <see cref="ReturnDefectiveAsync"/> and for the same reason: on a shipment raised before the
+    /// split, nothing had come off the technician yet, so simply recording the loss would leave them
+    /// holding a quantity that is demonstrably not in their bag.</summary>
+    public async Task ReturnLostAsync(long partId, long technicianId, int qty, long byUser,
+        string referenceType, long referenceId, string remarks, CancellationToken ct,
+        bool debitTechnician = false)
+    {
+        if (qty <= 0) return;
+        if (debitTechnician && !await GuardedDecrementAsync(partId, technicianId, qty, ct))
+            throw new StockException("Technician does not hold enough of this part to write off.");
+        LostInTransit(partId, technicianId, qty, byUser, referenceType, referenceId, remarks);
+    }
 
     /// <summary>A shipment that never arrived. The technician was debited when it left them, so the
     /// quantity is simply gone; this records where it went instead of leaving an unexplained gap
