@@ -113,30 +113,45 @@ public record StockAnalysisDto(List<StockInwardRow> Inward, List<TechStockRow> T
 
 // ----- monthly consumption -----
 //
-// What the business actually used up, month by month, and who used it. The two existing stock reports
-// answer neighbouring questions and neither answers this one: the ledger is a shelf's arithmetic, and
-// treats a part issued to a technician as gone the day it was handed over; the analysis splits that
-// same movement by technician. Consumption is the other half - stock is used on the day it is fitted
-// or sold, by whoever fitted or sold it, and that is the figure a reorder is decided from.
+// Gross warehouse outflow, month by month: every movement that took stock off the warehouse shelf,
+// and nothing that put any back. Issues to technicians are the bulk of it, counter sales and
+// replacement units the rest, write-downs the remainder.
+//
+// This is the stock ledger's Outward column, broken out three ways the ledger cannot manage: by shop
+// month, by part within a month, and down to the document behind every individual movement. The
+// ledger answers what the shelf opened and closed at; this answers where the outflow went.
+//
+// It is NOT the same figure as usage. Six boards issued to a technician who fits two are six here and
+// two on the stock analysis, and the gap between the two reports is what that technician is carrying.
+// See ConsumptionRules for the full rule and for why nothing inbound is netted off.
 
-/// <summary>One shop-calendar month's consumption. Months with nothing in them are returned too, as
-/// zero rows: a gap in a trend is the thing worth seeing, and a missing month is indistinguishable
-/// from a broken report.</summary>
-/// <param name="Items">How many distinct parts were consumed that month. "40 units" and "40 units
-/// across 31 different parts" are different months and only one of them is a bulk job.</param>
+/// <summary>One shop-calendar month's outflow. Months with nothing in them are returned too, as zero
+/// rows: a gap in a trend is the thing worth seeing, and a missing month is indistinguishable from a
+/// broken report.
+///
+/// Every column is a count of units that left the shelf, so none of them can be negative - which is
+/// the one thing this report guarantees and the previous netted version could not.</summary>
+/// <param name="Technicians">Dispatched or handed over to a technician.</param>
+/// <param name="Sales">Sold off the shelf - a counter or dealer spare sale.</param>
+/// <param name="Service">Whole replacement units shipped against a job.</param>
+/// <param name="Shrinkage">Written off the shelf without going anywhere: a stock-take or serial
+/// correction that took the count down.</param>
+/// <param name="Items">How many distinct parts left the warehouse that month. "40 units" and "40
+/// units across 31 different parts" are different months and only one of them is a bulk job.</param>
 public record ConsumptionMonthRow(
-    DateTime Month, string Label, int Service, int Sales, int Other, int Total, int Items);
+    DateTime Month, string Label,
+    int Technicians, int Sales, int Service, int Shrinkage, int Total, int Items);
 
-/// <summary>One part's consumption - either within one month, or across the whole window when
+/// <summary>One part's outflow - either within one month, or across the whole window when
 /// <paramref name="Month"/> is null. Both shapes are the same record because the grid that shows them
 /// is the same grid: picking a month on the report swaps one list for the other and nothing else.</summary>
-/// <param name="OnHand">What the warehouse holds NOW, not at the end of the window. Consumption and
-/// the shelf are two different facts and the pair is the useful one: forty used last month with three
-/// left is a reorder, forty used with ninety left is not.</param>
+/// <param name="OnHand">What the warehouse holds NOW, not at the end of the window. Outflow and the
+/// shelf are two different facts and the pair is the useful one: forty gone last month with three
+/// left is a reorder, forty gone with ninety left is not.</param>
 public record ConsumptionItemRow(
     DateTime? Month, string? MonthLabel,
     long PartId, string ItemCode, string PartName, string? Unit,
-    int Service, int Sales, int Other, int Total, int OnHand);
+    int Technicians, int Sales, int Service, int Shrinkage, int Total, int OnHand);
 
 /// <summary>The monthly consumption report: the window it actually covers, the totals strip, the
 /// month rows, and the item rows both per-month and summed over the window.
@@ -151,39 +166,40 @@ public record ConsumptionItemRow(
 /// month rows to get a window total would get a second answer the moment it was filtered or paged.</summary>
 public record ConsumptionReportDto(
     DateTime From, DateTime To, string Stream,
-    int TotalService, int TotalSales, int TotalOther, int Total,
+    int TotalTechnicians, int TotalSales, int TotalService, int TotalShrinkage, int Total,
     List<ConsumptionMonthRow> Months,
     List<ConsumptionItemRow> Items,
     List<ConsumptionItemRow> ItemTotals);
 
-/// <summary>Who consumed one part, and in what capacity. <paramref name="Who"/> is the technician for
-/// anything fitted or sold off a technician's own stock, and the user who moved it for anything that
-/// went straight off the warehouse shelf - a counter sale, a replacement unit, a write-down.</summary>
+/// <summary>Who took one part out of the warehouse, and how. <paramref name="Who"/> is the technician
+/// for an issue, and the user who moved it for anything that went straight out - a counter sale, a
+/// replacement unit, a write-down.</summary>
 public record ConsumptionConsumerRow(string Who, string Kind, string Stream, int Qty);
 
-/// <summary>One consuming movement, as the drill-down lists it: the exact detail behind a figure.</summary>
-/// <param name="Qty">Signed, so a reversal row shows as the negative it is rather than looking like a
-/// second consumption of the same part.</param>
-/// <param name="Reference">The document the movement happened on - job, field visit, field sale or
-/// counter sale number - so the row can be traced back to the paperwork. Null for a stock adjustment,
-/// which has remarks instead.</param>
+/// <summary>One outward movement, as the drill-down lists it: the exact detail behind a figure.</summary>
+/// <param name="Qty">Units off the shelf, always positive - this report counts outflow only, so there
+/// is no reversal row to show as a negative.</param>
+/// <param name="Reference">The document the movement happened on - the delivery challan or request
+/// number for an issue, the job number for a replacement, the sale number for a counter sale - so the
+/// row can be traced back to the paperwork. Null for a write-down, which has remarks instead.</param>
 /// <param name="Party">The customer or dealer the stock went to, where the document names one. For a
-/// sale this is the truest answer to "who consumed it"; for a job it says whose machine it went into.</param>
+/// sale this is the truest answer to "who got it"; for a job it says whose machine it went into. Null
+/// for an issue, where <paramref name="Who"/> is already the technician it went to.</param>
 public record ConsumptionEventRow(
     DateTime At, string Kind, string Stream, int Qty,
     string? Who, string? Reference, string? Party, string? Remarks);
 
-/// <summary>Everything about one part's consumption over the window: the totals, its month-by-month
-/// trend, who consumed it, and the movements behind those figures. Fetched per part rather than
+/// <summary>Everything about one part's outflow over the window: the totals, its month-by-month
+/// trend, who took it out, and the movements behind those figures. Fetched per part rather than
 /// bundled into the report, because the movement-level detail for every part in a year would be most
 /// of the ledger for the one part someone clicked on.</summary>
-/// <param name="MovementCount">How many consuming movements there actually were, against the
+/// <param name="MovementCount">How many outward movements there actually were, against the
 /// <see cref="Events"/> list which is capped. The figures above the list are summed from all of them,
 /// so a reader who could not see that the list was shortened would try to add it up and fail.</param>
 public record ConsumptionItemDetailDto(
     long PartId, string ItemCode, string PartName, string? Unit, int WarehouseOnHand,
     DateTime From, DateTime To, string Stream,
-    int TotalService, int TotalSales, int TotalOther, int Total,
+    int TotalTechnicians, int TotalSales, int TotalService, int TotalShrinkage, int Total,
     List<ConsumptionMonthRow> Months,
     List<ConsumptionConsumerRow> Consumers,
     List<ConsumptionEventRow> Events,

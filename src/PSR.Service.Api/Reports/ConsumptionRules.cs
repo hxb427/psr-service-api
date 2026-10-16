@@ -3,146 +3,153 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Reports;
 
-/// <summary>Which side of the business used the stock up. The split exists because the store's two
-/// questions — how much are we spending on repairs, and how much are we selling over the counter —
-/// are answered out of the same ledger and used to be impossible to tell apart on it.</summary>
+/// <summary>Where the stock went when it left the warehouse. The split exists because the store's
+/// questions — how much are we handing to technicians, how much are we selling over the counter, how
+/// much are we writing off — are all answered out of the same ledger and used to be impossible to
+/// tell apart on it.</summary>
 internal enum ConsumptionStream
 {
-    /// <summary>Used fixing something: fitted on an in-house job or a field visit, or shipped out as
-    /// a whole replacement unit.</summary>
-    Service,
+    /// <summary>Dispatched or handed to a technician. The biggest column by far on most months: it is
+    /// how nearly all stock leaves the building, whether it is later fitted, sold in the field or
+    /// brought back.</summary>
+    Technicians,
 
-    /// <summary>Sold as goods: a counter/dealer spare sale, or a field technician selling from the
-    /// stock they carry.</summary>
+    /// <summary>Sold as goods straight off the shelf — a counter or dealer spare sale.</summary>
     Sales,
 
-    /// <summary>Gone without being used or sold — a stock-take write-down, or a shipment that never
-    /// arrived. Small, and deliberately not folded into either of the other two: a shrinkage counted
-    /// as service consumption reads as repair spend that never happened.</summary>
-    Other,
+    /// <summary>A whole replacement unit shipped out against a job.</summary>
+    Service,
+
+    /// <summary>Written off the shelf without going anywhere — a stock-take that found fewer than the
+    /// book said, or a serial correction that took the count down. Small, and deliberately not folded
+    /// into the other columns: a write-down counted as an issue reads as stock a technician is
+    /// holding.</summary>
+    Shrinkage,
 }
 
-/// <summary>What one ledger row means to the consumption report: which side of the business used the
-/// stock, what kind of event it was, and how many units it consumed.
+/// <summary>What one ledger row means to the consumption report: which way the stock went, what kind
+/// of event it was, and how many units left the warehouse.
 ///
-/// <paramref name="Consumed"/> is signed, and that is why this carries a quantity rather than being a
-/// plain classification. The ledger reverses things by appending an opposite row, never by deleting
-/// the original — a completed job that was reverted, a sale un-marked in error, a cancelled
-/// replacement — so those rows have to come back NEGATIVE and net the original off. A report that
-/// summed only the positive rows would show usage that never happened, and would keep showing it for
-/// ever.</summary>
+/// <paramref name="Consumed"/> is always strictly positive. The report counts outflow and nothing
+/// else, so there is no row anywhere in the ledger that can make one of its figures smaller — see
+/// <see cref="ConsumptionRules.Effect"/>.</summary>
 internal readonly record struct ConsumptionEffect(ConsumptionStream Stream, string Kind, int Consumed);
 
 /// <summary>The consumption report's arithmetic, kept apart from the endpoint that serves it so the
 /// rules can be pinned by tests without a database behind them.
 ///
-/// This is the second of the two rules that read the stock ledger — <see cref="ReportsEndpoints"/>'s
-/// WarehouseDelta is the other — and they answer deliberately different questions. WarehouseDelta is
-/// about a shelf: issuing six boards to a technician takes six off it. This is about use: those six
-/// boards have not been consumed, they have been moved, and they are consumed on the day they are
-/// fitted, which may be next month or never. The two reports therefore will not agree on a total,
-/// and should not.</summary>
+/// CONSUMPTION HERE MEANS GROSS WAREHOUSE OUTFLOW: every movement that takes stock off the warehouse
+/// shelf, and only those. Stock issued to a technician is consumed on the day it is dispatched, not
+/// the day it is fitted — it has left the warehouse, and the warehouse is what this report is about.
+///
+/// Nothing that puts stock BACK is counted: a return, a sale un-marked, a reverted job, a cancelled
+/// replacement, a stock-take that found more. That is the whole reason this report cannot show a
+/// negative figure. The older version of this rule netted those reversals off, which is defensible
+/// arithmetic and unreadable as a report: a sale returned this month against one made before the
+/// window started left a month reading below zero, and a positive stock correction turned up as
+/// negative consumption. A month cannot consume minus four boards.
+///
+/// The cost of counting gross is that outflow and usage are not the same number and this report only
+/// answers the first. Six boards issued to a technician who fits two are six here. StockAnalysis is
+/// the report for the other question — its Issued and Used columns side by side — and the gap between
+/// them is what a technician is carrying.
+///
+/// This is therefore the same question <see cref="ReportsEndpoints"/>'s WarehouseDelta answers, and
+/// deliberately so: this report's total is the stock ledger's Outward column, broken out by month, by
+/// part, and down to the document behind every movement. If the two ever disagree, one of them has a
+/// movement type the other does not.</summary>
 internal static class ConsumptionRules
 {
     // The kind labels, as the report prints them. Here rather than inline so the grid, the drill-down
     // and the workbook cannot drift into three spellings of the same event.
-    internal const string InHouseJob = "In-house job";
-    internal const string JobReverted = "Job reverted";
-    internal const string FieldVisit = "Field visit";
-    internal const string FieldSale = "Field sale";
+    internal const string IssuedToTechnician = "Issued to technician";
     internal const string CounterSale = "Counter sale";
-    internal const string SaleUnmarked = "Sale un-marked";
-    internal const string SaleReturned = "Sale returned";
     internal const string UnitReplacement = "Unit replacement";
-    internal const string ReplacementCancelled = "Replacement cancelled";
-    internal const string StockAdjustment = "Stock adjustment";
-    internal const string LostInTransit = "Lost in transit";
+    internal const string StockWriteDown = "Stock write-down";
 
     /// <summary>How many months the report covers when the caller names no window. Twelve, so the
     /// page opens on a year of months and a seasonal item's figure has something to be read against;
     /// an unbounded default would list every month the shop has ever traded.</summary>
     internal const int DefaultMonths = 12;
 
-    /// <summary>How a ledger row lands on the consumption report, or null when it is not consumption.
+    /// <summary>How a ledger row lands on the consumption report, or null when it is not stock leaving
+    /// the warehouse.
     ///
-    /// The movement type alone is not enough, and that is the point of this function. A Consumption
-    /// row is a part FITTED by a technician when it carries a SERVICE or FIELD_SERVICE reference and
-    /// a spare SOLD by one when it carries FIELD_SALE — same type, same balance effect, opposite
-    /// sides of the business. Switching on the type alone files every field sale under service work,
-    /// which is exactly the mistake the sales/service split on this report exists to stop.
+    /// Four types do, and they are exactly the four that take the warehouse balance down: an Issue to
+    /// a technician, a Sale off the shelf, a Replacement unit shipped, and the negative half of an
+    /// Adjustment.
     ///
-    /// What is deliberately NOT consumption: an issue to a technician, a return, a receipt and a peer
-    /// transfer all move stock from one shelf to another inside the company. Counting an issue would
-    /// say the stock was used up on the day it was handed over rather than the day it was fitted, and
-    /// would then count it a second time when it actually was. A defective arrival moves no balance
-    /// at all — the unit is with the technician, faulty — so it is nobody's consumption either.</summary>
-    internal static ConsumptionEffect? Effect(MovementType type, string? referenceType, int qty)
+    /// What is deliberately NOT here, and why each one would be wrong:
+    ///
+    /// Consumption and ConsumptionReversal are the technician's stock being used up, not the
+    /// warehouse's. Those units were already counted the day they were issued, so counting them again
+    /// when they are fitted reports the same board twice.
+    ///
+    /// LossInTransit moves no warehouse balance at all — the Issue it belongs to already debited the
+    /// shelf, and this row only records that the shipment never arrived. Counting it would
+    /// double-count the loss. It is still the right figure for "what did we lose", which is the stock
+    /// analysis's question, not this one.
+    ///
+    /// Receipt, Return, SaleReturn, SaleUnsold and ReplacementReturn all put stock back on the shelf.
+    /// They are the ledger's Input, and subtracting them here is what used to make this report go
+    /// negative.
+    ///
+    /// IssueReceipt, ReturnDispatched, DefectiveOnArrival and the three Transfer types never touch the
+    /// warehouse: they move stock between technicians, or between a technician and a courier.</summary>
+    internal static ConsumptionEffect? Effect(MovementType type, int qty)
     {
-        var reference = referenceType?.Trim().ToUpperInvariant();
-        return type switch
+        ConsumptionEffect? effect = type switch
         {
-            MovementType.Consumption => Used(reference, qty),
-            MovementType.ConsumptionReversal => Reverted(reference, qty),
-
+            MovementType.Issue => new ConsumptionEffect(ConsumptionStream.Technicians, IssuedToTechnician, qty),
             MovementType.Sale => new ConsumptionEffect(ConsumptionStream.Sales, CounterSale, qty),
-            MovementType.SaleUnsold => new ConsumptionEffect(ConsumptionStream.Sales, SaleUnmarked, -qty),
-            MovementType.SaleReturn => new ConsumptionEffect(ConsumptionStream.Sales, SaleReturned, -qty),
-
             MovementType.Replacement => new ConsumptionEffect(ConsumptionStream.Service, UnitReplacement, qty),
-            MovementType.ReplacementReturn => new ConsumptionEffect(ConsumptionStream.Service, ReplacementCancelled, -qty),
 
-            // Stored already signed, where a shrinkage is negative: a stock-take that found three
-            // fewer consumed three, and one that found three more un-consumes them. The sign flip is
-            // the whole conversion — this is the one movement type whose quantity is not a magnitude.
-            MovementType.Adjustment => new ConsumptionEffect(ConsumptionStream.Other, StockAdjustment, -qty),
-            MovementType.LossInTransit => new ConsumptionEffect(ConsumptionStream.Other, LostInTransit, qty),
+            // The one movement type stored already signed, and the only one whose quantity is not a
+            // magnitude. A stock-take that found three FEWER wrote -3 and took three off the shelf, so
+            // it consumed three. One that found three more put stock back, and falls out below.
+            MovementType.Adjustment => new ConsumptionEffect(ConsumptionStream.Shrinkage, StockWriteDown, -qty),
 
             _ => null,
         };
+
+        // The report's whole invariant, in one place. Every figure on it — each month, each part, the
+        // totals strip, the drill-down — is a sum of these, so if no single effect can be zero or
+        // negative then no cell anywhere on the report can be either. This is also what filters the
+        // positive half of Adjustment out, which is why the database predicate below fetches more rows
+        // than this function keeps.
+        return effect is { Consumed: > 0 } ? effect : null;
     }
 
     /// <summary>The movement types <see cref="Effect"/> can return something for, as a predicate the
-    /// database applies before any of this runs. Issues, receipts, returns and peer transfers are the
-    /// bulk of the ledger and none of them is consumption, so leaving them in the database rather than
-    /// fetching a year of them to discard is most of this report's cost.
+    /// database applies before any of this runs. Issues aside, the bulk of the ledger is receipts,
+    /// receipts-of-issue, returns and consumption rows, and none of those is warehouse outflow, so
+    /// leaving them in the database rather than fetching a year of them to discard is most of this
+    /// report's cost.
+    ///
+    /// Adjustment is the one type this over-fetches: the sign decides whether it counts and SQL cannot
+    /// be asked for "the negative ones" without the rule and the predicate disagreeing on what
+    /// negative means. Manual corrections are rare enough that fetching both halves is cheaper than
+    /// the drift would be.
     ///
     /// Two statements of one fact, which is a drift waiting to happen: a type added to
     /// <see cref="Effect"/> and not here would simply never appear on the report, and nothing would
     /// fail. ConsumptionRuleTests walks every <see cref="MovementType"/> and asserts the two agree,
     /// so the drift is a red test rather than a column that quietly reads low.</summary>
     internal static readonly Expression<Func<StockMovement, bool>> IsConsuming = m =>
-        m.MovementType == MovementType.Consumption
-        || m.MovementType == MovementType.ConsumptionReversal
+        m.MovementType == MovementType.Issue
         || m.MovementType == MovementType.Sale
-        || m.MovementType == MovementType.SaleUnsold
-        || m.MovementType == MovementType.SaleReturn
         || m.MovementType == MovementType.Replacement
-        || m.MovementType == MovementType.ReplacementReturn
-        || m.MovementType == MovementType.Adjustment
-        || m.MovementType == MovementType.LossInTransit;
-
-    /// <summary>A part fitted or sold off a technician's own stock. Which of the two it was is on the
-    /// reference, never on the type.</summary>
-    private static ConsumptionEffect Used(string? reference, int qty) => reference switch
-    {
-        "FIELD_SALE" => new ConsumptionEffect(ConsumptionStream.Sales, FieldSale, qty),
-        "FIELD_SERVICE" => new ConsumptionEffect(ConsumptionStream.Service, FieldVisit, qty),
-        // "SERVICE", and anything written before the field references existed.
-        _ => new ConsumptionEffect(ConsumptionStream.Service, InHouseJob, qty),
-    };
-
-    /// <summary>Parts handed back when a completed job was reverted. Classified through the same
-    /// reference mapping as the consumption it undoes, so a reversal always lands on the stream that
-    /// carried the original and can never net off against the other one.</summary>
-    private static ConsumptionEffect Reverted(string? reference, int qty) =>
-        new(Used(reference, qty).Stream, JobReverted, -qty);
+        || m.MovementType == MovementType.Adjustment;
 
     /// <summary>The stream the caller asked for, or null for all of them combined.</summary>
     internal static ConsumptionStream? ParseStream(string? value) => value?.Trim().ToLowerInvariant() switch
     {
-        "service" => ConsumptionStream.Service,
+        "technicians" or "techs" or "issues" => ConsumptionStream.Technicians,
         "sales" => ConsumptionStream.Sales,
-        "other" => ConsumptionStream.Other,
+        "service" => ConsumptionStream.Service,
+        // "other" is what this column was called when it also held transit losses. Accepted so a saved
+        // link or an older desktop build lands on the column that replaced it rather than on everything.
+        "shrinkage" or "other" => ConsumptionStream.Shrinkage,
         // "all", "combined", missing, or anything unrecognised. An unknown value showing everything is
         // the safe way to be wrong: the alternative is a page of zeroes that reads like a quiet month.
         _ => null,
@@ -152,16 +159,17 @@ internal static class ConsumptionRules
     /// window with the server's own word for it rather than echoing what was typed.</summary>
     internal static string StreamName(ConsumptionStream? stream) => stream switch
     {
-        ConsumptionStream.Service => "service",
+        ConsumptionStream.Technicians => "technicians",
         ConsumptionStream.Sales => "sales",
-        ConsumptionStream.Other => "other",
+        ConsumptionStream.Service => "service",
+        ConsumptionStream.Shrinkage => "shrinkage",
         _ => "all",
     };
 
     /// <summary>The shop-calendar month a stored instant falls in, as that month's first day.
     ///
     /// On the shop's clock, not the server's, and this is the one piece of arithmetic the whole report
-    /// stands on. Movements are stored UTC; the shop is five and a half hours ahead. A part fitted at
+    /// stands on. Movements are stored UTC; the shop is five and a half hours ahead. Stock issued at
     /// half past seven on the evening of the 31st is stored as the 1st, so bucketing the raw timestamp
     /// files it under the following month — October would be short of a day it worked and November
     /// would carry a day it had not started. Every movement after 18:30 local is affected, which is

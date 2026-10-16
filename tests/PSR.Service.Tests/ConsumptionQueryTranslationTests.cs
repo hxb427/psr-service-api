@@ -43,9 +43,9 @@ public class ConsumptionQueryTranslationTests
         sql.Should().Contain("movement_type");
     }
 
-    /// <summary>Every document lookup, including the sale-return one that hops through the sale to
-    /// reach the party. Driven off the production list so a sixth reference type added later is
-    /// covered by this test the day it is written rather than the day somebody notices.</summary>
+    /// <summary>Every document lookup. Driven off the production list so a fourth reference type
+    /// added later is covered by this test the day it is written rather than the day somebody
+    /// notices.</summary>
     [Fact]
     public void Every_document_lookup_translates_to_sql()
     {
@@ -53,7 +53,10 @@ public class ConsumptionQueryTranslationTests
 
         var queries = ReportsEndpoints.DocumentQueries(db, partId: 42, From, To);
 
-        queries.Should().HaveCount(5, "one per reference type a consuming movement can carry");
+        queries.Should().HaveCount(3,
+            "one per reference type an OUTWARD movement can carry: the stock request behind an issue, "
+            + "the job behind a replacement unit, and the counter sale. A write-down carries MANUAL or "
+            + "SERIAL_STATUS and has no document to reach.");
         foreach (var (type, query) in queries)
         {
             var translate = () => query.ToQueryString();
@@ -65,9 +68,9 @@ public class ConsumptionQueryTranslationTests
         }
     }
 
-    /// <summary>The reference type has to be part of the join, not just the key. Job 412 and field sale
-    /// 412 are different documents, and a lookup that matched on the id alone would label a field
-    /// sale's movement with a service job's number — a wrong answer that reads as a right one.</summary>
+    /// <summary>The reference type has to be part of the join, not just the key. Job 412 and stock
+    /// request 412 are different documents, and a lookup that matched on the id alone would label a
+    /// technician's issue with a service job's number — a wrong answer that reads as a right one.</summary>
     [Fact]
     public void A_document_lookup_matches_on_the_reference_type_as_well_as_the_id()
     {

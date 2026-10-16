@@ -8,19 +8,21 @@ using PSR.Service.Api.Data.Entities;
 
 namespace PSR.Service.Api.Reports;
 
-/// <summary>Monthly stock consumption — what the business actually used up, split by the side of the
-/// business that used it, with every figure traceable to the movements behind it.
+/// <summary>Monthly stock consumption — everything that left the warehouse shelf, month by month,
+/// split by where it went, with every figure traceable to the movements behind it.
 ///
-/// Why this is not the stock ledger with different column headings: the ledger is a shelf's
-/// arithmetic, so stock issued to a technician is off the shelf the day it is handed over. That is
-/// right for a shelf and wrong for consumption — those parts are in a van, not in a machine, and they
-/// are consumed on the day they are fitted, which may be next month or never. Issues are therefore
-/// not counted here at all, and the two reports do not agree on a total. See
-/// <see cref="ConsumptionRules"/> for the full rule and for what else is excluded.
+/// Consumption here is GROSS WAREHOUSE OUTFLOW: an issue to a technician, a counter or dealer sale, a
+/// replacement unit shipped, a write-down. Nothing inbound is netted off, which is why no figure on
+/// this report can be negative. <see cref="ConsumptionRules"/> carries the full rule and the reason
+/// for each exclusion.
 ///
-/// The sales/service split is the other half of the point. Both sides consume out of the same
-/// warehouse and the same ledger, and before this there was no way to ask how much of a month's usage
-/// was repair work and how much was goods sold over the counter.</summary>
+/// Why it is not the stock ledger with different column headings: the ledger is a shelf's arithmetic
+/// and stops at one Outward number per part per window. This is the same number broken out by shop
+/// month, by part within a month, and down to the delivery challan or sale behind an individual
+/// movement — which is what "why did we get through forty of these in March" actually needs.
+///
+/// Why it is not the stock analysis either: that report's question is usage, and the gap between what
+/// a technician was issued and what they fitted. This one stops at the warehouse door.</summary>
 public static partial class ReportsEndpoints
 {
     /// <summary>How many movements the drill-down lists. A fast-moving part over a year of months runs
@@ -28,45 +30,49 @@ public static partial class ReportsEndpoints
     /// list are the answer, and this is the evidence for them, newest first.</summary>
     private const int MaxConsumptionEvents = 400;
 
-    /// <summary>Three running totals for one bucket — a month, an item, or the page's own strip.
+    /// <summary>Four running totals for one bucket — a month, an item, or the page's own strip.
     /// Mutable and deliberately so: a quarter of a million ledger rows are added to their month, their
     /// item and the totals in one pass over the list rather than three LINQ groupings over it.</summary>
     private sealed class StreamTally
     {
-        public int Service { get; private set; }
+        public int Technicians { get; private set; }
         public int Sales { get; private set; }
-        public int Other { get; private set; }
+        public int Service { get; private set; }
+        public int Shrinkage { get; private set; }
 
-        public int Total => Service + Sales + Other;
+        public int Total => Technicians + Sales + Service + Shrinkage;
 
-        /// <summary>Whether this bucket is worth printing. Not "did anything happen" — a month in
-        /// which one part was fitted and the same part handed back nets to zero, and a row of zeroes
-        /// is noise whichever way it got there.</summary>
-        public bool Any => Service != 0 || Sales != 0 || Other != 0;
+        /// <summary>Whether this bucket is worth printing. Every figure that reaches here is positive,
+        /// so a bucket is empty only when genuinely nothing left the shelf — and a row of zeroes is
+        /// noise on a report whose quiet months are already drawn as zero rows.</summary>
+        public bool Any => Total != 0;
 
         public void Add(ConsumptionStream stream, int qty)
         {
             switch (stream)
             {
-                case ConsumptionStream.Service: Service += qty; break;
+                case ConsumptionStream.Technicians: Technicians += qty; break;
                 case ConsumptionStream.Sales: Sales += qty; break;
-                default: Other += qty; break;
+                case ConsumptionStream.Service: Service += qty; break;
+                default: Shrinkage += qty; break;
             }
         }
 
         public void Add(StreamTally other)
         {
-            Service += other.Service;
+            Technicians += other.Technicians;
             Sales += other.Sales;
-            Other += other.Other;
+            Service += other.Service;
+            Shrinkage += other.Shrinkage;
         }
     }
 
     // ---------------------------------------------------------------- the report
 
-    /// <param name="stream">"service", "sales", "other", or "all" / absent for everything combined.
-    /// Filters what counts: in a single-stream window the other columns read zero and an item consumed
-    /// only by the other side drops out of the list entirely, which is the point of asking.</param>
+    /// <param name="stream">"technicians", "sales", "service", "shrinkage", or "all" / absent for
+    /// everything combined. Filters what counts: in a single-stream window the other columns read zero
+    /// and a part that only ever left the shelf the other way drops out of the list entirely, which is
+    /// the point of asking.</param>
     /// <param name="format">"xlsx" writes the month-by-item matrix as a workbook instead — the whole
     /// report on one sheet, because that is what somebody asking for it in Excel is going to pivot.</param>
     private static async Task<Results<Ok<ConsumptionReportDto>, FileContentHttpResult>> ConsumptionAsync(
@@ -95,7 +101,7 @@ public static partial class ReportsEndpoints
         var partById = parts.ToDictionary(p => p.Id);
 
         var moves = await ConsumingMovements(db, storedFrom, storedTo)
-            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.ReferenceType, m.CreatedAt })
+            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.CreatedAt })
             .ToListAsync(ct);
 
         // One cell per (month, part). Everything else on the report is this dictionary read a
@@ -104,8 +110,7 @@ public static partial class ReportsEndpoints
         foreach (var m in moves)
         {
             if (!partById.ContainsKey(m.PartId)) continue;
-            if (ConsumptionRules.Effect(m.MovementType, m.ReferenceType, m.Quantity) is not { } effect) continue;
-            if (effect.Consumed == 0) continue;
+            if (ConsumptionRules.Effect(m.MovementType, m.Quantity) is not { } effect) continue;
             if (wanted is { } only && effect.Stream != only) continue;
 
             var key = (ConsumptionRules.MonthOf(m.CreatedAt, offset), m.PartId);
@@ -130,10 +135,10 @@ public static partial class ReportsEndpoints
             }
             window.Add(tally);
             months.Add(new ConsumptionMonthRow(month, ConsumptionRules.MonthLabel(month),
-                tally.Service, tally.Sales, tally.Other, tally.Total, distinctItems));
+                tally.Technicians, tally.Sales, tally.Service, tally.Shrinkage, tally.Total, distinctItems));
         }
 
-        // Per month and per part. Biggest consumer first within a month: a report of what was used is
+        // Per month and per part. Biggest mover first within a month: a report of what went out is
         // read from the top, and alphabetical order buries the one row somebody is looking for.
         var items = cells.Where(c => c.Value.Any)
             .Select(c => ItemRow(c.Key.Month, partById[c.Key.PartId].Id, partById[c.Key.PartId].ItemCode,
@@ -164,15 +169,16 @@ public static partial class ReportsEndpoints
         {
             var label = wanted is null ? "Consumption" : $"Consumption ({ConsumptionRules.StreamName(wanted)})";
             return TypedResults.File(XlsxBuilder.Build(label,
-                new[] { "Month", "Item code", "Part", "Unit", "Service", "Sales", "Other", "Total", "In stock" },
+                new[] { "Month", "Item code", "Part", "Unit", "To technicians", "Sales", "Replacements",
+                        "Write-downs", "Total out", "In stock" },
                 items.Select(x => (IReadOnlyList<object?>)new object?[] { x.MonthLabel, x.ItemCode, x.PartName,
-                    x.Unit, x.Service, x.Sales, x.Other, x.Total, x.OnHand })),
+                    x.Unit, x.Technicians, x.Sales, x.Service, x.Shrinkage, x.Total, x.OnHand })),
                 XlsxMime, "stock-consumption.xlsx");
         }
 
         return TypedResults.Ok(new ConsumptionReportDto(
             windowFrom, windowTo, ConsumptionRules.StreamName(wanted),
-            window.Service, window.Sales, window.Other, window.Total,
+            window.Technicians, window.Sales, window.Service, window.Shrinkage, window.Total,
             months, items, itemTotals));
     }
 
@@ -180,12 +186,14 @@ public static partial class ReportsEndpoints
         string? unit, StreamTally tally, IReadOnlyDictionary<long, int> onHand) =>
         new(month, month is { } m ? ConsumptionRules.MonthLabel(m) : null,
             partId, itemCode, partName, unit,
-            tally.Service, tally.Sales, tally.Other, tally.Total, onHand.GetValueOrDefault(partId));
+            tally.Technicians, tally.Sales, tally.Service, tally.Shrinkage, tally.Total,
+            onHand.GetValueOrDefault(partId));
 
     // ---------------------------------------------------------------- one item, in full
 
     /// <summary>Everything behind one part's figure: its month-by-month trend over the window, who
-    /// consumed it, and the individual movements with the document each one happened on.
+    /// took it out of the warehouse, and the individual movements with the document each one happened
+    /// on.
     ///
     /// Its own endpoint rather than part of the report, because this is the movement rows themselves
     /// and fetching them for every part in a year would be most of the ledger to answer a question
@@ -236,8 +244,7 @@ public static partial class ReportsEndpoints
 
         foreach (var m in moves)
         {
-            if (ConsumptionRules.Effect(m.MovementType, m.ReferenceType, m.Quantity) is not { } effect) continue;
-            if (effect.Consumed == 0) continue;
+            if (ConsumptionRules.Effect(m.MovementType, m.Quantity) is not { } effect) continue;
             if (wanted is { } only && effect.Stream != only) continue;
 
             // The trend is always the whole window, picked month or not: the reason for looking at one
@@ -250,9 +257,9 @@ public static partial class ReportsEndpoints
             if (pickedMonth is { } picked && bucket != picked) continue;
             scoped.Add(effect.Stream, effect.Consumed);
 
-            // Who it was: the technician for anything off a technician's own stock, and whoever moved
-            // it for anything that went straight off the warehouse shelf — a counter sale, a
-            // replacement unit, a write-down. One of the two is always set.
+            // Who it was: the technician for an issue, and whoever moved it for anything that went
+            // straight out of the warehouse — a counter sale, a replacement unit, a write-down. One of
+            // the two is always set.
             var whoId = m.TechnicianId is > 0 ? m.TechnicianId.Value : m.PerformedByUserId;
             var who = names.GetValueOrDefault(whoId, $"#{whoId}");
             var consumerKey = (who, effect.Kind, effect.Stream);
@@ -277,7 +284,8 @@ public static partial class ReportsEndpoints
             {
                 var cell = byMonth.GetValueOrDefault(mo) ?? new StreamTally();
                 return new ConsumptionMonthRow(mo, ConsumptionRules.MonthLabel(mo),
-                    cell.Service, cell.Sales, cell.Other, cell.Total, cell.Any ? 1 : 0);
+                    cell.Technicians, cell.Sales, cell.Service, cell.Shrinkage, cell.Total,
+                    cell.Any ? 1 : 0);
             })
             .ToList();
 
@@ -295,28 +303,29 @@ public static partial class ReportsEndpoints
         return TypedResults.Ok(new ConsumptionItemDetailDto(
             part.Id, part.ItemCode, part.Name, part.Unit, warehouse,
             windowFrom, windowTo, ConsumptionRules.StreamName(wanted),
-            scoped.Service, scoped.Sales, scoped.Other, scoped.Total,
+            scoped.Technicians, scoped.Sales, scoped.Service, scoped.Shrinkage, scoped.Total,
             months, consumers, events, movementCount));
     }
 
     private static string StreamLabel(ConsumptionStream stream) => stream switch
     {
-        ConsumptionStream.Service => "Service",
+        ConsumptionStream.Technicians => "Technicians",
         ConsumptionStream.Sales => "Sales",
-        _ => "Other",
+        ConsumptionStream.Service => "Service",
+        _ => "Shrinkage",
     };
 
     /// <summary>The warehouse's current holding per part. Now, not as at the window's end: what is on
-    /// the shelf is a fact about today, and it is the figure that makes a consumption number
-    /// actionable — forty used last month with three left is a reorder, forty with ninety left is not.</summary>
+    /// the shelf is a fact about today, and it is the figure that makes an outflow number actionable —
+    /// forty gone last month with three left is a reorder, forty with ninety left is not.</summary>
     private static async Task<Dictionary<long, int>> WarehouseOnHandAsync(AppDbContext db, CancellationToken ct) =>
         await db.StockBalances.AsNoTracking()
             .Where(b => b.TechnicianId == StockBalance.Warehouse && b.OnHand != 0)
             .ToDictionaryAsync(b => b.PartId, b => b.OnHand, ct);
 
     /// <summary>The document each of one part's movements happened on, keyed by the reference the
-    /// movement carries: job, field visit, field sale, counter sale or sale return, with the customer
-    /// or dealer it went to where the document names one.</summary>
+    /// movement carries: the stock request behind an issue, the job behind a replacement unit, or the
+    /// counter sale, with the customer or dealer it went to where the document names one.</summary>
     private static async Task<Dictionary<(string Type, long Id), (string? Number, string? Party)>>
         ConsumptionDocumentsAsync(AppDbContext db, long partId, DateTime storedFrom, DateTime storedTo,
             CancellationToken ct)
@@ -328,21 +337,26 @@ public static partial class ReportsEndpoints
         return map;
     }
 
-    /// <summary>One document a consuming movement points at: the number somebody would quote, and the
+    /// <summary>One document an outward movement points at: the number somebody would quote, and the
     /// party it went to where the document names one.</summary>
     internal record ConsumptionDocumentRow(long Id, string Number, string? Party);
 
     /// <summary>Every reference lookup the drill-down runs, as queries rather than results.
     ///
-    /// Five narrow queries rather than one five-way join, each joining the movement rows of this one
-    /// part to the table its reference type points at. A single query would have to left-join all five
-    /// tables on the same id column and then pick the right one, which both asks the database to match
-    /// a job id against four unrelated tables and reads as if a movement could belong to several
-    /// documents at once. Keyed on the reference TYPE as well as the id for the same reason: job 412
-    /// and field sale 412 are different documents, and only the pair identifies one.
+    /// One narrow query per reference type rather than one three-way join, each joining the movement
+    /// rows of this one part to the table its reference type points at. A single query would have to
+    /// left-join all of them on the same id column and then pick the right one, which both asks the
+    /// database to match a job id against unrelated tables and reads as if a movement could belong to
+    /// several documents at once. Keyed on the reference TYPE as well as the id for the same reason:
+    /// job 412 and stock request 412 are different documents, and only the pair identifies one.
     ///
-    /// Handed back unexecuted so the provider can be made to translate all five in a test. They are
-    /// the only part of this report that can fail on the real database and nowhere else - each joins
+    /// Three types, because those are the three an outward movement can carry: STOCK_REQUEST on an
+    /// issue, SERVICE on a replacement unit, SPARE_SALE on a counter sale. A write-down carries MANUAL
+    /// or SERIAL_STATUS and has no document to reach — its remarks are the explanation, which is why
+    /// the drill-down shows that column.
+    ///
+    /// Handed back unexecuted so the provider can be made to translate all of them in a test. They are
+    /// the only part of this report that can fail on the real database and nowhere else — each joins
     /// a nullable reference column to a non-nullable key and left-joins two party tables behind it,
     /// and a shape MySQL will not take fails in front of whoever clicked the row.</summary>
     internal static IReadOnlyList<(string Type, IQueryable<ConsumptionDocumentRow> Query)> DocumentQueries(
@@ -354,6 +368,15 @@ public static partial class ReportsEndpoints
 
         return new (string, IQueryable<ConsumptionDocumentRow>)[]
         {
+            // An issue. The delivery challan is the number on the paperwork that travelled with the
+            // goods, so it is the one to quote where there is one; the request number is what the row
+            // always has. No party: the technician it went to is already the Who column.
+            ("STOCK_REQUEST", from m in Refs("STOCK_REQUEST")
+                              join r in db.StockRequests on m.ReferenceId equals (long?)r.Id
+                              select new ConsumptionDocumentRow(
+                                  r.Id, r.DcNo ?? r.RequestNo, null)),
+
+            // A replacement unit, which hangs off the job it was shipped against.
             ("SERVICE", from m in Refs("SERVICE")
                         join j in db.Services on m.ReferenceId equals (long?)j.Id
                         join c in db.Customers on j.CustomerId equals c.Id into cg
@@ -363,14 +386,6 @@ public static partial class ReportsEndpoints
                         select new ConsumptionDocumentRow(
                             j.Id, j.ServiceNo, c != null ? c.Name : d != null ? d.Name : null)),
 
-            ("FIELD_SERVICE", from m in Refs("FIELD_SERVICE")
-                              join f in db.FieldServices on m.ReferenceId equals (long?)f.Id
-                              select new ConsumptionDocumentRow(f.Id, f.ServiceNo, f.CustomerName)),
-
-            ("FIELD_SALE", from m in Refs("FIELD_SALE")
-                           join f in db.FieldSales on m.ReferenceId equals (long?)f.Id
-                           select new ConsumptionDocumentRow(f.Id, f.SaleNo, f.CustomerName)),
-
             ("SPARE_SALE", from m in Refs("SPARE_SALE")
                            join s in db.SpareSales on m.ReferenceId equals (long?)s.Id
                            join c in db.Customers on s.CustomerId equals c.Id into cg
@@ -379,17 +394,6 @@ public static partial class ReportsEndpoints
                            from d in dg.DefaultIfEmpty()
                            select new ConsumptionDocumentRow(
                                s.Id, s.SaleNo, c != null ? c.Name : d != null ? d.Name : null)),
-
-            // Two hops: a return names no party of its own, so it is read through the sale it came back on.
-            ("SPARE_SALE_RETURN", from m in Refs("SPARE_SALE_RETURN")
-                                  join r in db.SpareSaleReturns on m.ReferenceId equals (long?)r.Id
-                                  join s in db.SpareSales on r.SpareSaleId equals s.Id
-                                  join c in db.Customers on s.CustomerId equals c.Id into cg
-                                  from c in cg.DefaultIfEmpty()
-                                  join d in db.Dealers on s.DealerId equals d.Id into dg
-                                  from d in dg.DefaultIfEmpty()
-                                  select new ConsumptionDocumentRow(
-                                      r.Id, r.ReturnNo, c != null ? c.Name : d != null ? d.Name : null)),
         };
     }
 

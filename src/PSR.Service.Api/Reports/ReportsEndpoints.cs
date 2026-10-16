@@ -647,8 +647,12 @@ public static partial class ReportsEndpoints
     /// negative came off it, zero never touched it. The stock ledger's opening, input and outward are
     /// all read off this one rule, so adding a movement type here puts it on the report correctly or
     /// leaves it off entirely, and never half of each. The technician side is deliberately not
-    /// modelled here — see StockAnalysisAsync for that.</summary>
-    private static int WarehouseDelta(MovementType type, int qty) => type switch
+    /// modelled here — see StockAnalysisAsync for that.
+    ///
+    /// Internal rather than private so a test can hold it against ConsumptionRules.Effect: the
+    /// consumption report is the outward half of this rule broken out by month and part, and if the
+    /// two ever disagree on a movement type then one of the two reports is wrong about the shelf.</summary>
+    internal static int WarehouseDelta(MovementType type, int qty) => type switch
     {
         MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold
             or MovementType.ReplacementReturn => qty,

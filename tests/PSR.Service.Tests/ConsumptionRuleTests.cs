@@ -14,18 +14,19 @@ public class ConsumptionRuleTests
 {
     private const double Ist = 5.5;
 
-    /// <summary>The distinction the sales/service split stands on, and the reason the rule cannot
-    /// switch on the movement type alone: a part fitted on a field visit and a spare sold off the same
-    /// technician's van are both Consumption rows with the same balance effect, and only the reference
-    /// says which. Reading the type alone files every field sale under service work.</summary>
+    /// <summary>The report's definition, in one test: stock leaving the warehouse shelf, filed by
+    /// where it went. These four types are exactly the four that take the warehouse balance down.</summary>
+    // The stream arrives as a string because ConsumptionStream is internal to the API and an internal
+    // type cannot be a public test method's parameter — the same reason the stream-parsing test below
+    // compares names rather than values.
     [Theory]
-    [InlineData("SERVICE", "Service", ConsumptionRules.InHouseJob)]
-    [InlineData("FIELD_SERVICE", "Service", ConsumptionRules.FieldVisit)]
-    [InlineData("FIELD_SALE", "Sales", ConsumptionRules.FieldSale)]
-    public void A_consumption_is_filed_by_its_reference_not_its_type(
-        string reference, string stream, string kind)
+    [InlineData(MovementType.Issue, "Technicians", ConsumptionRules.IssuedToTechnician)]
+    [InlineData(MovementType.Sale, "Sales", ConsumptionRules.CounterSale)]
+    [InlineData(MovementType.Replacement, "Service", ConsumptionRules.UnitReplacement)]
+    public void Stock_leaving_the_warehouse_is_counted_where_it_went(
+        MovementType type, string stream, string kind)
     {
-        var effect = ConsumptionRules.Effect(MovementType.Consumption, reference, 3);
+        var effect = ConsumptionRules.Effect(type, 3);
 
         effect.Should().NotBeNull();
         effect!.Value.Stream.ToString().Should().Be(stream);
@@ -33,88 +34,107 @@ public class ConsumptionRuleTests
         effect.Value.Consumed.Should().Be(3);
     }
 
-    /// <summary>A counter sale leaves the warehouse shelf rather than a technician's stock, so it has
-    /// its own movement type — but it is still the sales side consuming stock.</summary>
+    /// <summary>An issue is the day the stock left the building, and that is this report's whole
+    /// question. It used to be excluded on the grounds that a part in a van has not been used yet,
+    /// which is true and is the stock analysis's question — Issued against Used, with the gap being
+    /// what the technician is carrying. Counting it here is what makes this report's total equal the
+    /// stock ledger's Outward column.</summary>
     [Fact]
-    public void A_counter_sale_is_sales_consumption()
+    public void An_issue_to_a_technician_is_the_bulk_of_the_report()
     {
-        var effect = ConsumptionRules.Effect(MovementType.Sale, "SPARE_SALE", 2);
+        var effect = ConsumptionRules.Effect(MovementType.Issue, 6);
 
-        effect!.Value.Stream.Should().Be(ConsumptionStream.Sales);
-        effect.Value.Consumed.Should().Be(2);
+        effect!.Value.Stream.Should().Be(ConsumptionStream.Technicians);
+        effect.Value.Consumed.Should().Be(6, "all six left the shelf, whatever is fitted later");
     }
 
-    /// <summary>A whole unit swapped out for a customer's is service work, not a sale: nobody paid for
-    /// it as goods, and it is spend on fixing something.</summary>
-    [Fact]
-    public void A_replacement_unit_is_service_consumption()
-    {
-        ConsumptionRules.Effect(MovementType.Replacement, "SERVICE", 1)!.Value
-            .Stream.Should().Be(ConsumptionStream.Service);
-    }
-
-    /// <summary>Stock handed to a technician has been moved, not used. It is consumed on the day it is
-    /// fitted — which may be next month, or never — and counting the issue would both bring the usage
-    /// forward and then count it again when the part actually went into a machine.</summary>
+    /// <summary>Stock used off a TECHNICIAN'S OWN balance was already counted the day the warehouse
+    /// issued it. Counting it again when it is fitted or sold in the field reports the same board
+    /// twice — once on its way to the van and once on its way into a machine.</summary>
     [Theory]
-    [InlineData(MovementType.Issue)]
-    [InlineData(MovementType.IssueReceipt)]
-    [InlineData(MovementType.Receipt)]
-    [InlineData(MovementType.Return)]
-    [InlineData(MovementType.ReturnDispatched)]
+    [InlineData(MovementType.Consumption)]
+    [InlineData(MovementType.ConsumptionReversal)]
     [InlineData(MovementType.TransferOut)]
     [InlineData(MovementType.TransferIn)]
     [InlineData(MovementType.Transfer)]
+    [InlineData(MovementType.IssueReceipt)]
+    [InlineData(MovementType.ReturnDispatched)]
     [InlineData(MovementType.DefectiveOnArrival)]
-    public void Moving_stock_around_the_company_is_not_consumption(MovementType type)
+    public void Stock_moving_on_the_technician_side_is_not_warehouse_outflow(MovementType type)
     {
-        ConsumptionRules.Effect(type, "STOCK_REQUEST", 5).Should().BeNull();
+        ConsumptionRules.Effect(type, 5).Should().BeNull();
     }
 
-    /// <summary>The ledger reverses by appending an opposite row, never by deleting the original, so
-    /// the pair has to come to nothing. Summing only the positive rows would report usage that never
-    /// happened and would keep reporting it for ever.</summary>
-    [Theory]
-    [InlineData(MovementType.Consumption, MovementType.ConsumptionReversal, "SERVICE")]
-    [InlineData(MovementType.Sale, MovementType.SaleUnsold, "SPARE_SALE")]
-    [InlineData(MovementType.Sale, MovementType.SaleReturn, "SPARE_SALE")]
-    [InlineData(MovementType.Replacement, MovementType.ReplacementReturn, "SERVICE")]
-    public void A_reversal_nets_its_original_off(MovementType original, MovementType reversal, string reference)
-    {
-        var up = ConsumptionRules.Effect(original, reference, 4)!.Value;
-        var down = ConsumptionRules.Effect(reversal, reference, 4)!.Value;
-
-        (up.Consumed + down.Consumed).Should().Be(0);
-        down.Stream.Should().Be(up.Stream, "a reversal that landed on the other stream would net off "
-            + "against work it has nothing to do with");
-    }
-
-    /// <summary>A reverted FIELD SALE would be the nasty case: netting it off against service
-    /// consumption would leave the sales column overstated and the service column understated, and
-    /// the combined total would look perfectly correct.</summary>
+    /// <summary>A shipment that never arrived moves no warehouse balance: the Issue it belongs to
+    /// already took it off the shelf, and this row only records that it was lost on the way. Counting
+    /// it would count the same units out twice.</summary>
     [Fact]
-    public void A_reverted_field_sale_nets_off_against_sales_not_service()
+    public void A_transit_loss_is_not_counted_because_the_issue_already_was()
     {
-        ConsumptionRules.Effect(MovementType.ConsumptionReversal, "FIELD_SALE", 1)!.Value
-            .Stream.Should().Be(ConsumptionStream.Sales);
+        ConsumptionRules.Effect(MovementType.LossInTransit, 2).Should().BeNull();
     }
 
-    /// <summary>The one movement type whose quantity is signed rather than a magnitude. A stock-take
-    /// that found three fewer consumed three; one that found three more un-consumes them.</summary>
+    /// <summary>The reason this report cannot go negative. Everything that puts stock BACK on the
+    /// shelf is simply not counted — not netted off, not subtracted, not carried as a negative into
+    /// the month it happened in. Netting is defensible arithmetic and an unreadable report: a sale
+    /// returned this month against one made before the window started used to leave a month reading
+    /// below zero, with nothing on screen to explain it.</summary>
+    [Theory]
+    [InlineData(MovementType.Receipt)]
+    [InlineData(MovementType.Return)]
+    [InlineData(MovementType.SaleReturn)]
+    [InlineData(MovementType.SaleUnsold)]
+    [InlineData(MovementType.ReplacementReturn)]
+    public void Stock_coming_back_is_not_counted_at_all(MovementType type)
+    {
+        ConsumptionRules.Effect(type, 4).Should().BeNull();
+    }
+
+    /// <summary>The one movement type stored already signed. A stock-take that found three fewer took
+    /// three off the shelf and consumed them; one that found three MORE put stock back, and is
+    /// therefore not outflow at all. The old rule turned that second case into negative consumption,
+    /// which is where most of the negative figures on the report came from — manual corrections and
+    /// serial-status fixes are written as adjustments and go both ways.</summary>
     [Theory]
     [InlineData(-3, 3)]
-    [InlineData(3, -3)]
-    public void An_adjustment_is_already_signed(int delta, int consumed)
+    [InlineData(-1, 1)]
+    public void A_write_down_is_the_negative_half_of_an_adjustment(int delta, int consumed)
     {
-        var effect = ConsumptionRules.Effect(MovementType.Adjustment, "MANUAL", delta)!.Value;
+        var effect = ConsumptionRules.Effect(MovementType.Adjustment, delta)!.Value;
 
-        effect.Stream.Should().Be(ConsumptionStream.Other);
+        effect.Stream.Should().Be(ConsumptionStream.Shrinkage);
+        effect.Kind.Should().Be(ConsumptionRules.StockWriteDown);
         effect.Consumed.Should().Be(consumed);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(1)]
+    public void A_correction_that_found_more_stock_is_not_consumption(int delta)
+    {
+        ConsumptionRules.Effect(MovementType.Adjustment, delta).Should().BeNull(
+            "stock that went back on the shelf cannot be stock that left it");
+    }
+
+    /// <summary>The invariant the whole report rests on, asserted over every movement type at both
+    /// signs: no effect is ever zero or negative. Every figure on the report — each month, each part,
+    /// the totals strip, the drill-down — is a sum of these, so this one property is what guarantees
+    /// no cell anywhere can read below zero.</summary>
+    [Fact]
+    public void No_movement_of_any_kind_can_produce_a_negative_figure()
+    {
+        foreach (var type in Enum.GetValues<MovementType>())
+            foreach (var qty in new[] { -7, -1, 0, 1, 7 })
+                ConsumptionRules.Effect(type, qty)?.Consumed.Should().BePositive(
+                    $"{type} of {qty} would otherwise put a negative on the report");
     }
 
     /// <summary>Two statements of one fact: the SQL filter that decides which rows are fetched, and
     /// the rule that decides what they mean. A type added to the rule and not to the filter never
-    /// reaches the report, and nothing anywhere fails — the column just reads low.</summary>
+    /// reaches the report, and nothing anywhere fails — the column just reads low.
+    ///
+    /// Asserted against whether a type can EVER count, at either sign, because Adjustment counts at
+    /// one sign only and the predicate cannot express that in SQL.</summary>
     [Fact]
     public void The_sql_filter_matches_the_rule_for_every_movement_type()
     {
@@ -123,17 +143,31 @@ public class ConsumptionRuleTests
         foreach (var type in Enum.GetValues<MovementType>())
         {
             var fetched = isConsuming(new StockMovement { MovementType = type, Quantity = 1 });
-            var counted = ConsumptionRules.Effect(type, "SERVICE", 1) is not null;
+            var counted = ConsumptionRules.Effect(type, 1) is not null
+                       || ConsumptionRules.Effect(type, -1) is not null;
 
             fetched.Should().Be(counted,
-                $"{type} is {(counted ? "counted by the rule, so it must be fetched" : "not consumption, so fetching it is waste")}");
+                $"{type} is {(counted ? "counted by the rule, so it must be fetched" : "not outflow, so fetching it is waste")}");
         }
+    }
+
+    /// <summary>Adjustment is the one type the database predicate deliberately over-fetches: both
+    /// halves come back and the sign is filtered in memory. Pinned so that a later attempt to push the
+    /// sign into SQL has to deal with this test rather than quietly changing what the column means.</summary>
+    [Fact]
+    public void A_positive_adjustment_is_fetched_and_then_discarded()
+    {
+        var isConsuming = ConsumptionRules.IsConsuming.Compile();
+
+        isConsuming(new StockMovement { MovementType = MovementType.Adjustment, Quantity = 3 })
+            .Should().BeTrue("the sign is not in the SQL");
+        ConsumptionRules.Effect(MovementType.Adjustment, 3).Should().BeNull("...so the rule drops it");
     }
 
     // ---------------------------------------------------------------- the month axis
 
     /// <summary>The report's rows are months, so the boundary between two of them is the report. The
-    /// shop is five and a half hours ahead of what is stored: a part fitted at seven in the evening on
+    /// shop is five and a half hours ahead of what is stored: stock issued at seven in the evening on
     /// the last of October is stored as the first of November, and bucketing the raw timestamp takes a
     /// day's work out of October and puts it in a month that had not started.</summary>
     [Fact]
@@ -211,9 +245,12 @@ public class ConsumptionRuleTests
     /// as a quiet month and gets believed; a combined figure where a filtered one was wanted is
     /// obvious on sight.</summary>
     [Theory]
-    [InlineData("service", "Service")]
-    [InlineData("SALES", "Sales")]
-    [InlineData("other", "Other")]
+    [InlineData("technicians", "Technicians")]
+    [InlineData("TECHS", "Technicians")]
+    [InlineData("issues", "Technicians")]
+    [InlineData("sales", "Sales")]
+    [InlineData("SERVICE", "Service")]
+    [InlineData("shrinkage", "Shrinkage")]
     [InlineData("all", null)]
     [InlineData("combined", null)]
     [InlineData(null, null)]
@@ -223,5 +260,45 @@ public class ConsumptionRuleTests
         ConsumptionRules.ParseStream(value)?.ToString().Should().Be(expected);
         ConsumptionRules.StreamName(ConsumptionRules.ParseStream(value))
             .Should().Be(expected?.ToLowerInvariant() ?? "all");
+    }
+
+    /// <summary>"other" was this column's name when it also held transit losses. A saved link or an
+    /// older desktop build has to land on the column that replaced it rather than on everything, which
+    /// is what an unrecognised value would do.</summary>
+    [Fact]
+    public void The_old_name_for_the_shrinkage_column_still_resolves_to_it()
+    {
+        ConsumptionRules.ParseStream("other").Should().Be(ConsumptionStream.Shrinkage);
+    }
+
+    // ---------------------------------------------------------------- against the stock ledger
+
+    /// <summary>The claim this report's documentation makes, pinned: its total IS the stock ledger's
+    /// Outward column, broken out by month and by part. The two reports read the same ledger through
+    /// two separate rules — ConsumptionRules.Effect here, ReportsEndpoints.WarehouseDelta there — and
+    /// nothing but this test stops them drifting apart on a movement type, which would leave two pages
+    /// of the app quietly disagreeing about what left the shelf.
+    ///
+    /// Quantities are the ones the ledger actually writes: a magnitude for every type, and both signs
+    /// for Adjustment, which is the only type stored signed.</summary>
+    [Fact]
+    public void The_report_counts_exactly_what_the_stock_ledger_calls_outward()
+    {
+        foreach (var type in Enum.GetValues<MovementType>())
+        {
+            var quantities = type == MovementType.Adjustment ? new[] { 1, 4, -1, -4 } : new[] { 1, 4 };
+
+            foreach (var qty in quantities)
+            {
+                var consumed = ConsumptionRules.Effect(type, qty)?.Consumed ?? 0;
+                // What the ledger took OFF the shelf for this row, as a positive number; zero when the
+                // row put stock on it or never touched it.
+                var offTheShelf = Math.Max(0, -ReportsEndpoints.WarehouseDelta(type, qty));
+
+                consumed.Should().Be(offTheShelf,
+                    $"{type} of {qty} moves the warehouse by {ReportsEndpoints.WarehouseDelta(type, qty)}, "
+                    + "so the consumption report and the stock ledger must agree on it");
+            }
+        }
     }
 }
