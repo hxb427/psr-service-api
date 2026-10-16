@@ -143,9 +143,10 @@ public static class GstStates
 
     /// <summary>Whether a document for this party bills IGST (true) or CGST + SGST (false).
     ///
-    /// A party with no state recorded anywhere is billed as intra-state: the only parties that reach the
-    /// counter without one are walk-ins standing in it, and the alternative is taxing a local sale as
-    /// though the goods crossed a border. A company with no state code of its own is the opposite case —
+    /// A party with no state recorded anywhere is billed as intra-state. No document reaches here in that
+    /// condition any more — BillingService refuses one whose party has no state at all, rather than
+    /// settling its tax by omission — so this is the answer for anything else that asks, and for the
+    /// documents raised while it was the rule. A company with no state code of its own is the opposite case —
     /// nothing can be said to share a state with it, so everything is inter-state, which is also how
     /// every document behaved while the split was switched off.</summary>
     public static bool IsInterState(string? partyStateCode, string? partyState, string? partyGstin,

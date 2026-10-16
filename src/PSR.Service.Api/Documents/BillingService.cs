@@ -107,6 +107,10 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         var doc = NewDocument(docType, party, req.DocDate, req.ConsigneeAddress,
             req.CourierMode, req.CourierCharges, req.Remarks, userId);
 
+        // The HSN/SAC of each unit, read off the catalogue row its PS code names. Cached per code because
+        // one document commonly covers several units of the same model.
+        var catalogueHsn = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
         decimal taxable = 0, tax = 0;
         foreach (var job in jobs.OrderBy(j => j.Id))
         {
@@ -114,6 +118,8 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
             var blendedGst = price.BlendedGst;
 
             overrides.TryGetValue(job.Id, out var ov);
+            var hsn = RequireLineHsn(ov?.HsnCode, await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct),
+                job.ServiceNo, job.PsCode);
             var qty = ov?.Qty is { } q && q > 0 ? q : 1;
             // In-warranty units are free unless a manager set an explicit rate.
             var unitInclusive = ov?.Rate ?? price.UnitInclusive;
@@ -144,9 +150,10 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 SerialNo = job.SerialNo,
                 Warranty = ov?.Warranty?.Trim() ?? job.WarrantyStatus.ToString(),
                 ServiceChallan = job.ChallanNo,
-                // Typed on the generate form. A serviced unit is not a catalogue row, so there is nothing
-                // on the job to read either of these off, and a document has to carry an HSN/SAC per line.
-                HsnCode = ov?.HsnCode?.Trim(),
+                // The catalogue's code for this item unless somebody typed over it — see RequireLineHsn.
+                HsnCode = hsn,
+                // Typed on the generate form, and left blank when it was left blank: a quantity with no
+                // unit beside it is untidy, which is not the same as a line with no tax code on it.
                 Unit = ov?.Unit?.Trim(),
                 Qty = qty,
                 UnitRate = unitInclusive,
@@ -160,6 +167,55 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
 
         ApplyTotals(doc, taxable, tax);
         return new BuiltDocument(doc, jobs);
+    }
+
+    /// <summary>The HSN/SAC one serviced unit is billed under: what somebody typed on the generate form,
+    /// else the code on the catalogue row the unit's PS code names, else a refusal naming the job.
+    ///
+    /// The catalogue is the authority, because a serviced machine IS a catalogue item — the PS code booked
+    /// in with the job is the same ItemCode the rest of the app matches a unit on — so the code a document
+    /// bills it under is the one the price list already holds, exactly as a spare-sale line takes it. It
+    /// was being asked for on the form instead, which meant every line went out as a dash unless somebody
+    /// typed into a column they had no reason to open; on a delivery challan that was every line of every
+    /// challan, a DC being the one document nobody stops to price.
+    ///
+    /// A typed code still wins. The form shows what the catalogue says and a manager may bill a unit under
+    /// something else, which is a decision, not a gap.
+    ///
+    /// Nothing is invented when both are empty. Every plausible fallback is wrong somewhere — a repair SAC
+    /// on a challan that is moving goods, a goods HSN on an invoice billing labour — and a code the
+    /// software made up is worse on a tax document than one it refused to guess.</summary>
+    internal static string RequireLineHsn(string? typed, string? fromCatalogue, string serviceNo, string? psCode)
+    {
+        if (!string.IsNullOrWhiteSpace(typed)) return typed.Trim();
+        if (!string.IsNullOrWhiteSpace(fromCatalogue)) return fromCatalogue.Trim();
+
+        // Which of the two gaps it is, because they are fixed in different places: the job is missing its
+        // PS code, or the catalogue row that code names has no HSN on it (or no row exists at all).
+        throw new BillingException(string.IsNullOrWhiteSpace(psCode)
+            ? $"{serviceNo} has no PS code, so there is no catalogue item to read an HSN/SAC off. Put the "
+              + "PS code on the job, or type the code on the generate form."
+            : $"{serviceNo}: no HSN/SAC for PS code {psCode.Trim()} — either no catalogue item has that "
+              + "code or the one that does has no HSN on it. Fill it in under Parts, or type the code on "
+              + "the generate form.");
+    }
+
+    /// <summary>The HSN/SAC the catalogue holds for a PS code, or null when the code names no item or the
+    /// item carries no code. Matched on ItemCode exactly, which is the match the rest of the app makes
+    /// between a serviced unit and its catalogue row.
+    ///
+    /// Fetched a code at a time rather than with one Contains filter over the lot — see BuildAsync for why
+    /// — and memoised in <paramref name="cache"/>, so six units of one model cost one query.</summary>
+    private async Task<string?> CatalogueHsnAsync(string? psCode, Dictionary<string, string?> cache,
+        CancellationToken ct)
+    {
+        var code = psCode?.Trim();
+        if (string.IsNullOrWhiteSpace(code)) return null;
+        if (cache.TryGetValue(code, out var known)) return known;
+
+        var hsn = await db.Parts.AsNoTracking().Where(p => p.ItemCode == code)
+            .Select(p => p.HsnCode).FirstOrDefaultAsync(ct);
+        return cache[code] = string.IsNullOrWhiteSpace(hsn) ? null : hsn.Trim();
     }
 
     /// <summary>Persist a computed document: allocate the atomic number, stamp every covered job, and log the
@@ -345,10 +401,14 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
     /// was to generate the document and read the PDF.
     ///
     /// Jobs are fetched one id at a time rather than with a Contains filter — see BuildAsync for why —
-    /// but per id, not by pulling the table, since this runs on every visit to the form.</summary>
+    /// but per id, not by pulling the table, since this runs on every visit to the form.
+    ///
+    /// It also hands back each unit's HSN/SAC from the catalogue, which is not pricing but is the other
+    /// thing the form would otherwise have to ask a human for.</summary>
     public async Task<List<DocumentQuoteLineDto>> QuoteAsync(IReadOnlyCollection<long> serviceIds, CancellationToken ct)
     {
         var rows = new List<DocumentQuoteLineDto>();
+        var catalogueHsn = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var id in serviceIds.Distinct().OrderBy(x => x))
         {
             var job = await db.Services.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
@@ -363,7 +423,10 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 job.Id, job.ServiceNo, job.SerialNo,
                 string.IsNullOrWhiteSpace(job.Description) ? $"{job.SerialNo} {job.ModelName}".Trim() : job.Description,
                 job.WarrantyStatus.ToString(), price.BlendedGst,
-                price.UnitInclusive, taxable, price.UnitInclusive - taxable));
+                price.UnitInclusive, taxable, price.UnitInclusive - taxable,
+                // So the form opens with the tax code already in the column, read off the same catalogue
+                // row the document itself will fall back to.
+                await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct)));
         }
         return rows;
     }
@@ -407,11 +470,18 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         // has a name to print beside it. A party can arrive with a code and no name (an API caller), a name
         // and no code (typed before the picker existed), or neither and a GSTIN that opens with one. A name
         // already filled in is left alone — what somebody typed is not ours to rewrite.
-        if (GstStates.ResolveCode(partyStateCode, partyState, partyGstin) is { } resolvedCode)
-        {
-            partyStateCode = resolvedCode;
-            if (string.IsNullOrWhiteSpace(partyState)) partyState = GstStates.ByCode(resolvedCode)?.Name;
-        }
+        //
+        // A party that carries none of the three is refused. The code is what decides whether the document
+        // bills CGST + SGST or IGST, and the old answer — treat a party with no state as local — made that
+        // decision by itself for every walk-in and every dealer master nobody had filled in, which is a tax
+        // treatment arrived at by omission. The generate form now opens with no state picked, so this is
+        // the same question asked in the one place that cannot be skipped.
+        var resolvedCode = GstStates.ResolveCode(partyStateCode, partyState, partyGstin)
+            ?? throw new BillingException(
+                "Pick the party's state on the generate form. Its GST code is what decides whether the "
+                + "document carries CGST + SGST or IGST.");
+        partyStateCode = resolvedCode;
+        if (string.IsNullOrWhiteSpace(partyState)) partyState = GstStates.ByCode(resolvedCode)?.Name;
 
         return new PartySnapshot(partyName, partyAddress, partyGstin, partyState, partyStateCode);
     }
