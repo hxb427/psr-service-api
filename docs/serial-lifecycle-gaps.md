@@ -18,8 +18,8 @@ design, and `field-portal-android/docs/HSRTECH_PARITY_AND_SERVICE_CYCLE.md` for 
 ```
                       ┌──────────────── AcquireToServiceCentre / inward ────────────────┐
                       │                                                                 │
-  (new unit) ──► ISSUED ──ack──► RECEIVED ──fit──► INSTALLED / USED ──collect──► COLLECTED
-                   │   └─ack: missing──► MISSING        (customer)                  │
+  (new unit) ──► ISSUED ──ack──► RECEIVED ──fit/sell──► USED ──collect──► COLLECTED
+                   │   └─ack: missing──► MISSING     (customer)                │
                    │   └─ack: defective──► DEFECTIVE ◄───────────────────────────── │
                    │                          │                                     │
                    │                   ship (Faulty)                          ship (Faulty)

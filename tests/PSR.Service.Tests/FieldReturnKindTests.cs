@@ -56,7 +56,6 @@ public class FieldReturnKindTests
     [InlineData(SerialStatus.UnderRepair)]
     [InlineData(SerialStatus.Repaired)]
     [InlineData(SerialStatus.Scrapped)]
-    [InlineData(SerialStatus.Installed)]
     [InlineData(SerialStatus.Used)]
     [InlineData(SerialStatus.Issued)]
     [InlineData(SerialStatus.Missing)]

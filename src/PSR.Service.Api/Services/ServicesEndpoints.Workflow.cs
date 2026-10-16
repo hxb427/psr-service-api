@@ -270,7 +270,7 @@ public static partial class ServicesEndpoints
                 {
                     var party = await PartyLabelAsync(db, job, ct);
                     await serial.InstallToCustomerAsync(unit.PartId, unit.SerialNumber, unit.ItemName, party,
-                        SerialStatus.Installed, uid, ct, job.CustomerId);
+                        uid, ct, job.CustomerId);
                 }
             }
             // Either way the job is over, so nothing should still read as open work on the unit.
@@ -737,7 +737,7 @@ public static partial class ServicesEndpoints
             // A serial-tracked replacement unit is now deployed to the customer.
             if (part.IsSerialTracked)
                 await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
-                    await PartyLabelAsync(db, job, ct), SerialStatus.Used, uid, ct, job.CustomerId);
+                    await PartyLabelAsync(db, job, ct), uid, ct, job.CustomerId);
 
             job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
             job.ReplacementPartId = part.Id;
@@ -777,8 +777,10 @@ public static partial class ServicesEndpoints
     }
 
     /// <summary>On completion, transition every serial-tracked part fitted/handed to the customer to
-    /// INSTALLED (component) / USED (replacement) with owner CUSTOMER. The per-line serial lives in
-    /// <see cref="ServiceLine.ReplacementSerialNo"/> (captured when the line was added).</summary>
+    /// USED with owner CUSTOMER — a fitted component and a replacement unit alike, since both left
+    /// the shop with the customer and the line type already records which was which. The per-line
+    /// serial lives in <see cref="ServiceLine.ReplacementSerialNo"/> (captured when the line was
+    /// added).</summary>
     private static async Task InstallJobSerialsAsync(
         AppDbContext db, SerialService serial, ServiceJob job, long uid, CancellationToken ct)
     {
@@ -796,11 +798,10 @@ public static partial class ServicesEndpoints
                 partCache[pid] = part = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
             if (part is null || !part.IsSerialTracked) continue;
 
-            var newStatus = line.LineType == ServiceLineType.Replacement ? SerialStatus.Used : SerialStatus.Installed;
             // The customer id rides along so the unit can later be traced back to this job's party -
             // which is what lets a return raise its repair job against the right account.
             await serial.InstallToCustomerAsync(pid, line.ReplacementSerialNo!.Trim(), part.Name, party,
-                newStatus, uid, ct, job.CustomerId);
+                uid, ct, job.CustomerId);
         }
     }
 }

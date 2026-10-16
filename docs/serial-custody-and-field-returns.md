@@ -28,7 +28,7 @@ Status by stage:
 | Field technician acknowledges | `Received` | Technician | technician **+ (received − defective)** |
 | Arrived faulty | `Defective` | Technician | none — held, not usable stock |
 | Never arrived | `Missing` | ServiceCenter | none — recorded as `LossInTransit` |
-| Fitted in a service | `Installed` | Customer | technician −1 |
+| Fitted in a service | `Used` | Customer | technician −1 |
 | Sold | `Used` | Customer | technician −1 |
 | Collected back from a customer | `Collected` / `Defective` | Technician | **none** |
 | Shipped in for service (faulty) | `InTransitSc` | Technician | none |
@@ -36,7 +36,7 @@ Status by stage:
 | Repair job stocked | `Repaired` | ServiceCenter | warehouse **+1** |
 | Kept from a customer on an advance replacement | `UnderRepair` | ServiceCenter | none — ownership only |
 | Any finished job stocked | `Repaired` | ServiceCenter | warehouse **+1** |
-| Repair job dispatched instead | `Installed` | Customer | none |
+| Repair job dispatched instead | `Used` | Customer | none |
 | Repair job written off | `Scrapped` | ServiceCenter | none — terminal |
 | Unused stock shipped back | `InTransitSc` | Technician | technician **−1** |
 | Unused stock acknowledged at SC | `ReturnedToSc` | ServiceCenter | warehouse **+1** |
@@ -103,7 +103,7 @@ serial-aware branch is behind it:
   The source-serial case stopped being the exception and became the general path. See
   `advance-replacement-and-stocking.md`.
 - **`ApplyDispatchAsync`** — same. A return-sourced job that is dispatched hands the unit back to the
-  party on the job (`Installed`, owner Customer) rather than leaving it stranded at `UnderRepair`
+  party on the job (`Used`, owner Customer) rather than leaving it stranded at `UnderRepair`
   pointing at a finished job.
 - **`LeaveTotalLossAsync`** — a written-off return unit reaches `Scrapped`. Without it the unit would
   sit forever as something the service center is still working on.

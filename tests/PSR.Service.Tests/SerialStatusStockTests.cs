@@ -39,7 +39,7 @@ public class SerialStatusStockTests
     [Theory]
     [InlineData(SerialStatus.Issued)]
     [InlineData(SerialStatus.Received)]
-    [InlineData(SerialStatus.Installed)]
+    [InlineData(SerialStatus.Used)]
     [InlineData(SerialStatus.Collected)]
     [InlineData(SerialStatus.Defective)]
     [InlineData(SerialStatus.Missing)]
@@ -50,6 +50,20 @@ public class SerialStatusStockTests
     public void Everything_else_is_not_warehouse_stock(SerialStatus status)
     {
         SerialService.IsWarehouseStock(status).Should().BeFalse();
+    }
+
+    /// <summary>One word for one state. A unit deployed at a customer used to be able to say either
+    /// INSTALLED or USED depending on which code path put it there, and nothing anywhere read the
+    /// two apart - same owner, same effect on every count. All the pair did was offer two labels for
+    /// one thing on the SN screen and leave the reader to guess which was which.
+    ///
+    /// Pinned at the enum because that is where the choice lived. Taking the status parameter off
+    /// <c>InstallToCustomerAsync</c> stops today's callers picking wrong; this stops a second token
+    /// being added for tomorrow's to pick.</summary>
+    [Fact]
+    public void A_unit_at_a_customer_has_exactly_one_status()
+    {
+        Enum.GetNames<SerialStatus>().Should().NotContain("Installed");
     }
 
     /// <summary>Found after being written off: the unit rejoins the shelf, so the count must too.</summary>

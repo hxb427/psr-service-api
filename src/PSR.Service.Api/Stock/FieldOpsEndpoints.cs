@@ -201,7 +201,7 @@ public static class FieldOpsEndpoints
             await ledger.ConsumeAsync(partId, uid, qty, uid, referenceType, referenceId, ct);
             if (part.IsSerialTracked)
                 await serial.InstallToCustomerAsync(partId, sn!, part.Name, customerName,
-                    SerialStatus.Installed, uid, ct, customerId);
+                    uid, ct, customerId);
         }
         else // Collected — faulty unit taken from the customer; no stock consumption.
         {
@@ -294,7 +294,7 @@ public static class FieldOpsEndpoints
                 await ledger.ConsumeAsync(lineReq.PartId, uid, lineReq.Qty, uid, "FIELD_SALE", sale.Id, ct);
                 if (part.IsSerialTracked)
                     await serial.InstallToCustomerAsync(lineReq.PartId, sn!, part.Name, sale.CustomerName,
-                        SerialStatus.Used, uid, ct, customerId);
+                        uid, ct, customerId);
 
                 var unit = FieldVisitRules.UnitRate(part, rateType);
                 var taxable = Math.Round(unit * lineReq.Qty, 2);

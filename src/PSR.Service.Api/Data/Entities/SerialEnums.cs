@@ -7,8 +7,15 @@ public enum SerialStatus
 {
     Issued,          // dispatched to a technician; owner = SERVICE_CENTER (in transit) until acknowledged
     Received,        // technician confirmed in-hand (set by mobile)
-    Installed,       // fitted at a customer during service
-    Used,            // consumed (replacement unit / sale)
+
+    // Deployed at a customer, however it got there: fitted during a service, handed over as a
+    // replacement, or sold across the counter. There used to be a second token, INSTALLED, for the
+    // fitted case alone. Nothing anywhere read the two apart - same owner, same effect on the
+    // count, same everything the ledger cares about - so all it did was put two words for one
+    // state on the SN screen and leave people asking which of them meant what. The line type
+    // still records whether a unit was fitted or replaced; that is where the distinction belongs.
+    Used,
+
     Collected,       // faulty unit collected back from a customer; held by the technician
     Defective,       // known faulty
     Missing,         // reported not received / lost

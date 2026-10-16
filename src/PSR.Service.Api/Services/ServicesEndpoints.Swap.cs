@@ -104,7 +104,7 @@ public static partial class ServicesEndpoints
                 $"Advance replacement for service {job.ServiceNo}", ct);
             if (outgoing.IsSerialTracked)
                 await serial.InstallToCustomerAsync(outgoing.Id, outgoingSn, outgoing.Name, party,
-                    SerialStatus.Used, uid, ct, job.CustomerId);
+                    uid, ct, job.CustomerId);
 
             job.ReplacementSerialNo = outgoingSn;
             job.ReplacementPartId = outgoing.Id;
@@ -312,7 +312,7 @@ public static partial class ServicesEndpoints
                     {
                         unit.CurrentServiceJobId = null;
                         await serial.InstallToCustomerAsync(unit.PartId, unit.SerialNumber, unit.ItemName,
-                            party, SerialStatus.Installed, uid, ct, job.CustomerId);
+                            party, uid, ct, job.CustomerId);
                     }
                 }
             }

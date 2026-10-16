@@ -229,7 +229,7 @@ public class SerialService(AppDbContext db)
     {
         var c = await FindAsync(partId, serialNumber, ct);
         if (c is null) return;
-        if (c.Status is not (SerialStatus.Installed or SerialStatus.Used)) return;
+        if (c.Status is not SerialStatus.Used) return;
 
         var old = c.Status.ToString();
         var now = DateTime.UtcNow;
@@ -241,11 +241,18 @@ public class SerialService(AppDbContext db)
         AddHistory(c, old, SerialStatus.Received, byUser, "Service reverted — unit back with technician", now);
     }
 
-    /// <summary>Service flow: a serial-tracked unit is fitted at / handed to a customer. Owner → CUSTOMER.</summary>
+    /// <summary>Service flow: a serial-tracked unit is fitted at / handed to a customer. Owner →
+    /// CUSTOMER, status USED.
+    ///
+    /// The status is not a parameter. It used to be, and every caller chose between USED and
+    /// INSTALLED for a difference no part of the system acted on - which is how one state came to
+    /// be written two ways. Fixing the callers alone would have left the next one free to pick the
+    /// other word again, so the choice is gone rather than merely made correctly.</summary>
     public async Task InstallToCustomerAsync(
         long partId, string serialNumber, string? itemName, string customerName,
-        SerialStatus newStatus, long byUser, CancellationToken ct, long? customerId = null)
+        long byUser, CancellationToken ct, long? customerId = null)
     {
+        const SerialStatus newStatus = SerialStatus.Used;
         var sn = serialNumber.Trim();
         if (sn.Length == 0) return;
         var now = DateTime.UtcNow;
@@ -261,7 +268,7 @@ public class SerialService(AppDbContext db)
             };
             db.ComponentSerials.Add(c);
             await db.SaveChangesAsync(ct);
-            AddHistory(c, null, newStatus, byUser, $"Installed for {customerName}", now);
+            AddHistory(c, null, newStatus, byUser, $"Deployed to {customerName}", now);
             return;
         }
         var old = c.Status.ToString();
@@ -271,7 +278,7 @@ public class SerialService(AppDbContext db)
         c.CustomerId = customerId;
         c.TechnicianId = null;
         c.LastUpdatedAt = now;
-        AddHistory(c, old, newStatus, byUser, $"Installed for {customerName}", now);
+        AddHistory(c, old, newStatus, byUser, $"Deployed to {customerName}", now);
     }
 
     /// <summary>Field flow: faulty unit collected from a customer — upserts the serial as COLLECTED
@@ -705,7 +712,7 @@ public class SerialService(AppDbContext db)
                     .Select(u => u.FullName ?? u.Username)
                     .FirstOrDefaultAsync(ct) ?? c.OwnerRef;
                 break;
-            case SerialStatus.Installed or SerialStatus.Used:
+            case SerialStatus.Used:
                 c.OwnerType = SerialOwnerType.Customer;
                 break;
             // Missing / Issued: custody stays where it was.
