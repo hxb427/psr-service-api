@@ -71,16 +71,23 @@ public static partial class ServicesEndpoints
         var outgoing = item;
         var retained = item;
 
+        // Which pool this unit comes out of. A shelf unit - a machine the shop kept off a finished
+        // job - is exactly what an advance replacement wants: the customer is handed a working unit
+        // today and the shop keeps theirs to repair, so the two pools swap one machine each. Those
+        // units carry no warehouse quantity, so neither the check below nor the debit applies to them.
+        var fromShelf = await serial.IsOnShelfAsync(outgoing.Id, outgoingSn, ct);
+
         // Read before anything is written so an empty shelf reads as an empty shelf, naming the item
         // and what it actually holds. The ledger guards it again inside the transaction, which is what
         // stops two people issuing the last unit at once.
-        var onHand = await db.StockBalances.AsNoTracking()
+        var onHand = fromShelf ? 1 : await db.StockBalances.AsNoTracking()
             .Where(b => b.PartId == outgoing.Id && b.TechnicianId == StockBalance.Warehouse)
             .Select(b => (int?)b.OnHand).FirstOrDefaultAsync(ct) ?? 0;
         if (onHand < 1)
             return TypedResults.BadRequest(
-                $"{outgoing.ItemCode} — {outgoing.Name} has {onHand} in warehouse stock, so no replacement "
-                + "can be issued. Restock it, or pick a different replacement part.");
+                $"{outgoing.ItemCode} — {outgoing.Name} has {onHand} in warehouse stock and no unit "
+                + $"{outgoingSn} on the shelf, so no replacement can be issued. Restock the item, pick a "
+                + "unit off the shelf, or pick a different replacement part.");
 
         // A unit already at a customer or in a technician's bag cannot also be handed over here. The
         // total-loss route never checked this and could hand out a serial that was demonstrably
@@ -99,10 +106,24 @@ public static partial class ServicesEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            // 1. The replacement leaves the warehouse and becomes the customer's.
+            // 0. Take the unit off the shelf before anything is written against it. `fromShelf` above
+            //    was read before this transaction opened, so it says what the counter was offered
+            //    rather than what is still there; this guarded write is what stops two people handing
+            //    over the same unit. Ahead of the ledger movement so a lost race writes nothing at all
+            //    rather than leaning on the rollback.
+            var tookFromShelf = await serial.ClaimFromShelfAsync(outgoing.Id, outgoingSn, ct);
+            if (SerialService.ShelfClaimLostReason(fromShelf, tookFromShelf, outgoingSn) is { } lost)
+                throw new StockException(lost);
+
+            // 1. The replacement leaves the shop and becomes the customer's - off the shelf when it
+            //    is one of the kept units, out of warehouse stock otherwise. The claim is the
+            //    authority from here down, not the read above it.
             await ledger.ReplacementOutAsync(outgoing.Id, 1, uid, job.Id, outgoingSn,
-                $"Advance replacement for service {job.ServiceNo}", ct);
-            if (outgoing.IsSerialTracked)
+                $"Advance replacement for service {job.ServiceNo}", ct, tookFromShelf);
+            //    Same test the total-loss route uses, and it has to be: both are the same handover of
+            //    the same unit out of the same two pools. A shelf unit's SHELFED row IS the shelf, so
+            //    this status change is the only thing that takes it out of that pool.
+            if (ReplacementUnitLeavesSerialTrail(outgoing.IsSerialTracked, tookFromShelf))
                 await serial.InstallToCustomerAsync(outgoing.Id, outgoingSn, outgoing.Name, party,
                     uid, ct, job.CustomerId);
 
@@ -190,6 +211,7 @@ public static partial class ServicesEndpoints
                 Kind = ReplacementKind.AdvanceSwap,
                 OutgoingPartId = outgoing.Id,
                 OutgoingSerialNo = outgoingSn,
+                OutgoingFromShelf = tookFromShelf,
                 IncomingPartId = retained.Id,
                 IncomingSerialNo = string.IsNullOrWhiteSpace(job.SerialNo) ? null : job.SerialNo.Trim(),
                 IncomingComponentSerialId = incomingSerialId,
@@ -282,12 +304,28 @@ public static partial class ServicesEndpoints
             //    not dispatched, which is what this route checks before anything else.
             if (swap.OutgoingPartId is { } outPartId)
             {
+                // Back into the pool it came out of, which the swap row remembers. A unit that came
+                // off the shelf is credited no quantity - it is on the shelf again by status, and
+                // crediting the warehouse for it would turn a kept machine into purchased stock of
+                // its PS code, which is the one thing keeping the two pools apart exists to prevent.
+                // The unit's status cannot be read for this: SHELFED is where a cancelled unit lands
+                // whichever pool it came from.
                 await ledger.ReplacementReturnAsync(outPartId, 1, uid, job.Id, swap.OutgoingSerialNo,
-                    $"Advance replacement for {job.ServiceNo} cancelled — unit back on the shelf", ct);
+                    $"Advance replacement for {job.ServiceNo} cancelled — unit back on the shelf", ct, toShelf: swap.OutgoingFromShelf);
+                // SHELFED either way, which is the point of the toShelf above: the shelf IS the
+                // status, so a unit put back has to end up in it, and only the quantity side differs
+                // by where the unit came from.
+                //
+                // Recorded for any swap that named a unit, not only for a part flagged serial-tracked
+                // - same reason as "Keep in stock" on a job. The flag governs whether the store must
+                // name units when it ISSUES them; what physically came back is worth remembering
+                // either way, and the serial is what tells the next person which box this is. A swap
+                // with no serial on it still records nothing, because AcquireToServiceCentreAsync
+                // returns null for a blank serial.
                 var outPart = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == outPartId, ct);
-                if (outPart?.IsSerialTracked == true)
+                if (outPart is not null)
                     await serial.AcquireToServiceCentreAsync(outPartId, swap.OutgoingSerialNo, outPart.Name,
-                        SerialStatus.ReturnedToSc, uid,
+                        SerialStatus.Shelfed, uid,
                         $"Advance replacement for {job.ServiceNo} cancelled before dispatch", ct);
             }
 

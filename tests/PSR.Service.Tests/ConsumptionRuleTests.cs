@@ -280,25 +280,78 @@ public class ConsumptionRuleTests
     /// of the app quietly disagreeing about what left the shelf.
     ///
     /// Quantities are the ones the ledger actually writes: a magnitude for every type, and both signs
-    /// for Adjustment, which is the only type stored signed.</summary>
+    /// for Adjustment, which is the only type stored signed.
+    ///
+    /// ShelfTransfer is exempt, and named here so the exemption is a decision rather than a gap. It
+    /// takes quantity off the warehouse without anything leaving the building: units already sitting
+    /// on the shelf stopped being counted as warehouse stock when the two pools were separated.
+    /// Nobody received them and nothing was used, so counting it would put a one-off spike of
+    /// phantom consumption in the month that change was deployed and leave it on the report for
+    /// ever. It is written once, by that migration, and never again.</summary>
     [Fact]
     public void The_report_counts_exactly_what_the_stock_ledger_calls_outward()
     {
         foreach (var type in Enum.GetValues<MovementType>())
         {
+            if (type == MovementType.ShelfTransfer) continue;
+
             var quantities = type == MovementType.Adjustment ? new[] { 1, 4, -1, -4 } : new[] { 1, 4 };
 
             foreach (var qty in quantities)
             {
                 var consumed = ConsumptionRules.Effect(type, qty)?.Consumed ?? 0;
-                // What the ledger took OFF the shelf for this row, as a positive number; zero when the
-                // row put stock on it or never touched it.
+                // What the ledger took OFF the warehouse for this row, as a positive number; zero
+                // when the row put stock on it or never touched it.
                 var offTheShelf = Math.Max(0, -ReportsEndpoints.WarehouseDelta(type, qty));
 
                 consumed.Should().Be(offTheShelf,
                     $"{type} of {qty} moves the warehouse by {ReportsEndpoints.WarehouseDelta(type, qty)}, "
                     + "so the consumption report and the stock ledger must agree on it");
             }
+        }
+    }
+
+    /// <summary>And the same agreement with a SHELF quantity on the row, which is the dimension the
+    /// two pools added. A row made up entirely of shelf units took nothing off the warehouse, so it
+    /// consumes nothing; a mixed one consumes only its warehouse part. Without this the Technicians
+    /// column would count machines that were never in the warehouse at either end, and the report
+    /// would stop being the ledger's Outward column - which is the only thing it claims to be.</summary>
+    [Fact]
+    public void A_shelf_movement_is_outward_on_neither_report()
+    {
+        foreach (var type in Enum.GetValues<MovementType>())
+        {
+            if (type == MovementType.ShelfTransfer) continue;
+
+            foreach (var (qty, shelfQty) in new[] { (1, 1), (4, 4), (3, 2), (4, 1) })
+            {
+                var consumed = ConsumptionRules.Effect(type, qty, shelfQty)?.Consumed ?? 0;
+                var offTheWarehouse = Math.Max(0, -ReportsEndpoints.WarehouseDelta(type, qty, shelfQty));
+
+                consumed.Should().Be(offTheWarehouse,
+                    $"{type} of {qty} with {shelfQty} off the shelf moves the warehouse by "
+                    + $"{ReportsEndpoints.WarehouseDelta(type, qty, shelfQty)}");
+            }
+        }
+    }
+
+    /// <summary>The database predicate has to agree with the rule too, on the shelf dimension as well
+    /// as on the type. A row the predicate leaves behind never reaches Effect, so one that Effect
+    /// would have counted is a column that quietly reads low - and the fully-shelf rows the predicate
+    /// is there to skip are the commonest rows there are once the shelf is in use.</summary>
+    [Fact]
+    public void The_database_predicate_keeps_every_row_the_rule_counts()
+    {
+        var predicate = ConsumptionRules.IsConsuming.Compile();
+
+        foreach (var type in Enum.GetValues<MovementType>())
+        foreach (var (qty, shelfQty) in new[] { (1, 0), (4, 0), (1, 1), (4, 4), (3, 2), (4, 1) })
+        {
+            var movement = new StockMovement { MovementType = type, Quantity = qty, ShelfQty = shelfQty };
+            if (ConsumptionRules.Effect(type, qty, shelfQty) is null) continue;
+
+            predicate(movement).Should().BeTrue(
+                $"{type} of {qty} with {shelfQty} off the shelf counts, so the query must fetch it");
         }
     }
 }

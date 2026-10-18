@@ -91,6 +91,7 @@ public class ServiceReplacementConfiguration : IEntityTypeConfiguration<ServiceR
         b.Property(x => x.OutgoingPartId).HasColumnName("outgoing_part_id");
         b.Property(x => x.OutgoingSerialNo).HasColumnName("outgoing_serial_no").HasMaxLength(100);
         b.Property(x => x.OutgoingComponentSerialId).HasColumnName("outgoing_component_serial_id");
+        b.Property(x => x.OutgoingFromShelf).HasColumnName("outgoing_from_shelf").HasDefaultValue(false);
 
         b.Property(x => x.IncomingPartId).HasColumnName("incoming_part_id");
         b.Property(x => x.IncomingSerialNo).HasColumnName("incoming_serial_no").HasMaxLength(100);

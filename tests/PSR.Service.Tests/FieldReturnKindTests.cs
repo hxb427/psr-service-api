@@ -55,6 +55,9 @@ public class FieldReturnKindTests
     [InlineData(SerialStatus.ReturnedToSc)]
     [InlineData(SerialStatus.UnderRepair)]
     [InlineData(SerialStatus.Repaired)]
+    // On the warehouse shelf, which is the service centre's own rack. A technician cannot ship back
+    // a unit they do not have, and shipping one that is already here would credit it twice.
+    [InlineData(SerialStatus.Shelfed)]
     [InlineData(SerialStatus.Scrapped)]
     [InlineData(SerialStatus.Used)]
     [InlineData(SerialStatus.Issued)]

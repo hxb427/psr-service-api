@@ -599,7 +599,7 @@ public static partial class ReportsEndpoints
         // in SQL, the way the rest of this file does it, to stay clear of EF GroupBy translation.
         var moves = await db.StockMovements.AsNoTracking()
             .Where(m => toEx == null || m.CreatedAt < toEx)
-            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.CreatedAt })
+            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.ShelfQty, m.CreatedAt })
             .ToListAsync(ct);
 
         var rows = new List<StockLedgerRow>(parts.Count);
@@ -616,7 +616,7 @@ public static partial class ReportsEndpoints
             {
                 // Consumption, its reversal and peer transfers move stock between technicians and
                 // never touch the warehouse, so they come back as zero and are not on this report.
-                var delta = WarehouseDelta(m.MovementType, m.Quantity);
+                var delta = WarehouseDelta(m.MovementType, m.Quantity, m.ShelfQty);
                 if (delta == 0) continue;
 
                 if (fromInc is { } f && m.CreatedAt < f) { opening += delta; continue; }
@@ -652,14 +652,30 @@ public static partial class ReportsEndpoints
     /// Internal rather than private so a test can hold it against ConsumptionRules.Effect: the
     /// consumption report is the outward half of this rule broken out by month and part, and if the
     /// two ever disagree on a movement type then one of the two reports is wrong about the shelf.</summary>
-    internal static int WarehouseDelta(MovementType type, int qty) => type switch
+    internal static int WarehouseDelta(MovementType type, int qty, int shelfQty = 0)
     {
-        MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold
-            or MovementType.ReplacementReturn => qty,
-        MovementType.Adjustment => qty,   // stored already signed; a shrinkage is a negative quantity
-        MovementType.Issue or MovementType.Replacement or MovementType.Sale => -qty,
-        _ => 0,                           // Consumption / ConsumptionReversal / Transfer are technician-side
-    };
+        // The shelf half of a row never touched the warehouse, so it is taken off the quantity before
+        // the type is applied. A row made up entirely of shelf units therefore comes out at zero and
+        // falls off this report altogether, which is correct: a machine kept off a finished job and
+        // later issued to a technician was never in the warehouse at either end.
+        // Clamped against the positive part only: the one type with a signed quantity is Adjustment,
+        // which is a correction to the warehouse by hand and never carries a shelf quantity, so a
+        // negative qty passes through untouched rather than being pulled towards zero.
+        var warehouseQty = qty - Math.Clamp(shelfQty, 0, Math.Max(qty, 0));
+        return type switch
+        {
+            MovementType.Receipt or MovementType.Return or MovementType.SaleReturn or MovementType.SaleUnsold
+                or MovementType.ReplacementReturn => warehouseQty,
+            MovementType.Adjustment => warehouseQty,   // stored already signed; a shrinkage is negative
+            MovementType.Issue or MovementType.Replacement or MovementType.Sale => -warehouseQty,
+            // The one type that bypasses the shelf arithmetic above, because it is the opposite shape:
+            // the units were already on the shelf and only the warehouse's claim on them is being
+            // given up. So the whole quantity comes off the warehouse, and ShelfQty is 0.
+            MovementType.ShelfTransfer => -qty,
+            // Consumption / ConsumptionReversal / Transfer are technician-side; ShelfIn is shelf-side.
+            _ => 0,
+        };
+    }
 
     // ---------------------------------------------------------------- detailed stock analysis
 

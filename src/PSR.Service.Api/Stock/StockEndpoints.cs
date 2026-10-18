@@ -32,7 +32,8 @@ public static class StockEndpoints
     }
 
     private static async Task<Ok<PagedResult<StockRowDto>>> ListAsync(
-        AppDbContext db, string? search, bool? activeOnly, int? page, int? pageSize, CancellationToken ct)
+        AppDbContext db, SerialService serial, string? search, bool? activeOnly, int? page, int? pageSize,
+        CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
@@ -55,9 +56,11 @@ public static class StockEndpoints
             .Skip((pageNum - 1) * size).Take(size).ToListAsync(ct);
 
         var (outbound, inbound) = await InTransitAsync(db, ct);
+        var shelf = await serial.ShelfCountsAsync(ct);
 
         var items = rows.Select(x => new StockRowDto(x.p.Id, x.p.ItemCode, x.p.Name, x.p.Unit, x.OnHand,
-            outbound.GetValueOrDefault(x.p.Id), inbound.GetValueOrDefault(x.p.Id))).ToList();
+            outbound.GetValueOrDefault(x.p.Id), inbound.GetValueOrDefault(x.p.Id),
+            shelf.GetValueOrDefault(x.p.Id))).ToList();
         return TypedResults.Ok(new PagedResult<StockRowDto>(items, pageNum, size, total));
     }
 
@@ -251,6 +254,13 @@ public static class StockEndpoints
                         && r.Kind == StockReturnKind.GoodStock && r.TechnicianDebitedOnShip)
             .SumAsync(r => (int?)r.Qty, ct) ?? 0;
 
-        return new StockRowDto(part.Id, part.ItemCode, part.Name, part.Unit, onHand, outbound, inbound);
+        // The shelf count too, for the same reason the in-transit figures are here: a row refreshed
+        // after a receipt is dropped straight into the grid, and one that came back claiming an empty
+        // shelf would contradict the row it replaced.
+        var onShelf = await db.ComponentSerials.AsNoTracking()
+            .CountAsync(c => c.PartId == part.Id && c.Status == SerialStatus.Shelfed
+                             && c.OwnerType == SerialOwnerType.ServiceCenter, ct);
+
+        return new StockRowDto(part.Id, part.ItemCode, part.Name, part.Unit, onHand, outbound, inbound, onShelf);
     }
 }

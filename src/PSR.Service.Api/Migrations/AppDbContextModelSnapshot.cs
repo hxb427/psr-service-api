@@ -1816,6 +1816,12 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("outgoing_component_serial_id");
 
+                    b.Property<bool>("OutgoingFromShelf")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false)
+                        .HasColumnName("outgoing_from_shelf");
+
                     b.Property<long?>("OutgoingPartId")
                         .HasColumnType("bigint")
                         .HasColumnName("outgoing_part_id");
@@ -1951,6 +1957,21 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("tinyint(1)")
                         .HasColumnName("is_deleted");
 
+                    b.Property<string>("PartyAddress")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)")
+                        .HasColumnName("party_address");
+
+                    b.Property<string>("PartyState")
+                        .HasMaxLength(60)
+                        .HasColumnType("varchar(60)")
+                        .HasColumnName("party_state");
+
+                    b.Property<string>("PartyStateCode")
+                        .HasMaxLength(10)
+                        .HasColumnType("varchar(10)")
+                        .HasColumnName("party_state_code");
+
                     b.Property<string>("PaymentStatus")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -2019,6 +2040,8 @@ namespace PSR.Service.Api.Migrations
                     b.HasIndex("CustomerId");
 
                     b.HasIndex("DealerId");
+
+                    b.HasIndex("PartyStateCode");
 
                     b.HasIndex("SaleDate");
 
@@ -2378,6 +2401,12 @@ namespace PSR.Service.Api.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)")
                         .HasColumnName("serial_no");
+
+                    b.Property<int>("ShelfQty")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0)
+                        .HasColumnName("shelf_qty");
 
                     b.Property<string>("Source")
                         .HasMaxLength(100)

@@ -20,8 +20,9 @@ public enum SerialStatus
     Defective,       // known faulty
     Missing,         // reported not received / lost
     InTransitSc,     // technician shipping the unit back to the service center
-    ReturnedToSc,    // received back at the service center (re-issuable)
-    Repaired,        // repaired at the service center (re-issuable)
+    ReturnedToSc,    // LEGACY: booked back at the counter before SHELFED existed. No longer shelf stock.
+    Repaired,        // fixed on the bench, not yet put away. NOT issuable - SHELFED is what the shelf holds.
+    Shelfed,         // on the warehouse shelf: in hand, ready to be issued or used. The only re-issuable status.
     InTransitTech,   // held in a pending technician-to-technician transfer (mobile)
     UnderRepair,     // arrived back at the service center on a FAULTY return; a repair job is open on it
     Scrapped,        // written off at the service center (repair job closed as total loss) — terminal

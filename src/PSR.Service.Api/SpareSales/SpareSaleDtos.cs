@@ -13,7 +13,12 @@ public record SpareSaleLineRequest(
     [Range(0, 10_000_000)] decimal? UnitRate);
 
 /// <summary>Create or replace a spare sale. The party is EITHER a dealer (CustomerType=Dealer + DealerId)
-/// or a direct customer (CustomerType=Direct + CustomerId or a typed CustomerName, match-or-created).</summary>
+/// or a direct customer (CustomerType=Direct + CustomerId or a typed CustomerName, match-or-created).
+///
+/// <paramref name="Address"/>, <paramref name="PartyState"/> and <paramref name="PartyStateCode"/> are the
+/// party's billing details as the entry form showed them — prefilled from the master, editable, and kept
+/// on the sale. A state is required: its GST code decides whether the documents raised against this sale
+/// carry CGST + SGST or IGST, and it is also what the register's statewise filter reads.</summary>
 public record SaveSpareSaleRequest(
     [Required, StringLength(20)] string CustomerType,
     long? DealerId,
@@ -23,7 +28,9 @@ public record SaveSpareSaleRequest(
     [StringLength(500)] string? Address,
     DateTime? SaleDate,
     [StringLength(500)] string? Remarks,
-    [Required, MinLength(1)] List<SpareSaleLineRequest> Lines);
+    [Required, MinLength(1)] List<SpareSaleLineRequest> Lines,
+    [StringLength(60)] string? PartyState = null,
+    [StringLength(10)] string? PartyStateCode = null);
 
 public record SalePaymentRequest([Required, StringLength(20)] string Status);
 

@@ -34,6 +34,21 @@ public class SpareSale : ITimestamps
     public long? DealerId { get; set; }
     public long? CustomerId { get; set; }
 
+    // ----- the party's billing details, as they stood when the sale was entered -----
+    //
+    // Prefilled from the dealer or customer master on the entry form and then kept here, for the same
+    // reason a line snapshots its item code and HSN: a master edited next month must not rewrite what
+    // was billed last month. The generate forms open on these, falling back to the master for a sale
+    // entered before the columns existed.
+    //
+    // The state is not decoration. Its GST code is what decides whether the document carries CGST + SGST
+    // or IGST, and the form used to ask for it at the last possible moment — on the generate form, once
+    // per document, with nothing kept. Asked at entry it is settled while the customer is still at the
+    // counter, and it is also the column the register's statewise filter reads.
+    public string? PartyAddress { get; set; }
+    public string? PartyState { get; set; }
+    public string? PartyStateCode { get; set; }
+
     public SpareSaleStatus Status { get; set; } = SpareSaleStatus.Pending;
     public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
 

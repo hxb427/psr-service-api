@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Documents;
 
 using PSR.Service.Api.Common;
 
@@ -91,12 +92,16 @@ public class SpareSaleService(AppDbContext db)
         {
             if (req.DealerId is not { } did)
                 throw new SaleValidationException("Choose the dealer being billed.");
-            if (!await db.Dealers.AnyAsync(d => d.Id == did, ct))
-                throw new SaleValidationException("That dealer was not found.");
+            // The GSTIN comes back with the row because the state is resolved off it when the form sent
+            // no code — a dealer's own registration cannot have been issued in another state.
+            var dealer = await db.Dealers.AsNoTracking().Where(d => d.Id == did)
+                             .Select(d => new { d.Gstin }).FirstOrDefaultAsync(ct)
+                         ?? throw new SaleValidationException("That dealer was not found.");
 
             sale.CustomerType = "Dealer";
             sale.DealerId = did;
             sale.CustomerId = null;
+            ApplyBillingDetails(sale, req, dealer.Gstin);
             return true;
         }
 
@@ -113,10 +118,36 @@ public class SpareSaleService(AppDbContext db)
             sale.CustomerType = "Direct";
             sale.CustomerId = party.CustomerId;
             sale.DealerId = null;
+            // No GSTIN to fall back on — the customer master does not carry one — so a walk-in's state
+            // is whatever the form was told, which is why the form is made to ask.
+            ApplyBillingDetails(sale, req, null);
             return false;
         }
 
         throw new SaleValidationException($"Unknown customer type '{req.CustomerType}'. Use Dealer or Direct.");
+    }
+
+    /// <summary>The party's billing address and state, kept on the sale as the entry form showed them.
+    ///
+    /// The state is required and is resolved exactly as a document resolves it — the code picked, else
+    /// the one the party's GSTIN opens with, else the one the state name implies — so a sale and the PI
+    /// raised against it can never disagree about the tax split. It used to be asked for on the generate
+    /// form alone, which meant the question that decides CGST + SGST against IGST was put once per
+    /// document, to whoever happened to be raising it, long after the customer had left the counter.</summary>
+    private static void ApplyBillingDetails(SpareSale sale, SaveSpareSaleRequest req, string? partyGstin)
+    {
+        var code = GstStates.ResolveCode(req.PartyStateCode, req.PartyState, partyGstin)
+            ?? throw new SaleValidationException(
+                "Pick the party's state. Its GST code is what decides whether the documents raised for "
+                + "this sale carry CGST + SGST or IGST.");
+
+        sale.PartyAddress = string.IsNullOrWhiteSpace(req.Address) ? null : req.Address.Trim();
+        sale.PartyStateCode = code;
+        // The list's own name for the code, so what the register filters on and what a document prints
+        // are the same words. A code the list does not name keeps whatever was typed instead of
+        // travelling nameless.
+        sale.PartyState = GstStates.ByCode(code)?.Name
+            ?? (string.IsNullOrWhiteSpace(req.PartyState) ? null : req.PartyState.Trim());
     }
 
     /// <summary>An explicit rate is always honoured (and recorded as Manual); otherwise the rate comes from

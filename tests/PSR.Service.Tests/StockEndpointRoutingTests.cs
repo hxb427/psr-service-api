@@ -30,6 +30,8 @@ public class StockEndpointRoutingTests
             opts.UseMySql("Server=localhost;Database=none", new MySqlServerVersion(new Version(8, 0, 36))));
         builder.Services.AddScoped<IAuditService, AuditService>();
         builder.Services.AddScoped<StockLedgerService>();
+        // The stock list reads the shelf through this, so the grid can show both pools side by side.
+        builder.Services.AddScoped<SerialService>();
 
         var app = builder.Build();
 

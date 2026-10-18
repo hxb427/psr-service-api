@@ -39,6 +39,16 @@ public class ServiceReplacement
     public string OutgoingSerialNo { get; set; } = string.Empty;
     public long? OutgoingComponentSerialId { get; set; }
 
+    /// <summary>True when the unit handed over came off the SHELF rather than out of warehouse stock.
+    ///
+    /// Remembered for the same reason <see cref="StatusBeforeSwap"/> is: cancelling has to put the
+    /// unit back where it came from. The two pools are not interchangeable - the shelf holds machines
+    /// the shop kept off finished jobs, and crediting a cancelled swap to the warehouse instead would
+    /// quietly turn one of those into purchased stock of its PS code, which is precisely what keeping
+    /// the shelf separate exists to prevent. The unit's status on the way back (SHELFED) cannot be
+    /// read for this, because that is where a cancelled unit lands whichever pool it came out of.</summary>
+    public bool OutgoingFromShelf { get; set; }
+
     // --- what came IN and stayed (null for a total loss) ---
     public long? IncomingPartId { get; set; }
     public string? IncomingSerialNo { get; set; }

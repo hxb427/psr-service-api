@@ -316,11 +316,31 @@ public static class StockReturnsEndpoints
 
         switch (verdict)
         {
+            // Unused stock the receiver says arrived fine. It goes straight onto the shelf: nothing
+            // was done to it, nothing needs doing to it, and there is no bench step to wait for.
+            //
+            // `defective: false` is deliberate, and it is a fix rather than a simplification. This
+            // used to pass line.Defective - the SHIPPER's note, written on a phone before the box was
+            // sealed - which could send the unit to DEFECTIVE while the line below credited the
+            // warehouse for it anyway: a quantity on the shelf with no unit on the shelf to match.
+            // The receiver's verdict is the one that counts here, same as everywhere else in this
+            // method; a receiver who finds the shipper was right sends Defective, which is the branch
+            // below.
             case SerialAckStatus.Received when r.Kind == StockReturnKind.GoodStock:
-                await serial.ReceiveReturnAsync(line.ComponentSerialId, line.Defective, uid,
-                    $"Return {r.ReturnNo} received at service center", ct);
+                await serial.ReceiveReturnAsync(line.ComponentSerialId, defective: false, uid,
+                    $"Return {r.ReturnNo}: unused stock booked back onto the shelf", ct);
+                // Onto the SHELF, so no warehouse quantity is credited: shelfQty 1 of 1. The unit is
+                // SHELFED now, and the shelf is counted by unit - crediting the warehouse as well
+                // would count this one machine twice, once as a named unit on the shelf and once as
+                // an anonymous quantity in the warehouse, which is the drift the two-ledger split
+                // exists to prevent.
+                //
+                // It does NOT go back to the warehouse it was issued from, and that is a change worth
+                // knowing: a unit that has been out to a technician and come back is a named unit in
+                // hand from then on, available to issue again or to hand over as a replacement. The
+                // warehouse figure means stock bought in and not yet taken out.
                 await ledger.ReturnToStockAsync(r.PartId, r.TechnicianId, 1, uid, "STOCK_RETURN", r.Id, ct,
-                    debitTechnician: owes);
+                    debitTechnician: owes, shelfQty: 1);
                 return null;
 
             case SerialAckStatus.Missing:

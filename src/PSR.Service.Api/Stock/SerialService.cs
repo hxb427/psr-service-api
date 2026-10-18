@@ -12,8 +12,18 @@ namespace PSR.Service.Api.Stock;
 /// </summary>
 public class SerialService(AppDbContext db)
 {
-    // A serial may be (re)issued only when it is brand-new, or back at the service center ready to redeploy.
-    internal static readonly SerialStatus[] ReIssuable = { SerialStatus.ReturnedToSc, SerialStatus.Repaired };
+    // A serial may be (re)issued only when it is brand-new, or SHELFED - put away at the service
+    // centre and ready to go out again.
+    //
+    // One status, not three. REPAIRED and RETURNED_TO_SC used to be in here, and that is what made
+    // the shelf unreadable: "repaired" says a bench finished with the unit, "returned to SC" says a
+    // box arrived, and neither says anybody put the thing away. A unit is on the shelf because
+    // somebody shelved it, so there is now a status that means exactly that and nothing else.
+    //
+    // The two old statuses are NOT quietly left as shelf stock by another name: migration
+    // 20261017_AddShelfedSerialStatus converts every service-centre-owned row in either of them to
+    // SHELFED, because every one of them got there through a path that credited the warehouse.
+    internal static readonly SerialStatus[] ReIssuable = { SerialStatus.Shelfed };
 
     // What each kind of return shipment may physically contain. The split matters: good stock going
     // back is stock the technician was issued and still holds, while a faulty return is a customer's
@@ -32,45 +42,37 @@ public class SerialService(AppDbContext db)
     internal static IReadOnlyList<SerialStatus> ShippableFor(StockReturnKind kind) =>
         kind == StockReturnKind.Faulty ? FaultyShippable : GoodStockShippable;
 
-    /// <summary>Whether a unit in this status is counted in the WAREHOUSE balance.
+    /// <summary>Whether a unit in this status is ON THE SHELF - the service centre's pool of units in
+    /// hand, ready to be issued to a technician or handed over as a replacement.
     ///
-    /// Defined as "may be issued from the shelf", not as a second list that happens to match today:
-    /// the shelf count and the issue pick list have to be the same set of units, or the warehouse is
-    /// offering stock it cannot give out, or holding stock it will not offer.</summary>
-    internal static bool IsWarehouseStock(SerialStatus status) => ReIssuable.Contains(status);
-
-    /// <summary>How a MANUAL status change moves the warehouse count: +1 when the unit joins the
-    /// shelf, -1 when it leaves it, 0 when the shelf was never involved either side.
+    /// Defined as "may be issued", not as a second list that happens to match today: the shelf and
+    /// the issue pick list have to be the same set of units, or the shelf is offering units an issue
+    /// would refuse, or holding units it will not offer.
     ///
-    /// This is the join the manual screen used to skip. A unit written off as missing had its
-    /// quantity written off with it; flipping it to RETURNED_TO_SC made it issuable again while the
-    /// count stayed one short for ever, so the next issue of that part either failed on a guard
-    /// nobody could explain or quietly ran the balance down against a unit that was sitting on the
-    /// shelf. The reverse matters just as much: without the -1, flipping a unit missing and found
-    /// and missing again would mint a unit of stock on every lap.
+    /// THE SHELF IS NOT THE WAREHOUSE, and that is the whole shape of this. The warehouse is a
+    /// quantity - stock bought in, counted in <c>stock_balances</c>, not named unit by unit until it
+    /// goes out. The shelf is a set of units and nothing else: a machine kept off a finished job, or
+    /// unused stock a technician sent back. It has no quantity row anywhere, because the units ARE
+    /// the count, and a serviced machine must not be added to the purchased stock of its PS code -
+    /// which is exactly what crediting the warehouse for it did.
     ///
-    /// Only the manual endpoints use this. Every ordinary path - acknowledging a return, stocking a
-    /// repair job, cancelling a swap - already moves its own quantity alongside the status, and
-    /// applying this there as well would count each of those twice.</summary>
-    internal static int WarehouseDeltaFor(SerialStatus from, SerialStatus to) =>
-        (IsWarehouseStock(from), IsWarehouseStock(to)) switch
-        {
-            (false, true) => 1,
-            (true, false) => -1,
-            _ => 0,
-        };
+    /// So no serial status is warehouse stock any more, and nothing here moves a warehouse balance.
+    /// A unit joins the shelf by reaching SHELFED and leaves it by leaving SHELFED; both are facts
+    /// about <c>component_serials</c>, so the two can no longer disagree the way a status and a
+    /// separate count could.</summary>
+    internal static bool IsOnShelf(SerialStatus status) => ReIssuable.Contains(status);
 
     /// <summary>Why this manual status change must not be applied, or null when it may be.
     ///
-    /// One transition is refused: shelf stock straight into a technician's hands. It is the only
-    /// change where the quantity would leave the warehouse and arrive nowhere, because a technician's
-    /// usable holding is credited by issuing - a status edit has no issue, no quantity and no
-    /// technician balance behind it. Handing a unit over is an issue; saying so is more use than
-    /// silently losing one from the count.</summary>
+    /// One transition is refused: a shelf unit straight into a technician's hands. It is the only
+    /// change where the unit would leave the shelf and arrive on no balance at all, because a
+    /// technician's usable holding is credited by issuing - a status edit has no issue, no quantity
+    /// and no technician balance behind it. Handing a unit over is an issue; saying so is more use
+    /// than silently losing it.</summary>
     internal static string? ManualChangeBlocked(SerialStatus from, SerialStatus to, string serialNumber) =>
-        IsWarehouseStock(from) && to == SerialStatus.Received
-            ? $"{serialNumber} is on the warehouse shelf. Issue it to the technician instead - that is "
-              + "what moves the quantity onto their holding, which a status change cannot do."
+        IsOnShelf(from) && to == SerialStatus.Received
+            ? $"{serialNumber} is on the shelf. Issue it to the technician instead - that is what "
+              + "moves the quantity onto their holding, which a status change cannot do."
             : null;
 
     /// <summary>Returns serial → reason for any serial that cannot be issued for this part
@@ -100,6 +102,172 @@ public class SerialService(AppDbContext db)
             };
         }
         return conflicts;
+    }
+
+    /// <summary>How many units each part has on the shelf. The shelf's "balance", derived rather than
+    /// stored - see <see cref="IsOnShelf"/> for why there is no row to read instead.
+    ///
+    /// Every part in one dictionary rather than filtered to a page of them: the set is small by
+    /// definition (only units actually in hand), and filtering by a list of ids runs into the
+    /// EF Core 9 + .NET 10 funcletizer bug the rest of this codebase works around with OR-chains.</summary>
+    public async Task<Dictionary<long, int>> ShelfCountsAsync(CancellationToken ct) =>
+        await db.ComponentSerials.AsNoTracking()
+            .Where(c => c.Status == SerialStatus.Shelfed && c.OwnerType == SerialOwnerType.ServiceCenter)
+            .GroupBy(c => c.PartId)
+            .Select(g => new { PartId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.PartId, x => x.Count, ct);
+
+    /// <summary>Whether this one unit is on the shelf, by serial number. For the replacement paths,
+    /// which name a single unit and need to know which pool to take it out of.
+    ///
+    /// READ-ONLY, AND THEREFORE NOT A GUARANTEE. It answers from before the caller's transaction has
+    /// written anything, so between this and the write somebody else can take the same unit. Use it to
+    /// decide which pool to debit and to say so on a form; use <see cref="ClaimFromShelfAsync"/> to
+    /// actually take the unit.</summary>
+    public Task<bool> IsOnShelfAsync(long partId, string? serialNo, CancellationToken ct)
+    {
+        var sn = serialNo?.Trim();
+        if (string.IsNullOrEmpty(sn)) return Task.FromResult(false);
+        return db.ComponentSerials.AsNoTracking()
+            .AnyAsync(c => c.PartId == partId && c.SerialNumber == sn
+                           && c.Status == SerialStatus.Shelfed
+                           && c.OwnerType == SerialOwnerType.ServiceCenter, ct);
+    }
+
+    /// <summary>Take this unit off the shelf, or report that it is not there to take. Returns true
+    /// when this caller got it.
+    ///
+    /// THE SHELF'S MISSING GUARD. Every other check in this file reads before the transaction writes,
+    /// which is fine for deciding what to put on a form and useless for deciding who gets the last
+    /// one. Two callers naming the same unit both read SHELFED, both passed, and both wrote: the
+    /// second overwrote the first, so one job's replacement was recorded against a unit the other job
+    /// had also physically handed over — and one of the two units never left the building.
+    ///
+    /// The warehouse cannot do this, because its quantity is taken by a conditional UPDATE
+    /// (<c>StockLedgerService.GuardedDecrementAsync</c>) that fails when the balance would go
+    /// negative. The shelf has no quantity to guard: it IS these rows, the ones that are SHELFED in
+    /// the service centre's custody. So the guard has to be on the row, and this is the same idiom
+    /// pointed at it — the WHERE carries the condition, and nought rows affected is the refusal.
+    ///
+    /// Two things make it a lock and not merely a re-check, and both come from InnoDB rather than from
+    /// anything here. An UPDATE takes an exclusive lock on the row and holds it until the transaction
+    /// ends, so the second caller's identical UPDATE blocks rather than racing. And an UPDATE reads
+    /// the latest committed row rather than the transaction's snapshot, so when it unblocks it judges
+    /// its WHERE against what the winner actually wrote: the status is no longer SHELFED, nought rows
+    /// match, and the second caller is refused. If the winner rolls back instead, the lock lifts with
+    /// the row still SHELFED and the waiter takes it, which is also right.
+    ///
+    /// IT WRITES NO STATUS, on purpose. Moving the row here would leave the real transition
+    /// (<see cref="InstallToCustomerAsync"/>, <see cref="CaptureOnIssueAsync"/>) writing a history row
+    /// whose old status was already the new one — the trail would stop saying the unit came off the
+    /// shelf, which is the one thing it is kept for. Touching <c>last_updated_at</c> takes the same
+    /// lock and says the same no.
+    ///
+    /// A serial the shop has never seen returns false and is not an error: that is warehouse stock
+    /// being named as it goes out, which is how a serial-tracked part's bought-in stock enters
+    /// tracking at all. The caller decides whether false means "warehouse" or "somebody beat me",
+    /// because only the caller knows which of the two it was promised.</summary>
+    public async Task<bool> ClaimFromShelfAsync(long partId, string? serialNo, CancellationToken ct)
+    {
+        var sn = serialNo?.Trim();
+        if (string.IsNullOrEmpty(sn)) return false;
+        var affected = await db.Database.ExecuteSqlInterpolatedAsync(ClaimFromShelfSql(partId, sn), ct);
+        return affected == 1;
+    }
+
+    /// <summary>The claim's statement, built separately only so it can be read back. A suite with no
+    /// database cannot run this SQL, and the two conditions in its WHERE are the whole of what makes
+    /// the shelf safe — so they are worth a test that can see them rather than no test at all.
+    ///
+    /// The status values are literals because that is what the column holds: <c>HasConversion&lt;
+    /// string&gt;()</c> stores the enum's own name, and migration
+    /// <c>20261017_AddShelfedSerialStatus</c> writes exactly these two words.</summary>
+    internal static FormattableString ClaimFromShelfSql(long partId, string serialNo) => $@"
+UPDATE `component_serials` SET `last_updated_at` = UTC_TIMESTAMP(6)
+WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
+  AND `status` = 'Shelfed' AND `owner_type` = 'ServiceCenter'";
+
+    /// <summary>Why a single-unit handover must stop, or null when it may go on. The decision half of
+    /// <see cref="ClaimFromShelfAsync"/>, pure so it can be pinned down without a database — the race
+    /// itself cannot be, and the rule is the part worth keeping honest.
+    ///
+    /// Only one of the four combinations is a failure: the form was offered a unit OFF THE SHELF and
+    /// the claim could not get it. The other three are all ordinary.
+    ///
+    /// <list type="bullet">
+    /// <item><c>promised, claimed</c> — the shelf unit is now this caller's.</item>
+    /// <item><c>not promised, not claimed</c> — a serial the shop has never seen, coming out of
+    /// warehouse stock as it always did.</item>
+    /// <item><c>not promised, claimed</c> — somebody shelved that very serial in between. The claim is
+    /// the more recent fact and the unit is genuinely in hand, so it is taken off the shelf rather
+    /// than bought twice.</item>
+    /// </list>
+    ///
+    /// The failure must NOT fall back to the warehouse. That is the quiet wrong answer: it would debit
+    /// a quantity for a unit that was never in the warehouse, so the shop would be one unit short on
+    /// paper and the customer would have been handed nothing.</summary>
+    internal static string? ShelfClaimLostReason(bool promisedShelf, bool claimed, string serialNo)
+        => promisedShelf && !claimed
+            ? $"Unit {serialNo} is no longer on the shelf — somebody else has issued or used it since "
+              + "this form was opened. Nothing has been handed over. Pick another unit, or reopen the "
+              + "form to see what is on the shelf now."
+            : null;
+
+    /// <summary>Take the shelf units of an issue, and say how the issue splits between the two pools
+    /// it can come out of. Call it inside the caller's transaction: it WRITES.
+    ///
+    /// A serial-tracked part can be issued from either pool, and which one is not a choice the store
+    /// makes on a form - it follows from the units picked:
+    ///
+    /// <list type="bullet">
+    /// <item>a serial that is SHELFED in the service centre's custody is a unit ON THE SHELF. It is
+    /// picked from the shelf list, it has no warehouse quantity behind it, and issuing it takes it
+    /// off the shelf by changing its status.</item>
+    /// <item>a serial the shop has never seen is purchased WAREHOUSE stock being named as it goes
+    /// out. That is how a serial-tracked part's bought-in stock gets into tracking at all - it is
+    /// received as a quantity and named at issue - so its quantity must come off the warehouse.</item>
+    /// </list>
+    ///
+    /// Returned as counts rather than lists because that is what the ledger needs: one debit per pool.
+    /// An untracked part never reaches here — it has no units to pick, so its quantity comes off the
+    /// warehouse as it always did.
+    ///
+    /// THIS REPLACED A READ-ONLY SPLIT, and the reason is the whole point of it. That version counted
+    /// which of the named serials were SHELFED, from a query taken before the transaction opened. Two
+    /// stores filling two issues off the same shelf unit therefore both counted it as theirs: each
+    /// debited one fewer from the warehouse than it actually took, and the unit left the building
+    /// twice. The read-only version is gone rather than merely left uncalled — it is indistinguishable
+    /// from this one at the call site, so keeping it is keeping the bug one autocomplete away.
+    ///
+    /// The distinction it could not make is the one that matters. A serial that fails to claim is
+    /// either a unit the shop has never seen — warehouse stock, perfectly ordinary — or a unit it
+    /// knows about that is no longer on the shelf, which is somebody else having taken it since this
+    /// request was checked. <see cref="FindIssueConflictsAsync"/> refuses the second case before the
+    /// transaction opens, so reaching it here means the unit moved in between. Counting it as
+    /// warehouse stock would debit a quantity for a unit that was never in the warehouse, so it is
+    /// refused by name instead.</summary>
+    public async Task<(int FromShelf, int FromWarehouse)> ClaimIssueSourcesAsync(
+        long partId, IReadOnlyCollection<string> serials, CancellationToken ct)
+    {
+        var trimmed = serials.Select(s => s.Trim()).Where(s => s.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (trimmed.Count == 0) return (0, 0);
+
+        var shelf = 0;
+        foreach (var sn in trimmed)
+        {
+            if (await ClaimFromShelfAsync(partId, sn, ct)) { shelf++; continue; }
+
+            // Known to the shop but not on the shelf. FindIssueConflictsAsync already refused this
+            // case before the transaction opened, so reaching it means the unit moved in between —
+            // which is exactly the race this exists for.
+            if (await db.ComponentSerials.AsNoTracking()
+                    .AnyAsync(c => c.PartId == partId && c.SerialNumber == sn, ct))
+                throw new StockException(
+                    $"Unit {sn} is no longer on the shelf — somebody else has issued or used it since "
+                    + "this was checked. Remove it from this issue, or pick another unit.");
+        }
+        return (shelf, trimmed.Count - shelf);
     }
 
     /// <summary>Bind serials to a technician on issue, and write the <c>stock_issue_serials</c> link
@@ -344,8 +512,14 @@ public class SerialService(AppDbContext db)
         return null;
     }
 
-    /// <summary>Return flow: receive a unit back at the service center (good → RETURNED_TO_SC, faulty →
-    /// DEFECTIVE). Owner → SERVICE_CENTER. Returns the updated serial, or null if not found.</summary>
+    /// <summary>Return flow: receive a unit back at the service centre. Unused stock goes straight
+    /// onto the shelf (SHELFED); a unit found faulty goes to DEFECTIVE and no further, because the
+    /// bench has to see it before anyone can issue it again. Owner → SERVICE_CENTER either way.
+    /// Returns the updated serial, or null if not found.
+    ///
+    /// Straight to the shelf is the whole point: unused stock coming back from a technician needed
+    /// nothing done to it. It used to land on RETURNED_TO_SC, which read as a waypoint and left the
+    /// desk looking for a second step that did not exist.</summary>
     public async Task<ComponentSerial?> ReceiveReturnAsync(
         long serialId, bool defective, long byUser, string remarks, CancellationToken ct)
     {
@@ -353,7 +527,7 @@ public class SerialService(AppDbContext db)
         if (c is null) return null;
         var old = c.Status.ToString();
         var now = DateTime.UtcNow;
-        var newStatus = defective ? SerialStatus.Defective : SerialStatus.ReturnedToSc;
+        var newStatus = defective ? SerialStatus.Defective : SerialStatus.Shelfed;
         c.Status = newStatus;
         c.OwnerType = SerialOwnerType.ServiceCenter;
         c.OwnerRef = "Service center";
@@ -434,24 +608,30 @@ public class SerialService(AppDbContext db)
         return (c, previousCustomerId, previousOwnerRef, true);
     }
 
-    /// <summary>The repair job on a returned unit was stocked: the unit is serviceable again and goes
-    /// back on the shelf. REPAIRED is re-issuable, so this is the point the unit rejoins the pool.
-    /// The customer link is dropped here - it is service-center stock now, and its past owners stay
+    /// <summary>Put a unit away on the warehouse shelf: SHELFED, service-centre custody, ready to be
+    /// issued or used. This is the point the unit rejoins the pool, and the only thing that puts it
+    /// there - the shelf is never inferred from a bench status.
+    ///
+    /// Reached by the one gesture that means it: "Keep in stock" on a finished job. The unit may have
+    /// been UNDER_REPAIR (a customer unit the shop kept), REPAIRED (a bench finished with it) or
+    /// nothing the shop had seen before; what it was before does not change what shelving it means.
+    ///
+    /// The customer link is dropped here - it is service-centre stock now, and its past owners stay
     /// readable in the history rather than lingering as current ownership.</summary>
-    public async Task MarkRepairedAsync(long serialId, long byUser, string remarks, CancellationToken ct)
+    public async Task ShelveAsync(long serialId, long byUser, string remarks, CancellationToken ct)
     {
         var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.Id == serialId, ct);
         if (c is null) return;
         var old = c.Status.ToString();
         var now = DateTime.UtcNow;
-        c.Status = SerialStatus.Repaired;
+        c.Status = SerialStatus.Shelfed;
         c.OwnerType = SerialOwnerType.ServiceCenter;
         c.OwnerRef = "Service center";
         c.TechnicianId = null;
         c.CustomerId = null;
         c.CurrentServiceJobId = null;
         c.LastUpdatedAt = now;
-        AddHistory(c, old, SerialStatus.Repaired, byUser, remarks, now);
+        AddHistory(c, old, SerialStatus.Shelfed, byUser, remarks, now);
     }
 
     /// <summary>Take a unit into the service centre's own custody, creating its record if the shop has
@@ -464,10 +644,9 @@ public class SerialService(AppDbContext db)
     /// <item><c>UnderRepair</c> — an advance replacement was issued and the customer's unit stayed
     /// behind. Ownership changes now; the unit is broken, so it is deliberately NOT re-issuable and
     /// no quantity moves yet.</item>
-    /// <item><c>Repaired</c> — a finished job was stocked. The unit is serviceable and rejoins the
-    /// pool in the same breath as the warehouse count.</item>
-    /// <item><c>ReturnedToSc</c> — a replacement that never left the building is being put back on
-    /// the shelf because the swap was cancelled.</item>
+    /// <item><c>Shelfed</c> — a finished job was stocked, or a replacement that never left the
+    /// building is going back because the swap was cancelled. Either way the unit is put away and
+    /// rejoins the pool in the same breath as the warehouse count.</item>
     /// </list>
     ///
     /// Returns the unit, or null when the serial is blank — an untracked machine with no serial
@@ -698,8 +877,8 @@ public class SerialService(AppDbContext db)
     {
         switch (c.Status)
         {
-            case SerialStatus.ReturnedToSc or SerialStatus.Repaired or SerialStatus.InTransitSc
-                or SerialStatus.UnderRepair or SerialStatus.Scrapped:
+            case SerialStatus.Shelfed or SerialStatus.ReturnedToSc or SerialStatus.Repaired
+                or SerialStatus.InTransitSc or SerialStatus.UnderRepair or SerialStatus.Scrapped:
                 c.OwnerType = SerialOwnerType.ServiceCenter;
                 c.OwnerRef = "Service center";
                 if (c.Status != SerialStatus.InTransitSc) c.TechnicianId = null;

@@ -127,7 +127,7 @@ public class AdvanceReplacementTests
     }
 
     /// <summary>A retained unit reaches the shelf under the same rules as anything else: it has to
-    /// name a catalogue item, and a tracked one has to name its unit.</summary>
+    /// name a catalogue item, and it has to name its unit.</summary>
     [Fact]
     public void A_retained_job_stocks_under_the_same_rules_as_any_other()
     {
@@ -135,6 +135,6 @@ public class AdvanceReplacementTests
         var part = new Part { Id = 5, ItemCode = "PS-100", Name = "Control board", IsSerialTracked = true };
 
         ServicesEndpoints.StockBlockedReason(job, part, job.SerialNo).Should().BeNull();
-        ServicesEndpoints.StockBlockedReason(job, part, null).Should().Contain("serial-tracked");
+        ServicesEndpoints.StockBlockedReason(job, part, null).Should().Contain("no serial number");
     }
 }

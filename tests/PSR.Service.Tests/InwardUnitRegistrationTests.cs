@@ -89,8 +89,7 @@ public class InwardUnitRegistrationTests
     public void A_unit_in_for_service_is_never_offered_for_issue()
     {
         SerialService.ReIssuable.Should().NotContain(SerialStatus.UnderRepair);
-        SerialService.ReIssuable.Should().BeEquivalentTo(
-            [SerialStatus.ReturnedToSc, SerialStatus.Repaired]);
+        SerialService.ReIssuable.Should().BeEquivalentTo([SerialStatus.Shelfed]);
     }
 
     /// <summary>And it is not shippable on either kind of technician return either: it is at the

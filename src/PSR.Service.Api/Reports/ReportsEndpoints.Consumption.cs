@@ -101,7 +101,7 @@ public static partial class ReportsEndpoints
         var partById = parts.ToDictionary(p => p.Id);
 
         var moves = await ConsumingMovements(db, storedFrom, storedTo)
-            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.CreatedAt })
+            .Select(m => new { m.PartId, m.MovementType, m.Quantity, m.ShelfQty, m.CreatedAt })
             .ToListAsync(ct);
 
         // One cell per (month, part). Everything else on the report is this dictionary read a
@@ -110,7 +110,7 @@ public static partial class ReportsEndpoints
         foreach (var m in moves)
         {
             if (!partById.ContainsKey(m.PartId)) continue;
-            if (ConsumptionRules.Effect(m.MovementType, m.Quantity) is not { } effect) continue;
+            if (ConsumptionRules.Effect(m.MovementType, m.Quantity, m.ShelfQty) is not { } effect) continue;
             if (wanted is { } only && effect.Stream != only) continue;
 
             var key = (ConsumptionRules.MonthOf(m.CreatedAt, offset), m.PartId);
@@ -225,7 +225,7 @@ public static partial class ReportsEndpoints
             .OrderByDescending(m => m.CreatedAt)
             .Select(m => new
             {
-                m.MovementType, m.Quantity, m.ReferenceType, m.ReferenceId,
+                m.MovementType, m.Quantity, m.ShelfQty, m.ReferenceType, m.ReferenceId,
                 m.TechnicianId, m.PerformedByUserId, m.Remarks, m.CreatedAt,
             })
             .ToListAsync(ct);
@@ -244,7 +244,7 @@ public static partial class ReportsEndpoints
 
         foreach (var m in moves)
         {
-            if (ConsumptionRules.Effect(m.MovementType, m.Quantity) is not { } effect) continue;
+            if (ConsumptionRules.Effect(m.MovementType, m.Quantity, m.ShelfQty) is not { } effect) continue;
             if (wanted is { } only && effect.Stream != only) continue;
 
             // The trend is always the whole window, picked month or not: the reason for looking at one

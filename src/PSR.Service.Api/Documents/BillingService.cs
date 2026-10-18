@@ -285,7 +285,13 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
 
         // A PI is OPTIONAL for a counter sale — it is the quote you send when the customer asks for one.
         // An invoice may therefore be raised either against a PI already issued for this sale, or straight
-        // off the sale with no PI at all. Payment is still the gate on the invoice.
+        // off the sale with no PI at all.
+        //
+        // Payment is no longer a gate either. A counter sale is settled in cash as the goods are handed
+        // over, so marking it sold is what records the payment (see SpareSalesEndpoints.MarkSoldAsync),
+        // and the separate "mark payment received" step the gate was waiting on no longer exists. An
+        // invoice asked for before the goods go out is a bill being written in advance, which is a normal
+        // thing to do and was only ever blocked because the two axes used to be welded together.
         if (docType == DocumentType.PI)
         {
             if (!string.IsNullOrWhiteSpace(sale.PiNo))
@@ -293,8 +299,6 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         }
         else
         {
-            if (sale.PaymentStatus != PaymentStatus.Paid)
-                throw new BillingException("Mark payment received before generating the invoice.");
             if (!string.IsNullOrWhiteSpace(sale.InvNo))
                 throw new BillingException($"Invoice {sale.InvNo} has already been generated for this sale.");
 

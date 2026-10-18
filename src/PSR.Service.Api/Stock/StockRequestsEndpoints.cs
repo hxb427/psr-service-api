@@ -231,8 +231,29 @@ public static class StockRequestsEndpoints
         // Field stock travels by courier and is confirmed on arrival; in-house stock is handed
         // over at the counter, so it is received the moment it is issued.
         var inTransit = requester?.IsFieldTechnician ?? true;
+
+        // How much of this comes off the SHELF. A serial-tracked part can be filled from the shelf
+        // (units the shop kept off finished jobs), out of warehouse stock (bought in, named as it
+        // goes out), or from both at once when the store picks two shelf units and types the serial
+        // off a new box for the third. Only the warehouse part is debited from the warehouse; the
+        // shelf part leaves the shelf when CaptureOnIssueAsync changes those units' status.
+        //
+        // Still ONE movement, which matters: this is one consignment, so it has one acknowledgement,
+        // one in-transit figure and one set of serial links, and the row records how it was made up
+        // rather than being split into a part-shipment per pool.
+        //
+        // CLAIMED, not merely counted, and ahead of the warehouse debit below. The unguarded split
+        // reads before this transaction writes, so two stores filling two issues off the same shelf
+        // unit both saw it as theirs: each debited one fewer from the warehouse than it took, and the
+        // unit went out twice. The claim takes the row under an exclusive lock, and a unit that has
+        // moved since the pick list was drawn is refused by name rather than quietly re-counted as
+        // warehouse stock the shop does not have.
+        var (fromShelf, _) = needSerials
+            ? await serial.ClaimIssueSourcesAsync(r.PartId, serials, ct)
+            : (0, issueQty);
+
         var movement = await ledger.IssueAsync(r.PartId, r.RequestedByUserId, issueQty, uid,
-            "STOCK_REQUEST", r.Id, ct, creditTechnician: !inTransit);
+            "STOCK_REQUEST", r.Id, ct, creditTechnician: !inTransit, shelfQty: fromShelf);
         if (needSerials)
         {
             await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows
@@ -477,8 +498,15 @@ public static class StockRequestsEndpoints
                 await db.SaveChangesAsync(ct);
 
                 var inTransit = technician.IsFieldTechnician;
+                // How much of the line comes off the shelf rather than out of warehouse stock. Same
+                // rule as issuing against a request, and the same guard: the units picked decide it,
+                // and they are claimed under a lock here rather than counted from a read taken before
+                // the transaction opened. See ClaimIssueSourcesAsync.
+                var (fromShelf, _) = needSerials
+                    ? await serial.ClaimIssueSourcesAsync(part.Id, serials, ct)
+                    : (0, line.Qty);
                 var movement = await ledger.IssueAsync(part.Id, technician.Id, line.Qty, uid,
-                    "STOCK_REQUEST", entity.Id, ct, creditTechnician: !inTransit);
+                    "STOCK_REQUEST", entity.Id, ct, creditTechnician: !inTransit, shelfQty: fromShelf);
                 if (needSerials)
                 {
                     await db.SaveChangesAsync(ct);   // assign the movement id for serial link rows

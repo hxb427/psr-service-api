@@ -7,8 +7,16 @@ namespace PSR.Service.Api.Stock;
 /// stock that has physically left one side and not yet been acknowledged by the other, so it sits on
 /// NOBODY's balance — the honest position for something in a van. Until these existed the desk could
 /// see a shelf count of two and no way to learn that four more were on their way.</summary>
+/// <param name="OnShelf">Units of this part on the SHELF: machines the shop kept off finished jobs,
+/// and unused stock booked back from a technician. A SECOND, separate pool, deliberately not added
+/// into <paramref name="OnHand"/> - the warehouse figure is stock bought in, and a serviced machine
+/// counted alongside it is a machine that gets reordered against, sold across the counter and quoted
+/// as new. Both can be issued to a technician; only warehouse stock can be sold as goods.
+///
+/// Counted by unit rather than read off a balance, because the shelf has no balance row: the units
+/// in SHELFED status ARE the count. The Shelf page lists them one by one.</param>
 public record StockRowDto(long PartId, string ItemCode, string Name, string? Unit, int OnHand,
-    int InTransitOut = 0, int InTransitIn = 0);
+    int InTransitOut = 0, int InTransitIn = 0, int OnShelf = 0);
 
 /// <summary>Everything currently on nobody's balance, across the whole warehouse. Part counts come
 /// with the quantities because "18 units" and "18 units across 14 different items" are different

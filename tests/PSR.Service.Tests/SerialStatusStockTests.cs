@@ -13,29 +13,43 @@ using Xunit;
 namespace PSR.Service.Tests;
 
 /// <summary>
-/// The manual serial screen is where a person asserts where a unit is, and until now it said so to
-/// the serial ledger only. A unit written off as missing had its quantity written off with it;
-/// flipping it back to RETURNED_TO_SC made it issuable again while the warehouse count stayed one
-/// short for ever.
+/// The shelf is its own pool, and these pin what that means.
 ///
-/// These pin the arithmetic that closes that: the shelf count follows the status in both directions,
-/// and the one transition that would lose a unit altogether is refused instead.
+/// The WAREHOUSE is a quantity: stock bought in, counted in stock_balances, not named unit by unit
+/// until it goes out. The SHELF is a set of units and nothing else: machines the shop kept off
+/// finished jobs, and unused stock booked back from a technician. Both fill an issue; only warehouse
+/// stock can be sold as goods.
+///
+/// The property worth protecting is that the shelf cannot drift, because there is nothing for it to
+/// drift against. There was a +1/-1 rule here that moved the warehouse count alongside a manual
+/// status change, and it existed because the shelf was PART of the warehouse count and the two could
+/// disagree - a unit written off as missing and later found went re-issuable while the count stayed
+/// one short for ever. Separating the pools closes that by construction: the units in SHELFED status
+/// ARE the shelf's count, so a status change is the count change.
 /// </summary>
 public class SerialStatusStockTests
 {
-    /// <summary>The shelf counts exactly the units it may issue. Two lists that merely happen to
-    /// agree would drift; this is the same set by construction.</summary>
-    [Theory]
-    [InlineData(SerialStatus.ReturnedToSc)]
-    [InlineData(SerialStatus.Repaired)]
-    public void A_unit_back_at_the_service_centre_is_on_the_shelf(SerialStatus status)
+    /// <summary>The shelf holds exactly the units it may issue. Two lists that merely happen to agree
+    /// would drift; this is the same set by construction.</summary>
+    [Fact]
+    public void A_shelved_unit_is_on_the_shelf()
     {
-        SerialService.IsWarehouseStock(status).Should().BeTrue();
-        SerialService.ReIssuable.Should().Contain(status);
+        SerialService.IsOnShelf(SerialStatus.Shelfed).Should().BeTrue();
+        SerialService.ReIssuable.Should().Contain(SerialStatus.Shelfed);
+    }
+
+    /// <summary>And it is the only one. The shelf used to be three statuses, which is what made it
+    /// unreadable: REPAIRED said a bench had finished, RETURNED_TO_SC said a box had arrived, and
+    /// neither said anyone had put the unit away. Pinned as a set rather than as a membership check,
+    /// so a fourth synonym cannot be added quietly later.</summary>
+    [Fact]
+    public void Shelved_is_the_only_status_the_shelf_counts()
+    {
+        SerialService.ReIssuable.Should().BeEquivalentTo([SerialStatus.Shelfed]);
     }
 
     /// <summary>UNDER_REPAIR is the one worth stating: the unit is at the service centre, in its
-    /// custody, and is still not stock — it is in pieces on a bench.</summary>
+    /// custody, and is still not issuable - it is in pieces on a bench.</summary>
     [Theory]
     [InlineData(SerialStatus.Issued)]
     [InlineData(SerialStatus.Received)]
@@ -47,9 +61,15 @@ public class SerialStatusStockTests
     [InlineData(SerialStatus.InTransitTech)]
     [InlineData(SerialStatus.UnderRepair)]
     [InlineData(SerialStatus.Scrapped)]
-    public void Everything_else_is_not_warehouse_stock(SerialStatus status)
+    // The two that used to be shelf stock. REPAIRED is the one that matters: a unit a bench has
+    // finished with is not on the shelf until somebody puts it there, and "Keep in stock" is that
+    // somebody. RETURNED_TO_SC is kept only for the units that passed through it before SHELFED
+    // existed - nothing writes it now.
+    [InlineData(SerialStatus.Repaired)]
+    [InlineData(SerialStatus.ReturnedToSc)]
+    public void Everything_else_is_not_on_the_shelf(SerialStatus status)
     {
-        SerialService.IsWarehouseStock(status).Should().BeFalse();
+        SerialService.IsOnShelf(status).Should().BeFalse();
     }
 
     /// <summary>One word for one state. A unit deployed at a customer used to be able to say either
@@ -66,69 +86,97 @@ public class SerialStatusStockTests
         Enum.GetNames<SerialStatus>().Should().NotContain("Installed");
     }
 
-    /// <summary>Found after being written off: the unit rejoins the shelf, so the count must too.</summary>
+    /// <summary>The whole reason the +1/-1 rule is gone. A unit found after being written off joins
+    /// the SHELF, not the warehouse, so the warehouse has nothing to put back: the quantity written
+    /// off when the unit went missing was warehouse quantity only if the unit was warehouse stock,
+    /// and no unit is.
+    ///
+    /// Stated as a property of the one rule that is left - the shelf is whatever is SHELFED - because
+    /// that is what makes missing, found, missing, found harmless. There is no lap on which it can
+    /// mint anything: the unit is either in the status or it is not.</summary>
     [Theory]
     [InlineData(SerialStatus.Missing)]
     [InlineData(SerialStatus.InTransitSc)]
     [InlineData(SerialStatus.Defective)]
     [InlineData(SerialStatus.UnderRepair)]
-    public void Putting_a_unit_back_on_the_shelf_adds_one(SerialStatus from)
-    {
-        SerialService.WarehouseDeltaFor(from, SerialStatus.ReturnedToSc).Should().Be(1);
-    }
-
-    /// <summary>The half that stops the shelf inventing stock: without it, missing → found → missing
-    /// → found adds a unit of stock on every lap.</summary>
-    [Theory]
-    [InlineData(SerialStatus.Missing)]
+    [InlineData(SerialStatus.Repaired)]
+    [InlineData(SerialStatus.ReturnedToSc)]
     [InlineData(SerialStatus.Scrapped)]
-    [InlineData(SerialStatus.UnderRepair)]
-    [InlineData(SerialStatus.Defective)]
-    [InlineData(SerialStatus.InTransitSc)]
-    public void Taking_a_unit_off_the_shelf_removes_one(SerialStatus to)
+    [InlineData(SerialStatus.Used)]
+    public void Putting_a_unit_back_on_the_shelf_is_the_status_and_nothing_else(SerialStatus from)
     {
-        SerialService.WarehouseDeltaFor(SerialStatus.ReturnedToSc, to).Should().Be(-1);
-    }
-
-    [Fact]
-    public void Missing_and_found_cancel_out_exactly()
-    {
-        var out1 = SerialService.WarehouseDeltaFor(SerialStatus.ReturnedToSc, SerialStatus.Missing);
-        var back = SerialService.WarehouseDeltaFor(SerialStatus.Missing, SerialStatus.ReturnedToSc);
-
-        (out1 + back).Should().Be(0);
-    }
-
-    /// <summary>A repaired unit was already on the shelf as RETURNED_TO_SC, or arrived there through
-    /// a path that credited the count itself. Moving between two shelf statuses must not count it
-    /// again.</summary>
-    [Theory]
-    [InlineData(SerialStatus.ReturnedToSc, SerialStatus.Repaired)]
-    [InlineData(SerialStatus.Repaired, SerialStatus.ReturnedToSc)]
-    [InlineData(SerialStatus.Missing, SerialStatus.Scrapped)]
-    [InlineData(SerialStatus.Collected, SerialStatus.Defective)]
-    [InlineData(SerialStatus.Issued, SerialStatus.Missing)]
-    public void A_change_that_never_touches_the_shelf_moves_nothing(SerialStatus from, SerialStatus to)
-    {
-        SerialService.WarehouseDeltaFor(from, to).Should().Be(0);
+        SerialService.IsOnShelf(from).Should().BeFalse();
+        SerialService.IsOnShelf(SerialStatus.Shelfed).Should().BeTrue();
     }
 
     /// <summary>The only transition that would take a unit off the shelf and credit nobody: a
-    /// technician's usable holding is created by issuing, which a status edit cannot do.</summary>
+    /// technician's usable holding is created by issuing, which a status edit cannot do. This is the
+    /// one guard that survived the move to two pools, and it survived unchanged - the unit would
+    /// leave the shelf and arrive on no balance either way.</summary>
     [Fact]
-    public void Shelf_stock_cannot_be_handed_to_a_technician_by_a_status_change()
+    public void A_shelf_unit_cannot_be_handed_to_a_technician_by_a_status_change()
     {
-        SerialService.ManualChangeBlocked(SerialStatus.ReturnedToSc, SerialStatus.Received, "SN-1")
+        SerialService.ManualChangeBlocked(SerialStatus.Shelfed, SerialStatus.Received, "SN-1")
             .Should().Contain("Issue it to the technician");
     }
 
     [Theory]
     [InlineData(SerialStatus.Missing, SerialStatus.Received)]      // never was on the shelf
-    [InlineData(SerialStatus.ReturnedToSc, SerialStatus.Missing)]
-    [InlineData(SerialStatus.ReturnedToSc, SerialStatus.Repaired)]
+    [InlineData(SerialStatus.Repaired, SerialStatus.Received)]     // nor is a unit on a bench
+    [InlineData(SerialStatus.Shelfed, SerialStatus.Missing)]
+    [InlineData(SerialStatus.Shelfed, SerialStatus.Repaired)]
+    [InlineData(SerialStatus.Shelfed, SerialStatus.Used)]
     public void Every_other_manual_change_is_allowed(SerialStatus from, SerialStatus to)
     {
         SerialService.ManualChangeBlocked(from, to, "SN-1").Should().BeNull();
+    }
+
+    /// <summary>Unused stock coming back from a technician is put away, not queued for a bench. The
+    /// status the receive path writes is the shelf status, so an acknowledged shipment needs no
+    /// second gesture to become issuable - which is what RETURNED_TO_SC used to imply and never
+    /// delivered. A unit the receiver finds faulty lands on no shelf at all.</summary>
+    [Fact]
+    public void Unused_stock_booked_in_lands_on_the_shelf()
+    {
+        SerialService.IsOnShelf(SerialStatus.Shelfed).Should().BeTrue();
+        SerialService.IsOnShelf(SerialStatus.Defective).Should().BeFalse();
+    }
+
+    /// <summary>A shelf movement moves no warehouse quantity, whichever way it goes. Pinned against
+    /// <see cref="PSR.Service.Api.Reports.ReportsEndpoints.WarehouseDelta"/> because that rule is
+    /// what every warehouse figure on every report is read off: if a row made entirely of shelf units
+    /// moved it, the stock ledger would show an inflow or outflow that no balance change backs, and
+    /// would stop reconciling against stock_balances.</summary>
+    [Theory]
+    [InlineData(MovementType.Issue)]
+    [InlineData(MovementType.Replacement)]
+    [InlineData(MovementType.Return)]
+    [InlineData(MovementType.ReplacementReturn)]
+    [InlineData(MovementType.ShelfIn)]
+    public void A_movement_made_entirely_of_shelf_units_moves_no_warehouse_quantity(MovementType type)
+    {
+        PSR.Service.Api.Reports.ReportsEndpoints.WarehouseDelta(type, 3, shelfQty: 3).Should().Be(0);
+    }
+
+    /// <summary>And the mixed case, which is the one a store actually produces: an order for three
+    /// filled with two units off the shelf and the serial off one new box. Only the new box was ever
+    /// warehouse stock, so only it comes off the warehouse.</summary>
+    [Fact]
+    public void A_mixed_issue_takes_only_the_warehouse_part_off_the_warehouse()
+    {
+        PSR.Service.Api.Reports.ReportsEndpoints.WarehouseDelta(MovementType.Issue, 3, shelfQty: 2)
+            .Should().Be(-1);
+    }
+
+    /// <summary>The migration's own movement type, which is the one row shape that takes quantity off
+    /// the warehouse while the shelf stands still: the units were already physically on the shelf and
+    /// only the warehouse's claim on them is being given up. ShelfQty is 0 on those rows precisely so
+    /// this is not cancelled out by the arithmetic above.</summary>
+    [Fact]
+    public void Separating_the_pools_takes_the_quantity_off_the_warehouse()
+    {
+        PSR.Service.Api.Reports.ReportsEndpoints.WarehouseDelta(MovementType.ShelfTransfer, 4)
+            .Should().Be(-4);
     }
 
     /// <summary>Same reason as the other routing tests: minimal-API binding is resolved when the

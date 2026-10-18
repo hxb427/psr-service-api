@@ -274,9 +274,10 @@ public class BulkWorkflowTests
             .Should().Contain("no PS code");
     }
 
-    /// <summary>A serial-tracked item must name its unit, for the same reason a serial-tracked
-    /// component line must: otherwise the count moves and nothing records which physical thing
-    /// moved it.</summary>
+    /// <summary>Every stocked job must name its unit, and the tracked case is the obvious one: the
+    /// shelf is picked from by serial when something is issued, so a unit nothing can name cannot be
+    /// on it. Whitespace counts as nothing, because a store that typed a space has not named
+    /// anything either.</summary>
     [Fact]
     public void Stocking_a_serial_tracked_item_without_a_serial_is_refused()
     {
@@ -284,18 +285,37 @@ public class BulkWorkflowTests
         job.PsCode = "PS-100";
 
         ServicesEndpoints.StockBlockedReason(job, TrackedPart(), "   ")
-            .Should().Contain("serial-tracked");
+            .Should().Contain("no serial number");
     }
 
-    /// <summary>An untracked item has no unit record either way - the quantity is the whole of what
-    /// moved - so a missing serial is not a reason to refuse it.</summary>
+    /// <summary>And an UNTRACKED item is refused too, which is the tightening worth stating.
+    ///
+    /// It used to be allowed, on the reasoning that an untracked part has no unit record either way
+    /// and the quantity was the whole of what moved. That reasoning died with the warehouse credit:
+    /// stocking a job now puts a unit on the shelf and adds nothing to any quantity, so a job with a
+    /// blank serial would shelve nothing, anywhere, and leave the machine on the rack with the system
+    /// unaware of it. The serial-tracked flag governs how a part is ISSUED - whether the store must
+    /// name units handing them out - and it was never a statement about whether a machine the shop
+    /// has just decided to keep is worth identifying.</summary>
     [Fact]
-    public void Stocking_an_untracked_item_without_a_serial_is_allowed()
+    public void Stocking_an_untracked_item_without_a_serial_is_refused_too()
     {
         var job = AssignedJob();
         job.PsCode = "PS-100";
 
         ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), null)
+            .Should().Contain("nothing to put on the shelf");
+    }
+
+    /// <summary>An untracked item that DOES name its unit is stocked like anything else. The flag
+    /// changes nothing here, which is the point of the pair above.</summary>
+    [Fact]
+    public void Stocking_an_untracked_item_that_names_its_unit_is_allowed()
+    {
+        var job = AssignedJob();
+        job.PsCode = "PS-100";
+
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), "SN-500")
             .Should().BeNull();
     }
 

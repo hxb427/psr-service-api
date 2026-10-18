@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -332,15 +332,22 @@ public static partial class ServicesEndpoints
     /// stock_input row sourced "Service Return" BEFORE marking DISPATCH = 'STOCKED'. The rewrite kept
     /// the status change and dropped the lines that made it mean anything.
     ///
-    /// So every stocked job now credits the warehouse by one and puts the unit into the service
-    /// centre's custody as re-issuable stock. The field-return case is no longer a special path -
-    /// it is the general path, with the unit's record already in hand.
+    /// So every stocked job now records the unit, in the service centre's custody, as stock that can
+    /// be issued again. The field-return case is no longer a special path - it is the general path,
+    /// with the unit's record already in hand.
     ///
-    /// Two consequences worth knowing before touching this. Stocking can now FAIL: the unit has to
+    /// WHAT THE LEGACY APP DID WITH THE COUNT IS NOT COPIED, and that is deliberate. Incrementing
+    /// Total_stock put a serviced machine into the purchased stock of its PS code, where it was
+    /// reordered against, sold across the counter and quoted as new. A unit kept off a job goes on
+    /// the SHELF instead: the service centre's pool of units in hand, for a replacement or for a
+    /// field technician. The shelf is counted by unit rather than by quantity, so nothing in
+    /// stock_balances moves here at all - see <see cref="SerialService.IsOnShelf"/>.
+    ///
+    /// Two consequences worth knowing before touching this. Stocking can FAIL: the unit has to
     /// resolve to a catalogue item, and a job whose PS code matches nothing is refused by name rather
-    /// than silently stocked. And a serial-tracked item must name its unit, for the same reason a
-    /// serial-tracked component line must - otherwise the count moves and nothing records which
-    /// physical thing moved it.</summary>
+    /// than silently stocked. And EVERY stocked job must name its unit, not just a serial-tracked
+    /// one - the shelf holds units, and a machine nothing can name cannot be on it. See
+    /// <see cref="StockBlockedReason"/>.</summary>
     internal static async Task<ApplyResult> ApplyStockAsync(ServiceJob job, string? note,
         long uid, AppDbContext db, StockLedgerService ledger, SerialService serial,
         IAuditService audit, string? ip, CancellationToken ct)
@@ -370,18 +377,40 @@ public static partial class ServicesEndpoints
 
         WriteTransition(db, job, ServiceStatus.Stocked, uid, note);
 
-        var label = string.IsNullOrWhiteSpace(unitSerial) ? job.ServiceNo : $"unit {unitSerial}";
-        await ledger.ReceiptAsync(part.Id, 1, uid,
-            $"Kept from service - {label} stocked from job {job.ServiceNo}", null, "SERVICE_RETURN", ct);
-
-        // Ownership. A unit already tracked is flipped in place (this is what clears its open repair
-        // job); one the shop has never seen gets its record here. An untracked part has no unit record
-        // either way - the quantity is the whole of what moved.
+        // The unit goes on the SHELF, and the warehouse count for the job's PS code does not move.
+        //
+        // That is the whole of this change and it is worth being plain about why, because the line
+        // this replaced was a ledger.ReceiptAsync for one unit. Crediting the warehouse made a
+        // serviced machine indistinguishable from one off a supplier's invoice: both became the same
+        // number against the same PS code, and that number was then reordered against, sold across
+        // the counter and quoted to customers as new stock. The shop keeps serviced units for a
+        // narrower purpose - a replacement for the next customer with the same fault, or stock for a
+        // field technician - and the shelf is that pool.
+        //
+        // So nothing is incremented here. The shelf is counted by unit, as whichever component_serials
+        // rows are SHELFED in the service centre's custody, which means the unit arriving IS the
+        // count going up and there is no second number to keep in step. ShelveUnit writes the ledger
+        // row that records it; the row moves no balance.
+        //
+        // A unit already tracked is flipped in place (this is what clears its open repair job); one
+        // the shop has never seen gets its record here. Either way it lands on SHELFED, which is what
+        // "Keep in stock" means: put away, in hand, ready to issue.
+        //
+        // The record is written for ANY job that names a unit, not only for a part flagged
+        // serial-tracked. The flag is a statement about how a part is ISSUED - whether the store must
+        // name units when handing them out - and reading it as permission to remember what came off a
+        // bench is what left the shelf reading as empty while jobs were stocked every day. A machine
+        // with a serial written on it that the shop has just kept is a unit on the shelf whatever the
+        // catalogue says about its code, and the serial is the only thing that tells the next person
+        // which of four identical boxes to pick up.
         if (tracked is not null)
-            await serial.MarkRepairedAsync(tracked.Id, uid, $"Repaired and stocked on job {job.ServiceNo}", ct);
-        else if (part.IsSerialTracked)
-            await serial.AcquireToServiceCentreAsync(part.Id, unitSerial, part.Name, SerialStatus.Repaired,
-                uid, $"Kept from service and stocked on job {job.ServiceNo}", ct);
+            await serial.ShelveAsync(tracked.Id, uid, $"Kept from service and shelved on job {job.ServiceNo}", ct);
+        else
+            await serial.AcquireToServiceCentreAsync(part.Id, unitSerial, part.Name, SerialStatus.Shelfed,
+                uid, $"Kept from service and shelved on job {job.ServiceNo}", ct);
+
+        ledger.ShelveUnit(part.Id, uid, "SERVICE", job.Id, unitSerial,
+            $"Kept from service - unit {unitSerial} shelved from job {job.ServiceNo}");
 
         audit.Log(uid, "service.stock", "service", job.Id, details: part.ItemCode, ip: ip);
         return ApplyResult.Applied;
@@ -391,9 +420,17 @@ public static partial class ServicesEndpoints
     /// so the refusals can be pinned down without a database — the reasons are the new part of this
     /// behaviour, and they are what the desk will actually meet.
     ///
-    /// Both refusals are about the same thing: a count that moves has to say WHAT moved it. An
-    /// unresolvable PS code means there is no shelf to add to, and a serial-tracked item with no
-    /// serial on the job means a unit arrived on the rack that nothing can identify afterwards.</summary>
+    /// Both refusals are about the same thing: what lands on the shelf has to be identifiable. An
+    /// unresolvable PS code means there is no catalogue item to file the unit under, and a job with
+    /// no serial means a machine arrived on the rack that nothing afterwards can name.
+    ///
+    /// THE SERIAL IS NOW REQUIRED OF EVERY JOB, not only of a serial-tracked item, and that is a
+    /// tightening. It follows from where the unit goes: the shelf is a register of units, counted by
+    /// unit and picked from by serial when something is issued. Before this, a job with a blank
+    /// serial added one to the warehouse quantity and recorded no unit at all, which was at least a
+    /// number. Now there is no quantity to fall back on - a blank serial would shelve nothing,
+    /// anywhere, and the machine would be on the rack with the system unaware of it. Refusing by name
+    /// and asking for the serial is the only honest answer, and the serial is on the machine.</summary>
     internal static string? StockBlockedReason(ServiceJob job, Part? part, string? unitSerial)
     {
         if (part is null)
@@ -403,9 +440,10 @@ public static partial class ServicesEndpoints
                 : $"No catalogue item matches PS code {job.PsCode.Trim()}, so {job.ServiceNo} cannot be "
                   + "added to stock. Correct the PS code, or add the item to the catalogue first.";
 
-        if (part.IsSerialTracked && string.IsNullOrWhiteSpace(unitSerial))
-            return $"{part.ItemCode} - {part.Name} is serial-tracked, but {job.ServiceNo} carries no "
-                 + "serial number. Record it on the job before adding the unit to stock.";
+        if (string.IsNullOrWhiteSpace(unitSerial))
+            return $"{job.ServiceNo} carries no serial number, so there is nothing to put on the shelf "
+                 + $"- a shelved unit is picked by its serial when it is issued. Record the serial on "
+                 + $"the job before adding {part.ItemCode} to stock.";
 
         return null;
     }
@@ -646,13 +684,7 @@ public static partial class ServicesEndpoints
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            // Consume the technician's issued stock for each part-bearing line.
-            foreach (var line in job.Lines.Where(l => l.PartId.HasValue
-                && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
-                await ledger.ConsumeAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
-
-            // Move any serial-tracked parts fitted/handed to the customer into the serial ledger.
-            await InstallJobSerialsAsync(db, serial, job, uid, ct);
+            await ApplyCompletionEffectsAsync(db, ledger, serial, job, techId, uid, ct);
 
             if (req?.TechnicianRemarks is { } remarks) job.TechnicianRemarks = remarks.Trim();
             // A total-loss job routes to replacement-approval instead of plain pending-dispatch.
@@ -667,18 +699,117 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
+    /// <summary>What finishing the WORK on a job does to stock, independent of where the job lands
+    /// afterwards. Two routes reach it: the ordinary completion, and a technician issuing a
+    /// replacement straight off an in-service total loss — which finishes the job in the same breath
+    /// and so owes the same two movements.
+    ///
+    /// It is shared rather than duplicated because leaving it out of the second route is not a visible
+    /// bug: the job would reach Completed looking perfectly normal while the parts the technician had
+    /// already booked stayed on their balance for ever, re-offered on the next job and counted as
+    /// stock the shop could issue.</summary>
+    private static async Task ApplyCompletionEffectsAsync(AppDbContext db, StockLedgerService ledger,
+        SerialService serial, ServiceJob job, long techId, long uid, CancellationToken ct)
+    {
+        // Consume the technician's issued stock for each part-bearing line.
+        foreach (var line in job.Lines.Where(l => l.PartId.HasValue
+            && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
+            await ledger.ConsumeAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
+
+        // Move any serial-tracked parts fitted/handed to the customer into the serial ledger.
+        await InstallJobSerialsAsync(db, serial, job, uid, ct);
+    }
+
     // ---------------------------------------------------------------- replace whole unit (decrements warehouse)
 
-    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>>> ReplaceAsync(
+    /// <summary>Which of the two doors into a replacement this caller is coming through.</summary>
+    internal enum ReplaceRoute
+    {
+        /// <summary>The job is parked on ReplacementApprovalPending and a dispatch role is deciding
+        /// what goes back. The original route, unchanged.</summary>
+        Approval,
+
+        /// <summary>The assigned technician is issuing it off their own in-service total loss. Also
+        /// finishes the work on the job, because nothing else will.</summary>
+        Bench,
+    }
+
+    /// <summary>Who may issue a replacement, and from where. Pure, because it is the rule that
+    /// changed and a rule worth being able to pin down without a database.
+    ///
+    /// THE BENCH ROUTE IS THE NEW ONE. The technician who has just condemned a unit is the person who
+    /// knows it is condemned, and making them wait for a second pair of hands to hand over the
+    /// replacement is what the shop asked to stop doing — so the assigned technician may issue one
+    /// from the In-service tab the moment the job is marked total loss.
+    ///
+    /// Three things keep that from being a widening of anything but the one thing intended:
+    ///
+    /// <list type="bullet">
+    /// <item>It needs the TOTAL-LOSS MARK, not merely an in-service job. Without it there is nothing
+    /// to replace, and a technician could otherwise hand a unit off the shelf to any customer whose
+    /// job they happened to hold.</item>
+    /// <item>It needs the job to be THEIRS. Same rule as every other bench action — acknowledge,
+    /// start, add lines, complete, mark total loss — and for the same reason.</item>
+    /// <item>It still lands on Completed and still cannot dispatch. The customer receives the unit
+    /// through the dispatch door with the billing that raises, so what this widens is who may take a
+    /// unit off the shelf and nothing else.</item>
+    /// </list>
+    ///
+    /// A supervisory role may use either door: they could already replace from the approval route, and
+    /// refusing them the bench one would make the technician the only person who could finish a job
+    /// they had walked away from.</summary>
+    internal static (ReplaceRoute? Route, string? Error, bool Forbidden) ResolveReplaceRoute(
+        ServiceJob job, bool canManage, bool isAssignedTechnician)
+    {
+        if (job.ServiceStatus is ServiceStatus.ReplacementApprovalPending)
+            return canManage
+                ? (ReplaceRoute.Approval, null, false)
+                : (null, null, true);
+
+        if (job.ServiceStatus is ServiceStatus.InService)
+        {
+            if (!job.IsTotalLoss)
+                return (null, $"{job.ServiceNo} is not marked total loss, so there is nothing to replace. "
+                    + "Mark the unit a total loss first, or complete the job the ordinary way.", false);
+            return canManage || isAssignedTechnician
+                ? (ReplaceRoute.Bench, null, false)
+                : (null, null, true);
+        }
+
+        return (null, "A replacement can only be issued for a total-loss job awaiting replacement "
+            + $"(currently {job.ServiceStatus}).", false);
+    }
+
+    /// <summary>Whether the replacement unit needs a <c>component_serials</c> row moved to the
+    /// customer — which, for a unit off the shelf, is the whole of how it LEAVES the shelf.
+    ///
+    /// The serial-tracked half is the obvious one: the shop follows that part unit by unit, so the
+    /// unit it just handed over has to say where it went.
+    ///
+    /// The shelf half is the one that was missing. The shelf is not a quantity anywhere — it is
+    /// exactly those rows whose status is SHELFED in the service centre's custody — and a stocked job
+    /// shelves the unit it names whether or not its part is flagged serial-tracked. So the shelf
+    /// genuinely holds units of untracked parts, and on those the tracked test alone debited nothing
+    /// (a shelf issue moves no quantity, by design) and left the row on SHELFED: the same unit could
+    /// be handed out again, and again, with a replacement in the ledger each time and a shelf that
+    /// never went down.</summary>
+    internal static bool ReplacementUnitLeavesSerialTrail(bool isSerialTracked, bool fromShelf)
+        => isSerialTracked || fromShelf;
+
+    private static async Task<Results<Ok<ServiceDetailDto>, NotFound, BadRequest<string>, ForbidHttpResult>> ReplaceAsync(
         long id, [FromBody] ReplaceRequest req, ClaimsPrincipal user, AppDbContext db,
         StockLedgerService ledger, SerialService serial, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.ReplacementSerialNo))
             return TypedResults.BadRequest("Replacement serial number is required.");
-        var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
+        var job = await db.Services.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
-        if (job.ServiceStatus is not ServiceStatus.ReplacementApprovalPending)
-            return TypedResults.BadRequest($"A replacement can only be issued for a total-loss job awaiting replacement (currently {job.ServiceStatus}).");
+
+        var route = ResolveReplaceRoute(job, ServiceRoles.CanManage(user),
+            ServiceRoles.IsAssignedTechnician(user, job));
+        if (route.Forbidden) return TypedResults.Forbid();
+        if (route.Error is { } routeError) return TypedResults.BadRequest(routeError);
+        var fromBench = route.Route is ReplaceRoute.Bench;
 
         // Always one. A total loss is one unit written off and one unit handed back in its place, so
         // there is no quantity to ask for. ReplaceRequest.Qty is still accepted so a desktop build
@@ -715,31 +846,80 @@ public static partial class ServicesEndpoints
                 + "replacement part on the form.");
         }
 
+        // Is the named unit free to go out at all? An unknown serial passes — that is warehouse stock
+        // being named as it leaves, and is the ordinary case — and so does one sitting on the shelf.
+        // What this stops is a serial the shop already knows is somewhere else: a unit installed at
+        // another customer, or one in a technician's hands. Without it the unit's record was simply
+        // re-pointed at this job's customer, so the system stopped knowing where the first one went
+        // while the warehouse was debited for a unit nobody took off a rack.
+        //
+        // Run for every part, not only a serial-tracked one, because the shelf holds units of
+        // untracked parts too (ApplyStockAsync shelves whatever a stocked job names). It is a no-op
+        // for a part with no unit records.
+        var conflicts = await serial.FindIssueConflictsAsync(part.Id, [req.ReplacementSerialNo], ct);
+        if (conflicts.TryGetValue(req.ReplacementSerialNo.Trim(), out var conflict))
+            return TypedResults.BadRequest(
+                $"Replacement unit {req.ReplacementSerialNo.Trim()} cannot be issued: {conflict}");
+
+        // Which pool the unit comes out of. A unit the shop kept off a finished job carries no
+        // warehouse quantity, so a replacement filled from the shelf has nothing to check and nothing
+        // to debit there. Only a single unit can be named, so the shelf can only ever cover qty 1.
+        var fromShelf = qty == 1
+            && await serial.IsOnShelfAsync(part.Id, req.ReplacementSerialNo, ct);
+
         // Checked before anything is written so an empty shelf is reported as an empty shelf, naming
         // the item and what it actually holds. The ledger guards this again inside the transaction,
         // which is what stops two people issuing the last unit at once; this one exists so the usual
         // case reads as a stock problem instead of a failed transaction.
-        var onHand = await db.StockBalances.AsNoTracking()
+        var onHand = fromShelf ? qty : await db.StockBalances.AsNoTracking()
             .Where(b => b.PartId == part.Id && b.TechnicianId == StockBalance.Warehouse)
             .Select(b => (int?)b.OnHand).FirstOrDefaultAsync(ct) ?? 0;
         if (onHand < qty)
             return TypedResults.BadRequest(
-                $"{part.ItemCode} — {part.Name} has {onHand} in warehouse stock, so this replacement "
-                + "cannot be issued. Restock it, or pick a different replacement part.");
+                $"{part.ItemCode} — {part.Name} has {onHand} in warehouse stock, and the serial "
+                + $"named is not on the shelf, so this replacement cannot be issued. Restock the item, name "
+                + "a unit that is on the shelf, or pick a different replacement part.");
 
         user.TryGetUserId(out var uid);
+        var outgoingSn = req.ReplacementSerialNo.Trim();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            // The replacement leaves the warehouse. Resolved above, so this always runs.
+            // The bench route is finishing the job as well as filling it, so the work's own stock
+            // movements happen here rather than in CompleteAsync, which this route never reaches.
+            // The approval route has already run them.
+            if (fromBench)
+            {
+                if (job.TechnicianId is not { } benchTechId)
+                {
+                    await tx.RollbackAsync(ct);
+                    return TypedResults.BadRequest("Assign a technician before issuing a replacement.");
+                }
+                await ApplyCompletionEffectsAsync(db, ledger, serial, job, benchTechId, uid, ct);
+            }
+
+            // TAKE THE UNIT FIRST, before anything is written against it. `fromShelf` above was read
+            // before this transaction opened, so it says what the form was offered rather than what is
+            // still there; the claim is the guarded write that settles it, and it is what stops two
+            // people handing over the same shelf unit. Deliberately ahead of the ledger movement so a
+            // lost race writes nothing at all rather than relying on the rollback to take it back.
+            var tookFromShelf = await serial.ClaimFromShelfAsync(part.Id, outgoingSn, ct);
+            if (SerialService.ShelfClaimLostReason(fromShelf, tookFromShelf, outgoingSn) is { } lost)
+                throw new StockException(lost);
+
+            // The replacement leaves the shop - off the shelf when the named unit is one of the kept
+            // ones, out of warehouse stock otherwise. The claim is the authority from here down.
             await ledger.ReplacementOutAsync(part.Id, qty, uid, job.Id,
-                req.ReplacementSerialNo.Trim(), $"Replacement for service {job.ServiceNo}", ct);
-            // A serial-tracked replacement unit is now deployed to the customer.
-            if (part.IsSerialTracked)
-                await serial.InstallToCustomerAsync(part.Id, req.ReplacementSerialNo.Trim(), part.Name,
+                outgoingSn, $"Replacement for service {job.ServiceNo}", ct, tookFromShelf);
+
+            // The unit is now the customer's, which for a shelf unit is also WHAT TAKES IT OFF THE
+            // SHELF — see ReplacementUnitLeavesSerialTrail for why the shelf half of that test is not
+            // belt-and-braces.
+            if (ReplacementUnitLeavesSerialTrail(part.IsSerialTracked, tookFromShelf))
+                await serial.InstallToCustomerAsync(part.Id, outgoingSn, part.Name,
                     await PartyLabelAsync(db, job, ct), uid, ct, job.CustomerId);
 
-            job.ReplacementSerialNo = req.ReplacementSerialNo.Trim();
+            job.ReplacementSerialNo = outgoingSn;
             job.ReplacementPartId = part.Id;
 
             // The bill for the unit the customer is leaving with. A total-loss job carries no lines of
@@ -750,6 +930,31 @@ public static partial class ServicesEndpoints
             // bill the same handover differently.
             if (ReplacementBillingLine(job, part, job.ReplacementSerialNo) is { } bill)
                 db.ServiceLines.Add(bill);
+
+            // The trail, and it was missing. service_replacements is what answers "this unit has come
+            // back — was it one of ours, and against what?", and the entity says in its own summary
+            // that it is written for both kinds; the migration even backfills a row for every job that
+            // already carried a ReplacementSerialNo. Only the swap route ever wrote one, so every
+            // total-loss replacement issued since has been invisible to that lookup — the backfill
+            // covered the history and then the live path stopped feeding it.
+            //
+            // No retained job and no incoming unit: a total loss is written off, not kept. Nor a
+            // StatusBeforeSwap, which exists only so a swap can be undone, and this route has no undo.
+            db.ServiceReplacements.Add(new ServiceReplacement
+            {
+                OriginalServiceJobId = job.Id,
+                Kind = ReplacementKind.TotalLoss,
+                OutgoingPartId = part.Id,
+                OutgoingSerialNo = outgoingSn,
+                OutgoingFromShelf = tookFromShelf,
+                OutgoingComponentSerialId = await db.ComponentSerials.AsNoTracking()
+                    .Where(c => c.PartId == part.Id && c.SerialNumber == outgoingSn)
+                    .Select(c => (long?)c.Id).FirstOrDefaultAsync(ct),
+                CustomerId = job.CustomerId,
+                DealerId = job.DealerId,
+                Reason = req.Note?.Trim(),
+                ApprovedByUserId = uid,
+            });
 
             // Completed, NOT the terminal Replaced. Issuing the replacement finishes the WORK on the
             // job; it does not hand anything to the customer. The unit still has to be billed if it is
@@ -765,9 +970,12 @@ public static partial class ServicesEndpoints
             //
             // Replaced stays in the enum: rows closed under the old behaviour still carry it, and the
             // closed-section and report queries still have to find them.
-            WriteTransition(db, job, ServiceStatus.Completed, uid,
-                req.Note ?? $"Unit replaced (SN {job.ReplacementSerialNo}) — ready for dispatch");
-            audit.Log(uid, "service.replace", "service", job.Id, details: job.ReplacementSerialNo, ip: http.GetIp());
+            WriteTransition(db, job, ServiceStatus.Completed, uid, req.Note
+                ?? $"Unit replaced (SN {outgoingSn}, {(tookFromShelf ? "off the shelf" : "warehouse stock")})"
+                   + $"{(fromBench ? " by the technician on a total loss" : "")} — ready for dispatch");
+            audit.Log(uid, "service.replace", "service", job.Id,
+                details: $"{outgoingSn}{(tookFromShelf ? " (shelf)" : "")}{(fromBench ? " (bench)" : "")}",
+                ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }

@@ -38,35 +38,40 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>Follow a manual serial status change with the warehouse movement it implies.
+    /// <summary>Put a unit on the SHELF: a machine kept off a finished job, or unused stock booked
+    /// back from a technician.
     ///
-    /// Written as an Adjustment because that is exactly what it is - a correction to the shelf count
-    /// made by a person, carrying its own signed quantity - and because the stock report already
-    /// reads Adjustment as a warehouse movement. The reference points at the unit, so the row says
-    /// which serial moved the count and the remark says which way it went.</summary>
-    public async Task SerialStatusCorrectionAsync(long partId, int delta, long byUser, long serialId,
-        string remarks, CancellationToken ct)
-    {
-        if (delta == 0) return;
-        if (delta > 0)
-            await IncrementAsync(partId, StockBalance.Warehouse, delta, ct);
-        else if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, -delta, ct))
-            throw new StockException(
-                "The warehouse count for this part is already lower than the units on the shelf say it "
-                + "should be, so this change would take it negative. Correct the count with a stock "
-                + "adjustment first.");
-
+    /// Moves no quantity balance, and that is the whole point of it. The shelf is counted by unit -
+    /// whichever <c>component_serials</c> rows are SHELFED in the service centre's custody - so the
+    /// unit arriving IS the count going up, and there is nothing here to credit. What this writes is
+    /// the ledger's record that it happened, so the shelf has a readable history (in off jobs, out on
+    /// issues) rather than only a status trail.
+    ///
+    /// It deliberately does NOT credit the warehouse, which is the behaviour this replaced. Stocking
+    /// a finished job used to add one to the purchased stock of the job's PS code, so a serviced
+    /// machine and a new one off an invoice became the same number - and that number was then sold,
+    /// issued and reordered against as though every unit in it were new.</summary>
+    public void ShelveUnit(long partId, long byUser, string referenceType, long? referenceId,
+        string? serialNo, string? remarks) =>
         db.StockMovements.Add(new StockMovement
         {
-            PartId = partId, MovementType = MovementType.Adjustment, Quantity = delta,
-            PerformedByUserId = byUser, ReferenceType = "SERIAL_STATUS", ReferenceId = serialId,
-            Remarks = remarks,
+            PartId = partId, MovementType = MovementType.ShelfIn, Quantity = 1, ShelfQty = 1,
+            PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+            SerialNo = serialNo, Remarks = remarks,
         });
-    }
 
     /// <summary>Dispatch stock to a technician.
     ///
-    /// The warehouse is always debited here - the goods have left the shelf, whatever happens next.
+    /// <paramref name="shelfQty"/> is how many of the units came off the SHELF, which is decided by
+    /// the units picked rather than by the form - see
+    /// <see cref="SerialService.ClaimIssueSourcesAsync"/>. Only the rest is debited from the
+    /// warehouse, because only the rest was ever in it. A shelf unit has no quantity to debit: it
+    /// leaves the shelf by its status changing, which
+    /// <see cref="SerialService.CaptureOnIssueAsync"/> does in the same transaction. One movement
+    /// either way, so an acknowledgement, the in-transit figure and the technician's credit all work
+    /// identically; <see cref="StockMovement.ShelfQty"/> is what keeps the shelf part out of the
+    /// warehouse-shaped reports, which it genuinely did not touch.
+    ///
     /// Whether the TECHNICIAN is credited here depends on how the stock travels, and that is the
     /// distinction <paramref name="creditTechnician"/> carries:
     ///
@@ -81,16 +86,18 @@ public class StockLedgerService(AppDbContext db)
     /// Returns the movement entity so callers can link serial rows to it (id is assigned once the
     /// caller saves changes).</summary>
     public async Task<StockMovement> IssueAsync(long partId, long technicianId, int qty, long byUser,
-        string referenceType, long referenceId, CancellationToken ct, bool creditTechnician = true)
+        string referenceType, long referenceId, CancellationToken ct, bool creditTechnician = true,
+        int shelfQty = 0)
     {
-        if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
+        var fromWarehouse = qty - Math.Clamp(shelfQty, 0, qty);
+        if (fromWarehouse > 0 && !await GuardedDecrementAsync(partId, StockBalance.Warehouse, fromWarehouse, ct))
             throw new StockException("Insufficient warehouse stock to issue.");
         if (creditTechnician) await IncrementAsync(partId, technicianId, qty, ct);
         var movement = new StockMovement
         {
             PartId = partId, MovementType = MovementType.Issue, Quantity = qty, TechnicianId = technicianId,
             PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
-            CreditedOnIssue = creditTechnician,
+            CreditedOnIssue = creditTechnician, ShelfQty = qty - fromWarehouse,
         };
         db.StockMovements.Add(movement);
         return movement;
@@ -171,19 +178,34 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>The shipment arrived and was acknowledged: the units go back on the warehouse shelf.
+    /// <summary>The shipment arrived and was acknowledged: the units are back at the service centre.
+    ///
+    /// <paramref name="toShelf"/> says where they landed, and it follows what the receiving code did
+    /// to the unit. A serial-tracked unit booked back goes to SHELFED, which IS the shelf, so there
+    /// is no quantity to credit: crediting the warehouse as well would count the unit twice, once as
+    /// a named unit on the shelf and once as an anonymous quantity in the warehouse. A quantity-only
+    /// return has no unit to put on the shelf, so it goes back to the warehouse it came out of.
+    ///
+    /// The asymmetry with the issue that sent the stock out is deliberate and worth stating: stock
+    /// issued off the warehouse and sent back unused comes home to the SHELF, not to the warehouse.
+    /// It is a named unit in hand from then on, and the warehouse figure means stock bought in and
+    /// not yet taken out.
+    ///
     /// <paramref name="debitTechnician"/> covers shipments raised before dispatch and receipt were
     /// split out — those never had their quantity taken off the technician, so this still has to.</summary>
     public async Task ReturnToStockAsync(long partId, long technicianId, int qty, long byUser,
-        string referenceType, long referenceId, CancellationToken ct, bool debitTechnician = false)
+        string referenceType, long referenceId, CancellationToken ct, bool debitTechnician = false,
+        int shelfQty = 0)
     {
         if (debitTechnician && !await GuardedDecrementAsync(partId, technicianId, qty, ct))
             throw new StockException("Technician does not hold enough of this part to return.");
-        await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
+        var toWarehouse = qty - Math.Clamp(shelfQty, 0, qty);
+        if (toWarehouse > 0) await IncrementAsync(partId, StockBalance.Warehouse, toWarehouse, ct);
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.Return, Quantity = qty, TechnicianId = technicianId,
             PerformedByUserId = byUser, ReferenceType = referenceType, ReferenceId = referenceId,
+            ShelfQty = qty - toWarehouse,
         });
     }
 
@@ -332,17 +354,24 @@ public class StockLedgerService(AppDbContext db)
         });
     }
 
-    /// <summary>Ship a whole replacement unit out of the warehouse (service resolved by full replacement).
-    /// Records the replacement unit's serial on the movement.</summary>
-    public async Task ReplacementOutAsync(long partId, int qty, long byUser, long serviceId, string? serialNo, string? remarks, CancellationToken ct)
+    /// <summary>Ship a whole replacement unit out to a customer (service resolved by full replacement).
+    /// Records the replacement unit's serial on the movement.
+    ///
+    /// <paramref name="fromShelf"/> when the unit handed over is one of the shelf's - a machine the
+    /// shop kept off a finished job. Those have no warehouse quantity behind them, so there is
+    /// nothing to debit; the unit leaves the shelf by its status changing to USED. It is recorded on
+    /// the replacement row as well, because cancelling has to put the unit back in the pool it came
+    /// out of.</summary>
+    public async Task ReplacementOutAsync(long partId, int qty, long byUser, long serviceId,
+        string? serialNo, string? remarks, CancellationToken ct, bool fromShelf = false)
     {
-        if (!await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
+        if (!fromShelf && !await GuardedDecrementAsync(partId, StockBalance.Warehouse, qty, ct))
             throw new StockException("Insufficient warehouse stock for the replacement unit.");
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.Replacement, Quantity = qty,
             PerformedByUserId = byUser, ReferenceType = "SERVICE", ReferenceId = serviceId,
-            SerialNo = serialNo, Remarks = remarks,
+            SerialNo = serialNo, Remarks = remarks, ShelfQty = fromShelf ? qty : 0,
         });
     }
 
@@ -350,16 +379,22 @@ public class StockLedgerService(AppDbContext db)
     /// before the job was dispatched, so the unit never left the building. The exact reversal of
     /// <see cref="ReplacementOutAsync"/>, and deliberately not a Receipt — a receipt means goods
     /// arrived from a supplier, and somebody reading the shelf's history a year later should not have
-    /// to guess which of those two this row was.</summary>
+    /// to guess which of those two this row was.
+    ///
+    /// <paramref name="toShelf"/> mirrors the <c>fromShelf</c> the unit went out on, read back off
+    /// <c>ServiceReplacement.OutgoingFromShelf</c>. A unit that came off the shelf goes back to the
+    /// shelf and credits no quantity; one that came out of warehouse stock is credited back to the
+    /// warehouse. Reading the unit's status instead would get this wrong every time, because a
+    /// cancelled unit lands on SHELFED whichever pool it came from.</summary>
     public async Task ReplacementReturnAsync(long partId, int qty, long byUser, long serviceId,
-        string? serialNo, string? remarks, CancellationToken ct)
+        string? serialNo, string? remarks, CancellationToken ct, bool toShelf = false)
     {
-        await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
+        if (!toShelf) await IncrementAsync(partId, StockBalance.Warehouse, qty, ct);
         db.StockMovements.Add(new StockMovement
         {
             PartId = partId, MovementType = MovementType.ReplacementReturn, Quantity = qty,
             PerformedByUserId = byUser, ReferenceType = "SERVICE", ReferenceId = serviceId,
-            SerialNo = serialNo, Remarks = remarks,
+            SerialNo = serialNo, Remarks = remarks, ShelfQty = toShelf ? qty : 0,
         });
     }
 

@@ -95,14 +95,32 @@ internal static class ConsumptionRules
     /// negative.
     ///
     /// IssueReceipt, ReturnDispatched, DefectiveOnArrival and the three Transfer types never touch the
-    /// warehouse: they move stock between technicians, or between a technician and a courier.</summary>
-    internal static ConsumptionEffect? Effect(MovementType type, int qty)
+    /// warehouse: they move stock between technicians, or between a technician and a courier. ShelfIn
+    /// is shelf-side, and so is any part of a row covered by <paramref name="shelfQty"/>.
+    ///
+    /// ShelfTransfer is the one deliberate hole in "this report equals the ledger's Outward column".
+    /// It takes quantity off the warehouse without anything leaving the building: units already
+    /// sitting on the shelf stopped being counted as warehouse stock when the two pools were
+    /// separated. Nobody received them and nothing was used, so counting it would put a one-off spike
+    /// of phantom consumption in the month the change was deployed and leave it on the report for
+    /// ever. ConsumptionRuleTests names this exemption so it stays a decision rather than a gap.
+    ///
+    /// <paramref name="shelfQty"/> is how much of the row came off the SHELF rather than the
+    /// warehouse, and it is subtracted before anything else happens. A machine the shop kept off a
+    /// finished job was never counted as warehouse stock, so issuing it to a technician or handing it
+    /// over as a replacement takes nothing off the warehouse and belongs nowhere on this report. An
+    /// issue made up of two shelf units and one new one consumes one. That keeps this report equal to
+    /// the stock ledger's Outward column, which is the property the whole thing is defined by - and
+    /// it does mean the Technicians figure here reads lower than what technicians actually received,
+    /// which is StockAnalysis's question rather than this one.</summary>
+    internal static ConsumptionEffect? Effect(MovementType type, int qty, int shelfQty = 0)
     {
+        var warehouseQty = qty - Math.Clamp(shelfQty, 0, Math.Max(qty, 0));
         ConsumptionEffect? effect = type switch
         {
-            MovementType.Issue => new ConsumptionEffect(ConsumptionStream.Technicians, IssuedToTechnician, qty),
-            MovementType.Sale => new ConsumptionEffect(ConsumptionStream.Sales, CounterSale, qty),
-            MovementType.Replacement => new ConsumptionEffect(ConsumptionStream.Service, UnitReplacement, qty),
+            MovementType.Issue => new ConsumptionEffect(ConsumptionStream.Technicians, IssuedToTechnician, warehouseQty),
+            MovementType.Sale => new ConsumptionEffect(ConsumptionStream.Sales, CounterSale, warehouseQty),
+            MovementType.Replacement => new ConsumptionEffect(ConsumptionStream.Service, UnitReplacement, warehouseQty),
 
             // The one movement type stored already signed, and the only one whose quantity is not a
             // magnitude. A stock-take that found three FEWER wrote -3 and took three off the shelf, so
@@ -134,11 +152,18 @@ internal static class ConsumptionRules
     /// Two statements of one fact, which is a drift waiting to happen: a type added to
     /// <see cref="Effect"/> and not here would simply never appear on the report, and nothing would
     /// fail. ConsumptionRuleTests walks every <see cref="MovementType"/> and asserts the two agree,
-    /// so the drift is a red test rather than a column that quietly reads low.</summary>
+    /// so the drift is a red test rather than a column that quietly reads low.
+    ///
+    /// The <c>Quantity > ShelfQty</c> clause is this predicate's one piece of arithmetic, and it is
+    /// here rather than left to <see cref="Effect"/> because a row made up entirely of shelf units is
+    /// common once the shelf is in use - every issue filled off it - and fetching a year of them to
+    /// discard would undo the point of having a predicate at all. A mixed row still comes back, and
+    /// Effect takes the shelf part off it.</summary>
     internal static readonly Expression<Func<StockMovement, bool>> IsConsuming = m =>
-        m.MovementType == MovementType.Issue
-        || m.MovementType == MovementType.Sale
-        || m.MovementType == MovementType.Replacement
+        ((m.MovementType == MovementType.Issue
+          || m.MovementType == MovementType.Sale
+          || m.MovementType == MovementType.Replacement)
+         && m.Quantity > m.ShelfQty)
         || m.MovementType == MovementType.Adjustment;
 
     /// <summary>The stream the caller asked for, or null for all of them combined.</summary>

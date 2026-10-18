@@ -10,6 +10,14 @@ There are two ledgers and they are supposed to say the same thing in different w
 
 Almost every defect below is one of those two moving without the other.
 
+**Updated 2026-10-17.** The shelf is now a pool of its own, counted by unit rather than as part of
+the warehouse quantity - see the shelf section of
+[advance-replacement-and-stocking.md](advance-replacement-and-stocking.md). That closes gap 6 below
+by construction rather than by arithmetic: a unit joins the shelf by reaching `SHELFED` and leaves it
+by leaving `SHELFED`, so there is no second number for the status to disagree with. The entry is kept
+because the failure it describes is the one this whole document is about, and because the +1/-1 rule
+it records is gone and nobody should go looking for it.
+
 Companion reading: [serial-custody-and-field-returns.md](serial-custody-and-field-returns.md) for the
 design, and `field-portal-android/docs/HSRTECH_PARITY_AND_SERVICE_CYCLE.md` for the phone's side.
 
@@ -24,16 +32,24 @@ design, and `field-portal-android/docs/HSRTECH_PARITY_AND_SERVICE_CYCLE.md` for 
                    │                          │                                     │
                    │                   ship (Faulty)                          ship (Faulty)
                    │                          ▼                                     ▼
-                   │                    IN_TRANSIT_SC ──receive──► UNDER_REPAIR ──┬──► REPAIRED ──► (re-issuable)
+                   │                    IN_TRANSIT_SC ──receive──► UNDER_REPAIR ──┬──► SHELFED ──► (issuable)
                    │                          ▲                                   └──► SCRAPPED (terminal)
           ship (GoodStock) from RECEIVED ──────┘
-                                              └──receive, good──► RETURNED_TO_SC ──► (re-issuable)
+                                              └──receive, good──► SHELFED ──► (issuable)
                                               └──receive, lost──► MISSING
   peer transfer:   RECEIVED ──send──► IN_TRANSIT_TECH ──ack──► RECEIVED (receiver) | rolled back to sender
 ```
 
-Re-issuable is exactly `{RETURNED_TO_SC, REPAIRED}` (`SerialService.ReIssuable`). Everything else is
-deliberately not offered on the next issue, which is the rule that keeps a broken unit off the shelf.
+Re-issuable is exactly `{SHELFED}` (`SerialService.ReIssuable`), and those units ARE the shelf.
+Everything else is deliberately not offered on the next issue, which is the rule that keeps a broken
+unit off the shelf.
+
+`REPAIRED` and `RETURNED_TO_SC` used to be in that set, and replacing the pair with one status is
+what made the shelf readable: "repaired" says a bench has finished with a unit and "returned to SC"
+says a box arrived, and neither says anybody put the thing away. A unit is on the shelf because
+somebody shelved it. `REPAIRED` still exists for a unit a bench has finished with and nobody has put
+away yet; `RETURNED_TO_SC` is kept only for the units that passed through it before `SHELFED`
+existed.
 
 ## Closed
 
@@ -103,23 +119,22 @@ Two transitions crossed a write-off and silently disagreed with the count:
   that was physically on the shelf.
 * **Scrapping a unit the shelf still counts.** `SCRAPPED` means the unit is gone; the count kept it.
 
-**The rule now:** the shelf counts exactly the units it may issue, so the count follows the status.
-A manual change that puts a unit into `RETURNED_TO_SC` or `REPAIRED` adds one; a change that takes
-it out of either adds minus one; a change between two shelf statuses, or between two off-shelf ones,
-moves nothing. `SerialService.WarehouseDeltaFor` is the whole rule and
-`StockLedgerService.SerialStatusCorrectionAsync` writes it as a signed `Adjustment` referencing the
-unit, which is what the stock report already reads as a warehouse movement.
+**The rule was:** the shelf counts exactly the units it may issue, so the count follows the status.
+A manual change onto the shelf added one to the warehouse, a change off it subtracted one, and
+`SerialService.WarehouseDeltaFor` wrote it as a signed `Adjustment` referencing the unit. Without the
+minus-one half, marking a unit missing, then found, then missing, then found minted a unit of stock
+on every lap.
 
-The minus-one half is not optional and is worth saying out loud: without it, marking a unit missing,
-then found, then missing, then found mints a unit of stock on every lap.
+**The rule now:** nothing. Separating the shelf from the warehouse (2026-10-17) removed the second
+number the first one could disagree with. A unit found after being written off joins the SHELF, and
+the shelf is whichever units are `SHELFED` - so saying the unit is back IS saying the shelf has it,
+and no lap of missing and found can mint anything. `WarehouseDeltaFor` and
+`SerialStatusCorrectionAsync` are both gone. A manual change onto the shelf writes a `ShelfIn` row,
+so the shelf's history reads the same however a unit got there, and that row moves no balance.
 
-Only the manual endpoints apply it. Every ordinary path — acknowledging a return, stocking a repair
-job, cancelling a swap — already moves its own quantity alongside the status, and applying the rule
-there as well would count each of those twice.
-
-**One transition is now refused:** shelf stock straight to `RECEIVED`. It is the only change where
-the quantity would leave the warehouse and arrive nowhere, because a technician's usable holding is
-credited by issuing. The error says to issue the unit instead.
+**One transition is still refused:** shelf stock straight to `RECEIVED`. It is the only change where
+a unit would leave the shelf and arrive on no balance at all, because a technician's usable holding
+is credited by issuing. The error says to issue the unit instead.
 
 **Still not followed: the technician side.** A manual change into `RECEIVED` from an off-shelf status
 (say `MISSING` → `RECEIVED`) credits nobody, so the unit is in a technician's hands and on no

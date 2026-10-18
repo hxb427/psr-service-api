@@ -236,3 +236,27 @@ public record ServiceReplacementDto(
 /// A different item is not a swap. That is a total loss and a replacement, which has its own route and
 /// its own part picker.</summary>
 public record SwapRequest(string ReplacementSerialNo, string? Reason);
+
+/// <summary>One unit on the shelf, offered as a replacement.
+///
+/// <paramref name="MatchesJob"/> is whether this unit is the same catalogue item as the job's own PS
+/// code. It is a sort key and a label, never a filter: a total loss is the one route where the
+/// replacement may legitimately be a different item, since the incoming unit is written off rather
+/// than kept.
+///
+/// <paramref name="ShelvedAt"/> is when the unit last moved, which for a shelf unit is when it was put
+/// away. Shown so that a shelf holding four of the same thing can be picked from oldest first rather
+/// than at random.</summary>
+public record ShelfReplacementUnitDto(
+    long SerialId, long PartId, string ItemCode, string PartName, string SerialNumber,
+    DateTime? ShelvedAt, bool MatchesJob);
+
+/// <summary>What the replacement form needs to offer a choice instead of an empty box.
+///
+/// <paramref name="Warning"/> is non-null when the job's PS code resolves to no catalogue item. That
+/// is not an error here — a shelf unit can still be picked, and picking one names its own part — but
+/// it does mean a serial typed in by hand has no item to come out of warehouse stock against, and
+/// saying so on the form beats failing on save.</summary>
+public record ReplacementShelfDto(
+    long? JobPartId, string? JobItemCode, string? JobPartName, string? Warning,
+    IReadOnlyList<ShelfReplacementUnitDto> Units);

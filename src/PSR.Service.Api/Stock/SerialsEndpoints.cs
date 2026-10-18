@@ -81,14 +81,18 @@ public static class SerialsEndpoints
             ToDto(row.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo), audit));
     }
 
-    /// <summary>Apply a manual status change, and move the warehouse count with it.
+    /// <summary>Apply a manual status change.
     ///
-    /// The count follows the status here, and only here, because this is the one screen where a
-    /// person asserts where a unit is rather than recording something that happened to it. A unit
-    /// put back on the shelf is a unit the shelf has; a unit taken off it - lost, scrapped, sent to
-    /// the bench - is one it does not. Every other path through the serial ledger already carries
-    /// its own quantity, which is why <see cref="SerialService.WarehouseDeltaFor"/> is applied here
-    /// and not inside the service.</summary>
+    /// No quantity moves with it, and that is now correct rather than an omission. A unit put back on
+    /// the shelf, or taken off it, moves the SHELF - and the shelf is counted by unit, as whichever
+    /// rows are SHELFED in the service centre's custody, so the status change IS the count change.
+    /// There is no second number to keep in step.
+    ///
+    /// This used to apply a +1/-1 to the warehouse here, because the shelf was then part of the
+    /// warehouse count and the two could disagree: a unit written off as missing and later found went
+    /// re-issuable while the count stayed one short for ever. Separating the shelf from the warehouse
+    /// closed that by construction. What remains refused is a shelf unit flipped straight to RECEIVED
+    /// - see <see cref="SerialService.ManualChangeBlocked"/>.</summary>
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ChangeStatusAsync(
         long id, [FromBody] ChangeSerialStatusRequest req, ClaimsPrincipal user, AppDbContext db,
         SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
@@ -114,13 +118,16 @@ public static class SerialsEndpoints
             var updated = await serial.ChangeStatusAsync(id, newStatus, uid, req.Remarks.Trim(), ct);
             if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
 
-            var delta = SerialService.WarehouseDeltaFor(before.Status, newStatus);
-            await ledger.SerialStatusCorrectionAsync(before.PartId, delta, uid, id,
-                $"{before.SerialNumber}: {before.Status} -> {newStatus} (manual)", ct);
+            // A unit put ON the shelf by hand gets its shelf row, so the shelf's history reads the
+            // same whether a unit arrived off a job or was corrected into place. Coming OFF needs no
+            // row: the movement types that take a unit off the shelf all write their own, and a
+            // correction that simply ends the unit (scrapped, missing) has nowhere to send it.
+            if (!SerialService.IsOnShelf(before.Status) && SerialService.IsOnShelf(newStatus))
+                ledger.ShelveUnit(before.PartId, uid, "SERIAL_STATUS", id, before.SerialNumber,
+                    $"{before.SerialNumber}: {before.Status} -> {newStatus} (manual)");
 
             audit.Log(uid, "serial.status", "component_serial", id,
-                details: delta == 0 ? newStatus.ToString() : $"{newStatus} ({delta:+#;-#;0} warehouse)",
-                ip: http.GetIp());
+                details: newStatus.ToString(), ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -130,10 +137,12 @@ public static class SerialsEndpoints
         return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));
     }
 
-    /// <summary>Receive a unit back at the counter by hand. The same correction as a manual status
-    /// change and for the same reason: booking a unit in as RETURNED_TO_SC puts it on the shelf, so
-    /// the shelf has to count it. Received as defective it is at the service centre but is not
-    /// sellable stock, so nothing is credited.</summary>
+    /// <summary>Receive a unit back at the counter by hand. Unused stock goes onto the shelf, which
+    /// the status alone says; received as defective it is at the service centre but is not stock
+    /// anyone can issue, so it goes no further than DEFECTIVE and lands on no shelf.
+    ///
+    /// No quantity moves either way, for the same reason a manual status change moves none: the shelf
+    /// is counted by unit.</summary>
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ReceiveAsync(
         long id, [FromBody] ReceiveSerialReturnRequest req, ClaimsPrincipal user, AppDbContext db,
         SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
@@ -155,12 +164,12 @@ public static class SerialsEndpoints
             var updated = await serial.ReceiveReturnAsync(id, req.Defective, uid, req.Remarks.Trim(), ct);
             if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
 
-            var delta = SerialService.WarehouseDeltaFor(before.Status, updated.Status);
-            await ledger.SerialStatusCorrectionAsync(before.PartId, delta, uid, id,
-                $"{before.SerialNumber}: {before.Status} -> {updated.Status} (received at counter)", ct);
+            if (!SerialService.IsOnShelf(before.Status) && SerialService.IsOnShelf(updated.Status))
+                ledger.ShelveUnit(before.PartId, uid, "SERIAL_STATUS", id, before.SerialNumber,
+                    $"{before.SerialNumber}: {before.Status} -> {updated.Status} (received at counter)");
 
             audit.Log(uid, "serial.receive", "component_serial", id,
-                details: req.Defective ? "DEFECTIVE" : "RETURNED_TO_SC", ip: http.GetIp());
+                details: updated.Status.ToString().ToUpperInvariant(), ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }

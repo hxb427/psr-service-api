@@ -36,7 +36,12 @@ public static partial class ServicesEndpoints
         group.MapPost("/{id:long}/revert", RevertAsync).RequireAuthorization("ServiceManage");
         group.MapPost("/{id:long}/dispatch", DispatchAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/stock", StockJobAsync).RequireAuthorization("DispatchManage");
-        group.MapPost("/{id:long}/replace", ReplaceAsync).RequireAuthorization("DispatchManage");
+        // No policy here on purpose: who may issue a replacement depends on WHERE the job is. From
+        // ReplacementApprovalPending it is the dispatch roles, as it always was; from an in-service
+        // total loss it is also the technician assigned to that job, which a role policy cannot
+        // express because it is a fact about the row. ReplaceAsync checks both.
+        group.MapPost("/{id:long}/replace", ReplaceAsync);
+        group.MapGet("/{id:long}/replacement-shelf", ReplacementShelfAsync);
         // Advance replacement — the customer leaves with a unit off the shelf today and theirs stays
         // behind on a job of its own. DispatchManage is admin/manager/supervisor, the same people who
         // already decide a total-loss replacement; giving away shelf stock is one decision, not two.

@@ -19,6 +19,12 @@ public class SpareSaleConfiguration : IEntityTypeConfiguration<SpareSale>
         b.Property(x => x.DealerId).HasColumnName("dealer_id");
         b.Property(x => x.CustomerId).HasColumnName("customer_id");
 
+        // Same widths as the dealer master these are copied off, so a dealer's address and state can
+        // never be too long for the sale that bills it.
+        b.Property(x => x.PartyAddress).HasColumnName("party_address").HasMaxLength(500);
+        b.Property(x => x.PartyState).HasColumnName("party_state").HasMaxLength(60);
+        b.Property(x => x.PartyStateCode).HasColumnName("party_state_code").HasMaxLength(10);
+
         b.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.PaymentStatus).HasColumnName("payment_status").HasConversion<string>().HasMaxLength(20);
 
@@ -50,6 +56,8 @@ public class SpareSaleConfiguration : IEntityTypeConfiguration<SpareSale>
         b.HasIndex(x => x.SaleDate);
         // Every availability check filters on it — an unsold sale is a claim on the warehouse.
         b.HasIndex(x => x.SoldAt);
+        // The register's statewise filter, which asks for several codes at once.
+        b.HasIndex(x => x.PartyStateCode);
     }
 }
 

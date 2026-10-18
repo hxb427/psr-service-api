@@ -25,6 +25,17 @@ public enum MovementType
     SaleReturn,   // warehouse += qty (sold spare sale sent back; applied on the return)
     SaleUnsold,   // warehouse += qty (a sale marked sold in error was un-marked; the exact reversal of Sale)
     Adjustment,   // warehouse += qty (qty may be negative)
+    ShelfIn,      // a unit was put on the SHELF (kept from a finished job). Moves no quantity balance
+                  // at all, and that is the point: the shelf is counted by unit, not by quantity, so
+                  // this row is the ledger's record that a unit arrived on it rather than a credit to
+                  // anything. See StockMovement.ShelfQty.
+    ShelfTransfer, // warehouse -= qty, and nothing is credited: units that were already physically on
+                  // the shelf stop being counted as warehouse stock. Written once, by the migration
+                  // that separated the two pools, for stock that reached the shelf while the shelf WAS
+                  // the warehouse count. Not consumption - nothing left the building and nobody
+                  // received it - so it is the one type whose warehouse outflow is deliberately absent
+                  // from the consumption report. ShelfQty stays 0: no unit's status changed, so the
+                  // shelf's own count (which is those statuses) did not move either.
     TransferOut,  // sender technician -= qty (units handed over / sent to a peer)
     TransferIn,    // receiver technician += qty received and usable (peer transfer, at acknowledgement)
     Transfer,     // legacy: sender -= qty AND receiver += qty in one row, both applied at acknowledgement

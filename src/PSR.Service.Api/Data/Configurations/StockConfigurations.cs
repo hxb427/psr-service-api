@@ -23,6 +23,9 @@ public class StockMovementConfiguration : IEntityTypeConfiguration<StockMovement
         // Defaults to true so every existing row keeps describing what it actually did: credit the
         // technician at issue. Only rows written from now on can say otherwise.
         b.Property(x => x.CreditedOnIssue).HasColumnName("credited_on_issue").HasDefaultValue(true);
+        // Zero by default, which is what every row written before the shelf existed did: move the
+        // warehouse for its whole quantity.
+        b.Property(x => x.ShelfQty).HasColumnName("shelf_qty").HasDefaultValue(0);
         b.Property(x => x.PerformedByUserId).HasColumnName("performed_by_user_id");
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(500);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");

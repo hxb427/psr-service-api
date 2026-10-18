@@ -7,6 +7,7 @@ using PSR.Service.Api.Auth;
 using PSR.Service.Api.Common;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Documents;
 using PSR.Service.Api.Stock;
 
 namespace PSR.Service.Api.SpareSales;
@@ -48,6 +49,12 @@ public static class SpareSalesEndpoints
         // The one action that moves warehouse stock on a sale. Gated on StockManage rather than
         // SaleManage: it is a warehouse movement, and the store manager who hands the goods over is
         // the person who knows they went out.
+        //
+        // It now marks the sale paid as well, which means StockManage settles a counter sale's payment
+        // without PaymentManage. That is deliberate and not a hole: the person handing the goods across
+        // the counter is the person taking the cash for them, and the register no longer offers a
+        // separate payment step for anyone else to take. /payment below still needs PaymentManage, for
+        // the sale that has to be corrected afterwards.
         group.MapPost("/{id:long}/mark-sold", MarkSoldAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/unmark-sold", UnmarkSoldAsync).RequireAuthorization("StockManage");
         group.MapPost("/{id:long}/clear-pi", ClearPiAsync).RequireAuthorization("SaleManage");
@@ -70,17 +77,23 @@ public static class SpareSalesEndpoints
 
     // ---------------------------------------------------------------- queries
 
+    /// <param name="states">GST state codes, comma separated — the register narrowed to the regions it is
+    /// being read for. Several at once because that is the question: everything billed into Tamil Nadu or
+    /// Karnataka was two passes and a mental merge before.</param>
     private static async Task<Ok<PagedResult<SpareSaleListItemDto>>> ListAsync(
         AppDbContext db, ClaimsPrincipal user, string? status, string? payment, string? search,
         string? customer, DateTime? fromDate, DateTime? toDate, bool? excludeCancelled,
-        int? page, int? pageSize, CancellationToken ct)
+        string? states, int? page, int? pageSize, CancellationToken ct)
     {
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
 
+        // Narrowed before the party joins, so the statewise index does the work rather than a filter
+        // over the joined rows.
+        var sales = ApplyStateFilter(db.SpareSales.AsNoTracking().Where(s => !s.IsDeleted), states);
+
         // Left-join both party tables — a sale has exactly one of them.
-        var q = from s in db.SpareSales.AsNoTracking()
-                where !s.IsDeleted
+        var q = from s in sales
                 join d in db.Dealers on s.DealerId equals d.Id into dg
                 from d in dg.DefaultIfEmpty()
                 join c in db.Customers on s.CustomerId equals c.Id into cg
@@ -139,6 +152,35 @@ public static class SpareSalesEndpoints
 
         return TypedResults.Ok(new PagedResult<SpareSaleListItemDto>(items, pageNum, size, total));
     }
+
+    /// <summary>The register narrowed to the states it is being read for, several at a time.
+    ///
+    /// Read off the state recorded ON THE SALE, not off the party master: that is what the counter
+    /// entered and what the documents were raised on, so a dealer who moves state does not rewrite where
+    /// last year's sales were billed. A sale carrying no state falls outside the filter rather than
+    /// being guessed at — the entry form requires one, and the migration backfilled the sales that were
+    /// already on the books from the master the generate form had been reading all along.
+    ///
+    /// Asking for no states, or for nothing that parses as one, leaves the query alone. A stray comma
+    /// should not empty the register.</summary>
+    internal static IQueryable<SpareSale> ApplyStateFilter(IQueryable<SpareSale> sales, string? states)
+    {
+        var codes = ParseStateCodes(states);
+        return codes.Count == 0
+            ? sales
+            : sales.Where(s => s.PartyStateCode != null && codes.Contains(s.PartyStateCode));
+    }
+
+    /// <summary>The statewise filter's codes: normalized to the two-digit form every state comparison
+    /// here is made in, and de-duplicated. Anything that is not a code is dropped rather than narrowing
+    /// the register to nothing.</summary>
+    internal static List<string> ParseStateCodes(string? states) =>
+        (states ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(GstStates.NormalizeCode)
+            .OfType<string>()
+            .Distinct()
+            .ToList();
 
     private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound>> GetAsync(
         long id, AppDbContext db, ClaimsPrincipal user, CancellationToken ct)
@@ -309,8 +351,15 @@ public static class SpareSalesEndpoints
 
             sale.SoldAt = DateTime.UtcNow;
             sale.SoldByUserId = uid;
+            // Handing the goods over IS the payment on a counter sale — it is settled in cash across the
+            // counter, and the separate "mark payment received" step only restated what marking the sale
+            // sold already meant. One action says both now, which is why the register no longer offers
+            // the other one. The payment endpoint stays, for the rare sale that has to be corrected.
+            var settledNow = sale.PaymentStatus != PaymentStatus.Paid;
+            sale.PaymentStatus = PaymentStatus.Paid;
             audit.Log(uid, "spare-sale.mark-sold", "spare_sale", sale.Id,
-                details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) out of the warehouse",
+                details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) out of the warehouse"
+                         + (settledNow ? ", payment received" : string.Empty),
                 ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -349,6 +398,11 @@ public static class SpareSalesEndpoints
 
         sale.SoldAt = null;
         sale.SoldByUserId = null;
+        // The mirror of mark-sold, which is now what records the payment too. Nothing on the register
+        // sets a sale's payment status on its own any more, so undoing the hand-over has to take back
+        // what it implied — otherwise a mis-click leaves a sale reading Paid with no way to correct it.
+        // An invoiced sale keeps its Paid: that payment is on a tax document, not on this stamp.
+        if (string.IsNullOrWhiteSpace(sale.InvNo)) sale.PaymentStatus = PaymentStatus.Pending;
         audit.Log(uid, "spare-sale.unmark-sold", "spare_sale", sale.Id,
             details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) back in the warehouse", ip: http.GetIp());
         await db.SaveChangesAsync(ct);
@@ -529,6 +583,14 @@ public static class SpareSalesEndpoints
             partyName = c?.Name ?? string.Empty;
             address = c?.Address;
         }
+
+        // What the sale itself carries wins: it is what the counter entered and what the documents were
+        // raised on, and a master edited since then must not rewrite it — the same rule a line's
+        // snapshotted item code and HSN follow. A sale entered before these columns existed carries
+        // none of them and falls through to the master, exactly as every sale used to.
+        address = sale.PartyAddress ?? address;
+        state = sale.PartyState ?? state;
+        stateCode = sale.PartyStateCode ?? stateCode;
 
         var createdBy = await db.Users.AsNoTracking().Where(u => u.Id == sale.CreatedByUserId)
             .Select(u => (string?)(u.FullName ?? u.Username)).FirstOrDefaultAsync(ct);

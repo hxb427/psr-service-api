@@ -85,4 +85,17 @@ public class ServiceEndpointRoutingTests
         routes.Should().Contain(r => r.Contains("{id:long}/complete"));
         routes.Should().Contain(r => r.Contains("{id:long}/payment"));
     }
+
+    /// <summary>The shelf, read through a job. It is the replacement form's pick list and the only
+    /// window onto the shelf a technician has — <c>/serials</c> is behind StockManage — so a form that
+    /// opens on an empty dropdown is the failure this guards: the route binding is what the framework
+    /// validates at startup rather than at compile time.</summary>
+    [Fact]
+    public void The_replacement_shelf_pick_list_is_registered()
+    {
+        var routes = BuildServiceEndpoints().OfType<RouteEndpoint>()
+            .Select(e => e.RoutePattern.RawText!).ToList();
+
+        routes.Should().Contain(r => r.Contains("{id:long}/replacement-shelf"));
+    }
 }
