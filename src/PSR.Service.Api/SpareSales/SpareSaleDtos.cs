@@ -44,17 +44,26 @@ public record SaveSaleCourierRequest(
 
 /// <summary>Money fields are null for roles that may see the sale but not its pricing (store_manager).
 ///
-/// The stock figures are live, not snapshots. <paramref name="WarehouseOnHand"/> is the physical balance;
-/// <paramref name="Available"/> subtracts what other pending sales have already claimed, and is the number
-/// that decides whether this sale can actually be invoiced. <paramref name="ReturnedQty"/> is how many of
-/// this line have since come back.</summary>
+/// The stock figures are live, not snapshots. <paramref name="WarehouseOnHand"/> is the physical balance,
+/// and the only stock figure a sale deals in. <paramref name="ReturnedQty"/> is how many of this line have
+/// since come back.
+///
+/// <paramref name="Available"/> no longer means anything separate — it is sent equal to
+/// <paramref name="WarehouseOnHand"/>. It used to be on-hand minus what other unsold sales had claimed;
+/// that idea is gone (see SpareSaleService.ApplyAsync), and the field is kept on the wire only so a client
+/// still on the previous build reads the right number instead of a zero.</summary>
 public record SpareSaleLineDto(
     long Id, long PartId, string ItemCode, string Description, string? HsnCode, string? Unit,
     int Qty, string RateType, decimal? UnitRate, decimal GstPercent,
     decimal? TaxableAmount, decimal? TaxAmount, decimal? LineTotal,
     int WarehouseOnHand, int Available, int ReturnedQty);
 
-/// <summary>A part's warehouse position for the sale form, which asks per row as the user types.</summary>
+/// <summary>What the warehouse holds for one part, asked per row as the sale form is typed.
+///
+/// <paramref name="Committed"/> is always 0 and <paramref name="Available"/> always equals
+/// <paramref name="OnHand"/>. Both are kept on the wire for one release so that a client on the previous
+/// build — which reads Available and subtracts Committed to label the row — still shows the on-hand
+/// figure rather than reading absent fields as zero and refusing every line.</summary>
 public record PartAvailabilityDto(long PartId, int OnHand, int Committed, int Available);
 
 // ----- returns -----

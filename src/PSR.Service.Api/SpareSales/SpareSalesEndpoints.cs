@@ -68,11 +68,15 @@ public static class SpareSalesEndpoints
         return app;
     }
 
+    /// <summary>What the warehouse holds for one part. <c>excludeSaleId</c> is still accepted and ignored:
+    /// it only ever mattered to the claim arithmetic that is gone, and the sale form on the previous
+    /// build still sends it.</summary>
     private static async Task<Ok<PartAvailabilityDto>> AvailabilityAsync(
         long partId, long? excludeSaleId, SpareSaleService sales, CancellationToken ct)
     {
-        var a = await sales.AvailabilityAsync(partId, excludeSaleId ?? 0, ct);
-        return TypedResults.Ok(new PartAvailabilityDto(a.PartId, a.OnHand, a.Committed, a.Available));
+        var onHand = await sales.WarehouseOnHandAsync(partId, ct);
+        // Committed 0, Available == OnHand — see PartAvailabilityDto.
+        return TypedResults.Ok(new PartAvailabilityDto(partId, onHand, 0, onHand));
     }
 
     // ---------------------------------------------------------------- queries
@@ -329,7 +333,15 @@ public static class SpareSalesEndpoints
     /// The decrement is guarded per line, so a part that sold out since the sale was entered fails the
     /// whole transaction rather than driving a balance negative. Quantities are grouped by part first:
     /// the same part can sit on two lines (list price and a discounted one) and each passing on its own
-    /// would still overdraw the balance between them.</summary>
+    /// would still overdraw the balance between them.
+    ///
+    /// Before any of that, the whole sale is re-checked against the warehouse and every short item is
+    /// named at once. The guarded decrement alone is correct but it is a poor way to be told: it stops
+    /// at the FIRST part that will not come out, so a sale short of three things had to be marked,
+    /// refused, edited and marked again three times to discover that. Days can pass between entering a
+    /// sale and handing it over, and the stock behind it moves in that gap. The check stays advisory —
+    /// the conditional UPDATE underneath is still what makes overselling impossible, because anything
+    /// read here can be gone by the time the row is written.</summary>
     private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> MarkSoldAsync(
         long id, ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
         IAuditService audit, HttpContext http, CancellationToken ct)
@@ -340,6 +352,19 @@ public static class SpareSalesEndpoints
         if (sale.SoldAt is not null) return TypedResults.BadRequest("This sale is already marked sold.");
         if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
         if (sale.Lines.Count == 0) return TypedResults.BadRequest("This sale has no items on it.");
+
+        // What this sale wants, one row per part — the same grouping the decrement below uses, so the
+        // figure checked is the figure that will be asked for.
+        var wanted = sale.Lines.GroupBy(l => l.PartId)
+            .Select(g => (PartId: g.Key, g.First().ItemCode, Qty: g.Sum(l => l.Qty)))
+            .ToList();
+        var partIds = wanted.Select(w => w.PartId).ToList();
+        var onHand = await db.StockBalances.AsNoTracking()
+            .Where(b => b.TechnicianId == StockBalance.Warehouse && partIds.Contains(b.PartId))
+            .ToDictionaryAsync(b => b.PartId, b => b.OnHand, ct);
+
+        if (ShortfallRefusal(sale.SaleNo, wanted, onHand) is { } refusal)
+            return TypedResults.BadRequest(refusal);
 
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -371,6 +396,34 @@ public static class SpareSalesEndpoints
         }
 
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
+    }
+
+    /// <summary>Why this sale cannot be handed over, naming every item the warehouse is short of — or
+    /// null when it can cover all of them. Separate from the endpoint so the rule can be exercised
+    /// without a database.
+    ///
+    /// Measured against RAW on-hand, not availability. What other unsold sales have spoken for is not
+    /// what stops this one: these units are leaving now, and the first sale to the counter is the one
+    /// that gets them. Those claims belong on the entry form, where they stop two sales being written
+    /// for the same goods in the first place.
+    ///
+    /// Every short item is listed rather than the first, because the point is to be told once what to
+    /// edit. A part with no balance row at all reads as nothing in stock, which is what it is.</summary>
+    internal static string? ShortfallRefusal(
+        string saleNo, IEnumerable<(long PartId, string ItemCode, int Qty)> wanted,
+        IReadOnlyDictionary<long, int> onHand)
+    {
+        var shortfalls = wanted
+            .Where(w => w.Qty > onHand.GetValueOrDefault(w.PartId))
+            .Select(w => $"  {w.ItemCode} — {onHand.GetValueOrDefault(w.PartId)} in warehouse stock, "
+                       + $"{w.Qty} on this sale")
+            .ToList();
+        if (shortfalls.Count == 0) return null;
+
+        return $"{saleNo} cannot be handed over — the warehouse no longer holds all of it:\n"
+            + string.Join("\n", shortfalls)
+            + "\n\nNothing has been taken out. Edit the sale down to what is there, or book the stock "
+            + "in first, then mark it sold.";
     }
 
     /// <summary>Undo a Mark as sold that should not have happened, putting the units back on the shelf.
@@ -602,7 +655,7 @@ public static class SpareSalesEndpoints
         // Stock and returns are fetched for the whole sale at once. Asking per line meant a round trip
         // per row every time a sale was opened.
         var partIds = sale.Lines.Select(l => l.PartId).Distinct().ToList();
-        var availability = await new SpareSaleService(db).AvailabilityAsync(partIds, sale.Id, ct);
+        var onHand = await new SpareSaleService(db).WarehouseOnHandAsync(partIds, ct);
 
         var returned = await (from rl in db.SpareSaleReturnLines.AsNoTracking()
                               join r in db.SpareSaleReturns.AsNoTracking() on rl.SpareSaleReturnId equals r.Id
@@ -613,12 +666,13 @@ public static class SpareSalesEndpoints
 
         var lines = sale.Lines.OrderBy(l => l.Id).Select(l =>
         {
-            var a = availability.GetValueOrDefault(l.PartId, new PartAvailability(l.PartId, 0, 0));
+            var have = onHand.GetValueOrDefault(l.PartId);
             return new SpareSaleLineDto(
                 l.Id, l.PartId, l.ItemCode, l.Description, l.HsnCode, l.Unit, l.Qty, l.RateType.ToString(),
                 pricing ? l.UnitRate : null, l.GstPercent,
                 pricing ? l.TaxableAmount : null, pricing ? l.TaxAmount : null, pricing ? l.LineTotal : null,
-                a.OnHand, a.Available, returned.GetValueOrDefault(l.PartId));
+                // Available is the same figure — see SpareSaleLineDto.
+                have, have, returned.GetValueOrDefault(l.PartId));
         }).ToList();
 
         var returns = await db.SpareSaleReturns.AsNoTracking().Include(r => r.Lines)

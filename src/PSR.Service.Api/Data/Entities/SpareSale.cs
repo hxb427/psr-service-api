@@ -20,8 +20,9 @@ public enum SpareSaleStatus { Pending, Invoiced, Cancelled }
 /// goods handed over last week moved the stock a week late, and a sale settled in cash with no invoice
 /// never moved it at all. Splitting them lets the two happen in either order, or only one of them.
 ///
-/// A sale that has not been marked sold reserves nothing, but it does count as a claim on the stock
-/// (see SpareSaleService.CommittedQuery) so the same units are not sold twice over.</summary>
+/// A sale that has not been marked sold reserves nothing at all — not a quantity, not a claim. Both the
+/// entry form and mark-sold read the plain warehouse balance, and mark-sold is where it is checked for
+/// real, immediately before the units come out.</summary>
 public class SpareSale : ITimestamps
 {
     public long Id { get; set; }
