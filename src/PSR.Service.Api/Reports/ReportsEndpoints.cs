@@ -672,7 +672,8 @@ public static partial class ReportsEndpoints
             // the units were already on the shelf and only the warehouse's claim on them is being
             // given up. So the whole quantity comes off the warehouse, and ShelfQty is 0.
             MovementType.ShelfTransfer => -qty,
-            // Consumption / ConsumptionReversal / Transfer are technician-side; ShelfIn is shelf-side.
+            // Consumption / ConsumptionReversal / Transfer are technician-side, as is
+            // CustodyCorrection; ShelfIn is shelf-side.
             _ => 0,
         };
     }

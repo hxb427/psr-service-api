@@ -288,35 +288,37 @@ public class BulkWorkflowTests
             .Should().Contain("no serial number");
     }
 
-    /// <summary>And an UNTRACKED item is refused too, which is the tightening worth stating.
+    /// <summary>An UNTRACKED item cannot be shelved at all, serial on the job or not.
     ///
-    /// It used to be allowed, on the reasoning that an untracked part has no unit record either way
-    /// and the quantity was the whole of what moved. That reasoning died with the warehouse credit:
-    /// stocking a job now puts a unit on the shelf and adds nothing to any quantity, so a job with a
-    /// blank serial would shelve nothing, anywhere, and leave the machine on the rack with the system
-    /// unaware of it. The serial-tracked flag governs how a part is ISSUED - whether the store must
-    /// name units handing them out - and it was never a statement about whether a machine the shop
-    /// has just decided to keep is worth identifying.</summary>
-    [Fact]
-    public void Stocking_an_untracked_item_without_a_serial_is_refused_too()
+    /// Both halves are asserted together because the serial is deliberately NOT the deciding factor
+    /// here: the catalogue says the shop does not identify this item's units, so there is nothing to
+    /// put on a register of units however carefully the job names one.
+    ///
+    /// Shelving them was briefly allowed, on the reasoning that a machine with a number written on it
+    /// is worth remembering whatever the catalogue says. It is - but not on the shelf, because the
+    /// issue path only names units for a tracked part, so the unit showed up on the shelf page and no
+    /// issue could ever take it off. The refusal names the way out: turn tracking on for the item.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("SN-500")]
+    public void An_untracked_item_cannot_be_shelved(string? unitSerial)
     {
         var job = AssignedJob();
         job.PsCode = "PS-100";
 
-        ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), null)
-            .Should().Contain("nothing to put on the shelf");
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), unitSerial)
+            .Should().Contain("not serial-tracked");
     }
 
-    /// <summary>An untracked item that DOES name its unit is stocked like anything else. The flag
-    /// changes nothing here, which is the point of the pair above.</summary>
+    /// <summary>And a tracked item that names its unit goes through, which is what the pair above is
+    /// a refusal relative to.</summary>
     [Fact]
-    public void Stocking_an_untracked_item_that_names_its_unit_is_allowed()
+    public void Stocking_a_tracked_item_that_names_its_unit_is_allowed()
     {
         var job = AssignedJob();
         job.PsCode = "PS-100";
 
-        ServicesEndpoints.StockBlockedReason(job, TrackedPart(serialTracked: false), "SN-500")
-            .Should().BeNull();
+        ServicesEndpoints.StockBlockedReason(job, TrackedPart(), "SN-500").Should().BeNull();
     }
 
     [Fact]

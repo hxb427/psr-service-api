@@ -17,10 +17,18 @@ public record SerialAuditDto(
 
 public record ComponentSerialDetailDto(ComponentSerialDto Serial, IReadOnlyList<SerialAuditDto> Audit);
 
-// Admin manual status change (mark missing/found/defective/repaired…). Remarks are mandatory.
+/// <summary>Admin manual status change (mark missing/found/defective/repaired…). Remarks are
+/// mandatory.
+///
+/// <paramref name="TechnicianId"/> is required for the statuses that name a technician and refused
+/// for the ones that do not - <c>SerialService.TechnicianNeededFor</c> is the rule, and the server
+/// enforces it rather than trusting the screen. A status like RECEIVED cannot be applied without it:
+/// the unit would say it is with a technician while its owner still said the service centre, and
+/// nobody's balance would carry it.</summary>
 public record ChangeSerialStatusRequest(
     [Required, StringLength(20)] string Status,
-    [Required, StringLength(500, MinimumLength = 1)] string Remarks);
+    [Required, StringLength(500, MinimumLength = 1)] string Remarks,
+    long? TechnicianId = null);
 
 // Receive a field-returned serial back at the service center (good → RETURNED_TO_SC, faulty → DEFECTIVE).
 public record ReceiveSerialReturnRequest(

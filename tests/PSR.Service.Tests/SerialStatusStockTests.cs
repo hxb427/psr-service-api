@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Reports;
 using PSR.Service.Api.Stock;
 using Xunit;
 
@@ -109,26 +110,98 @@ public class SerialStatusStockTests
         SerialService.IsOnShelf(SerialStatus.Shelfed).Should().BeTrue();
     }
 
-    /// <summary>The only transition that would take a unit off the shelf and credit nobody: a
-    /// technician's usable holding is created by issuing, which a status edit cannot do. This is the
-    /// one guard that survived the move to two pools, and it survived unchanged - the unit would
-    /// leave the shelf and arrive on no balance either way.</summary>
-    [Fact]
-    public void A_shelf_unit_cannot_be_handed_to_a_technician_by_a_status_change()
+    /// <summary>RECEIVED is the only status that puts a unit on a technician's balance, and the list
+    /// of what does NOT is the half worth pinning: each of those is a unit somebody is holding that
+    /// they still cannot fit on a job.</summary>
+    [Theory]
+    [InlineData(SerialStatus.Received, true)]
+    [InlineData(SerialStatus.Issued, false)]        // in a van; the ack step exists for this gap
+    [InlineData(SerialStatus.Defective, false)]     // theirs to send in, not stock they can fit
+    [InlineData(SerialStatus.Collected, false)]     // a customer's unit; never the shop's stock
+    [InlineData(SerialStatus.InTransitSc, false)]   // gone from them, not yet arrived
+    [InlineData(SerialStatus.InTransitTech, false)]
+    [InlineData(SerialStatus.Shelfed, false)]
+    [InlineData(SerialStatus.Used, false)]
+    public void Only_received_is_on_a_technicians_balance(SerialStatus status, bool expected)
     {
-        SerialService.ManualChangeBlocked(SerialStatus.Shelfed, SerialStatus.Received, "SN-1")
-            .Should().Contain("Issue it to the technician");
+        SerialService.IsTechnicianStock(status).Should().Be(expected);
     }
 
+    /// <summary>A status that names a technician cannot be applied without one. This is the silent
+    /// wrong answer it closes: SyncOwnerToStatusAsync matches its technician branch only when a
+    /// technician is set, so a blank one left a unit whose status said RECEIVED and whose owner still
+    /// said the service centre - on nobody's balance, fittable by no one.</summary>
     [Theory]
-    [InlineData(SerialStatus.Missing, SerialStatus.Received)]      // never was on the shelf
-    [InlineData(SerialStatus.Repaired, SerialStatus.Received)]     // nor is a unit on a bench
-    [InlineData(SerialStatus.Shelfed, SerialStatus.Missing)]
-    [InlineData(SerialStatus.Shelfed, SerialStatus.Repaired)]
-    [InlineData(SerialStatus.Shelfed, SerialStatus.Used)]
-    public void Every_other_manual_change_is_allowed(SerialStatus from, SerialStatus to)
+    [InlineData(SerialStatus.Issued)]
+    [InlineData(SerialStatus.Received)]
+    [InlineData(SerialStatus.Collected)]
+    [InlineData(SerialStatus.InTransitSc)]
+    [InlineData(SerialStatus.InTransitTech)]
+    public void A_status_that_names_a_technician_needs_one(SerialStatus to)
     {
-        SerialService.ManualChangeBlocked(from, to, "SN-1").Should().BeNull();
+        SerialService.ManualChangeBlocked(to, null, "SN-1").Should().Contain("pick the technician");
+        SerialService.ManualChangeBlocked(to, 42, "SN-1").Should().BeNull();
+    }
+
+    /// <summary>And one that does not name a technician refuses to carry one. A holder on a unit that
+    /// is on the shelf, at a customer, on a bench or written off is a name no balance and no screen
+    /// agrees with.</summary>
+    [Theory]
+    [InlineData(SerialStatus.Shelfed)]
+    [InlineData(SerialStatus.Used)]
+    [InlineData(SerialStatus.Repaired)]
+    [InlineData(SerialStatus.ReturnedToSc)]
+    [InlineData(SerialStatus.UnderRepair)]
+    [InlineData(SerialStatus.Scrapped)]
+    // MISSING is in here deliberately: a lost unit keeps whatever custody it had, because that is
+    // the last true thing known about it.
+    [InlineData(SerialStatus.Missing)]
+    public void A_status_that_names_no_technician_refuses_one(SerialStatus to)
+    {
+        SerialService.ManualChangeBlocked(to, 42, "SN-1").Should().Contain("not a status a technician holds");
+        SerialService.ManualChangeBlocked(to, null, "SN-1").Should().BeNull();
+    }
+
+    /// <summary>DEFECTIVE takes one either way, and it is the only status that does: a faulty unit
+    /// genuinely sits on both sides - a technician holding it to send in, or one the counter found
+    /// broken on arrival, which ReceiveReturnAsync writes with no technician at all.</summary>
+    [Fact]
+    public void Defective_is_the_one_status_a_technician_is_optional_on()
+    {
+        SerialService.ManualChangeBlocked(SerialStatus.Defective, null, "SN-1").Should().BeNull();
+        SerialService.ManualChangeBlocked(SerialStatus.Defective, 42, "SN-1").Should().BeNull();
+
+        SerialService.TechnicianNeededFor(SerialStatus.Defective)
+            .Should().Be(SerialService.TechnicianNeed.Optional);
+        Enum.GetValues<SerialStatus>()
+            .Where(s => s != SerialStatus.Defective)
+            .Should().NotContain(s => SerialService.TechnicianNeededFor(s) == SerialService.TechnicianNeed.Optional);
+    }
+
+    /// <summary>Shelf straight to a technician is ALLOWED now, and that is the change. It used to be
+    /// refused outright because the unit would leave the shelf and arrive on no balance - a
+    /// technician's holding was only ever credited by issuing. Naming the technician is what was
+    /// missing, so with one named the change goes through and moves their holding.</summary>
+    [Fact]
+    public void A_shelf_unit_can_be_handed_to_a_named_technician()
+    {
+        SerialService.ManualChangeBlocked(SerialStatus.Received, 42, "SN-1").Should().BeNull();
+        SerialService.IsOnShelf(SerialStatus.Shelfed).Should().BeTrue();
+        SerialService.IsTechnicianStock(SerialStatus.Received).Should().BeTrue();
+    }
+
+    /// <summary>A custody correction moves a technician and never the warehouse. Pinned against the
+    /// rule every warehouse figure is read off, because carrying this on an Adjustment - which is
+    /// what it had to be before the type existed - would have moved a warehouse quantity that
+    /// nothing moved, inventing or destroying shop stock to record a change of hands.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public void A_custody_correction_moves_no_warehouse_quantity(int delta)
+    {
+        PSR.Service.Api.Reports.ReportsEndpoints
+            .WarehouseDelta(MovementType.CustodyCorrection, delta).Should().Be(0);
+        ConsumptionRules.Effect(MovementType.CustodyCorrection, delta).Should().BeNull();
     }
 
     /// <summary>Unused stock coming back from a technician is put away, not queued for a bench. The

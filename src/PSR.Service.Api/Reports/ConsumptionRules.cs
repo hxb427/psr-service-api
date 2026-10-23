@@ -97,6 +97,8 @@ internal static class ConsumptionRules
     /// IssueReceipt, ReturnDispatched, DefectiveOnArrival and the three Transfer types never touch the
     /// warehouse: they move stock between technicians, or between a technician and a courier. ShelfIn
     /// is shelf-side, and so is any part of a row covered by <paramref name="shelfQty"/>.
+    /// CustodyCorrection moves one technician's balance and nothing else - no goods entered or left
+    /// the shop, so there is no outflow to report.
     ///
     /// ShelfTransfer is the one deliberate hole in "this report equals the ledger's Outward column".
     /// It takes quantity off the warehouse without anything leaving the building: units already

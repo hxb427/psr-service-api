@@ -396,13 +396,11 @@ public static partial class ServicesEndpoints
         // the shop has never seen gets its record here. Either way it lands on SHELFED, which is what
         // "Keep in stock" means: put away, in hand, ready to issue.
         //
-        // The record is written for ANY job that names a unit, not only for a part flagged
-        // serial-tracked. The flag is a statement about how a part is ISSUED - whether the store must
-        // name units when handing them out - and reading it as permission to remember what came off a
-        // bench is what left the shelf reading as empty while jobs were stocked every day. A machine
-        // with a serial written on it that the shop has just kept is a unit on the shelf whatever the
-        // catalogue says about its code, and the serial is the only thing that tells the next person
-        // which of four identical boxes to pick up.
+        // Only a serial-tracked part reaches here - StockBlockedReason refuses the rest - so the unit
+        // always has a serial and the shelf always has something to show. An untracked part used to be
+        // shelved too, on the reasoning that a machine with a number written on it is worth
+        // remembering whatever the catalogue says. It is, but not HERE: the issue path only names
+        // units for a tracked part, so those units could be seen on the shelf and never taken off.
         if (tracked is not null)
             await serial.ShelveAsync(tracked.Id, uid, $"Kept from service and shelved on job {job.ServiceNo}", ct);
         else
@@ -424,13 +422,22 @@ public static partial class ServicesEndpoints
     /// unresolvable PS code means there is no catalogue item to file the unit under, and a job with
     /// no serial means a machine arrived on the rack that nothing afterwards can name.
     ///
-    /// THE SERIAL IS NOW REQUIRED OF EVERY JOB, not only of a serial-tracked item, and that is a
-    /// tightening. It follows from where the unit goes: the shelf is a register of units, counted by
-    /// unit and picked from by serial when something is issued. Before this, a job with a blank
-    /// serial added one to the warehouse quantity and recorded no unit at all, which was at least a
-    /// number. Now there is no quantity to fall back on - a blank serial would shelve nothing,
-    /// anywhere, and the machine would be on the rack with the system unaware of it. Refusing by name
-    /// and asking for the serial is the only honest answer, and the serial is on the machine.</summary>
+    /// TWO TIGHTENINGS, both following from where the unit goes. The shelf is a register of UNITS,
+    /// counted by unit and picked from by serial when something is issued, and there is no quantity
+    /// to fall back on any more.
+    ///
+    /// An item that is NOT serial-tracked cannot be shelved at all. Its units are indistinguishable
+    /// from each other by definition - the catalogue says the shop does not identify them - so there
+    /// is nothing to put on a register of units and nothing for an issue to pick. Shelving one anyway
+    /// produced a unit that could be seen on the shelf page and never issued off it, because the
+    /// issue path only names units for a tracked part.
+    ///
+    /// And a tracked item must carry its serial. A blank serial would shelve nothing, anywhere, and
+    /// leave the machine on the rack with the system unaware of it. Refusing by name and asking for
+    /// the serial is the only honest answer, and the serial is on the machine.
+    ///
+    /// Both refusals are recoverable from the desk: tick serial tracking on the item, or type the
+    /// serial onto the job. Neither invents anything.</summary>
     internal static string? StockBlockedReason(ServiceJob job, Part? part, string? unitSerial)
     {
         if (part is null)
@@ -439,6 +446,11 @@ public static partial class ServicesEndpoints
                   + "Set the PS code on the job first."
                 : $"No catalogue item matches PS code {job.PsCode.Trim()}, so {job.ServiceNo} cannot be "
                   + "added to stock. Correct the PS code, or add the item to the catalogue first.";
+
+        if (!part.IsSerialTracked)
+            return $"{part.ItemCode} - {part.Name} is not serial-tracked, so it cannot go on the shelf "
+                 + "- the shelf holds units picked by serial, and this item's units are not identified "
+                 + "individually. Turn on serial tracking for the item first if the shop keeps these.";
 
         if (string.IsNullOrWhiteSpace(unitSerial))
             return $"{job.ServiceNo} carries no serial number, so there is nothing to put on the shelf "

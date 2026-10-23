@@ -29,6 +29,11 @@ public enum MovementType
                   // at all, and that is the point: the shelf is counted by unit, not by quantity, so
                   // this row is the ledger's record that a unit arrived on it rather than a credit to
                   // anything. See StockMovement.ShelfQty.
+    CustodyCorrection, // one holder's balance += qty (signed), and NOTHING else. Written when the SN
+                  // screen moves a unit into or out of a technician's hands by hand: that changes who
+                  // holds usable stock, so a balance has to move, but no goods entered or left the
+                  // shop. The warehouse is deliberately untouched, which is why Adjustment could not
+                  // carry it - every report reads an Adjustment as a warehouse movement.
     ShelfTransfer, // warehouse -= qty, and nothing is credited: units that were already physically on
                   // the shelf stop being counted as warehouse stock. Written once, by the migration
                   // that separated the two pools, for stock that reached the shelf while the shelf WAS

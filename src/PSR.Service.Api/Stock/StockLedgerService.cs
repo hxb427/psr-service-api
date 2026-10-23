@@ -60,6 +60,43 @@ public class StockLedgerService(AppDbContext db)
             SerialNo = serialNo, Remarks = remarks,
         });
 
+    /// <summary>Move a unit onto, or off, a technician's balance because somebody said so on the SN
+    /// screen - not because goods moved.
+    ///
+    /// The gap this fills: a manual status change into RECEIVED put a unit in a technician's hands
+    /// and credited nobody, so they were holding stock that appeared on no balance and could not be
+    /// fitted, transferred or returned. Out of RECEIVED was the mirror - stock on their balance that
+    /// the serial ledger said was somewhere else.
+    ///
+    /// Its own movement type, and that is the point rather than tidiness. <c>Adjustment</c> is read
+    /// as a WAREHOUSE movement by the stock ledger and the consumption report, so carrying a
+    /// technician correction on one would have moved a warehouse figure that nothing moved -
+    /// inventing or destroying shop stock to record a change of hands. <c>CustodyCorrection</c>
+    /// touches one holder and is invisible to every warehouse-shaped report.
+    ///
+    /// <paramref name="delta"/> is signed: +1 when the unit joins their holding, -1 when it leaves.
+    /// A decrement is guarded, so a correction cannot drive a technician negative - it fails and says
+    /// so, which is the right outcome for a holding that was already wrong.</summary>
+    public async Task CustodyCorrectionAsync(long partId, long technicianId, int delta, long byUser,
+        long serialId, string remarks, CancellationToken ct)
+    {
+        if (delta == 0) return;
+        if (delta > 0)
+            await IncrementAsync(partId, technicianId, delta, ct);
+        else if (!await GuardedDecrementAsync(partId, technicianId, -delta, ct))
+            throw new StockException(
+                "That technician does not hold enough of this part for the change to come off their "
+                + "balance. Their holding is already lower than the units recorded against them, so "
+                + "correct the count first.");
+
+        db.StockMovements.Add(new StockMovement
+        {
+            PartId = partId, MovementType = MovementType.CustodyCorrection, Quantity = delta,
+            TechnicianId = technicianId, PerformedByUserId = byUser,
+            ReferenceType = "SERIAL_STATUS", ReferenceId = serialId, Remarks = remarks,
+        });
+    }
+
     /// <summary>Dispatch stock to a technician.
     ///
     /// <paramref name="shelfQty"/> is how many of the units came off the SHELF, which is decided by

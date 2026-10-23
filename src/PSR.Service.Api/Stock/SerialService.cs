@@ -62,18 +62,72 @@ public class SerialService(AppDbContext db)
     /// separate count could.</summary>
     internal static bool IsOnShelf(SerialStatus status) => ReIssuable.Contains(status);
 
+    /// <summary>Whether a unit in this status is counted on a TECHNICIAN's balance - stock they hold
+    /// and can fit on a job.
+    ///
+    /// Exactly one status, and the list of what is NOT on it is the useful half:
+    ///
+    /// <list type="bullet">
+    /// <item><c>Issued</c> - dispatched but not acknowledged. In a courier's van, on nobody's
+    /// balance; that gap is the whole reason the acknowledgement step exists.</item>
+    /// <item><c>Defective</c> - theirs to hold and send in for service, but not stock they can fit,
+    /// so deliberately on no balance.</item>
+    /// <item><c>Collected</c> - a customer's faulty unit they picked up. It was never the shop's
+    /// stock, so there is nothing to credit.</item>
+    /// <item><c>InTransitSc</c> / <c>InTransitTech</c> - gone from the sender, not yet arrived.</item>
+    /// </list>
+    ///
+    /// So a manual change moves a technician's quantity only when it crosses RECEIVED in or out, and
+    /// that is what <see cref="StockLedgerService.CustodyCorrectionAsync"/> is called for.</summary>
+    internal static bool IsTechnicianStock(SerialStatus status) => status == SerialStatus.Received;
+
+    /// <summary>Whether a status names a technician at all, and so whether the SN screen must ask
+    /// for one.
+    ///
+    /// REQUIRED for the five statuses that cannot be read without a name: who is it with, who is it
+    /// going to, who is sending it back. Those are the statuses
+    /// <see cref="SyncOwnerToStatusAsync"/> cannot resolve custody for on its own - and when no
+    /// technician was supplied it previously just fell through, leaving a unit whose status said
+    /// RECEIVED and whose owner still said the service centre. That is the silent wrong answer this
+    /// closes.
+    ///
+    /// OPTIONAL for <c>Defective</c> alone, because a faulty unit genuinely sits on either side: a
+    /// technician holding one to send in, or one the counter found broken on arrival
+    /// (<see cref="ReceiveReturnAsync"/> sets exactly that, with no technician).
+    ///
+    /// FORBIDDEN for the rest. A unit on the shelf, at a customer, on a bench or written off is not
+    /// in anybody's hands, and naming a technician against one of those would put a holder on a row
+    /// that no balance and no screen agrees with. <c>Missing</c> is in here deliberately: a lost
+    /// unit keeps whatever custody it had, because that is the last true thing known about it.</summary>
+    internal enum TechnicianNeed { Forbidden, Optional, Required }
+
+    internal static TechnicianNeed TechnicianNeededFor(SerialStatus status) => status switch
+    {
+        SerialStatus.Issued or SerialStatus.Received or SerialStatus.Collected
+            or SerialStatus.InTransitSc or SerialStatus.InTransitTech => TechnicianNeed.Required,
+        SerialStatus.Defective => TechnicianNeed.Optional,
+        _ => TechnicianNeed.Forbidden,
+    };
+
     /// <summary>Why this manual status change must not be applied, or null when it may be.
     ///
-    /// One transition is refused: a shelf unit straight into a technician's hands. It is the only
-    /// change where the unit would leave the shelf and arrive on no balance at all, because a
-    /// technician's usable holding is credited by issuing - a status edit has no issue, no quantity
-    /// and no technician balance behind it. Handing a unit over is an issue; saying so is more use
-    /// than silently losing it.</summary>
-    internal static string? ManualChangeBlocked(SerialStatus from, SerialStatus to, string serialNumber) =>
-        IsOnShelf(from) && to == SerialStatus.Received
-            ? $"{serialNumber} is on the shelf. Issue it to the technician instead - that is what "
-              + "moves the quantity onto their holding, which a status change cannot do."
-            : null;
+    /// Only the technician is checked here now. A shelf unit going straight to RECEIVED used to be
+    /// refused outright - the unit would have left the shelf and arrived on no balance, because a
+    /// technician's holding was only ever credited by issuing. It is allowed now BECAUSE the screen
+    /// names the technician and the change moves their balance, which is what was missing rather than
+    /// what was wrong about it. Handing a unit over is still better recorded as an issue, since that
+    /// is the thing that produces a challan and an acknowledgement; this is the correction for when
+    /// it was not.</summary>
+    internal static string? ManualChangeBlocked(SerialStatus to, long? technicianId, string serialNumber) =>
+        (TechnicianNeededFor(to), technicianId) switch
+        {
+            (TechnicianNeed.Required, null) =>
+                $"{to} says which technician holds {serialNumber}, so pick the technician.",
+            (TechnicianNeed.Forbidden, not null) =>
+                $"{to} is not a status a technician holds, so no technician can be set on "
+                + $"{serialNumber}. Leave it blank.",
+            _ => null,
+        };
 
     /// <summary>Returns serial → reason for any serial that cannot be issued for this part
     /// (duplicated in the request, or currently deployed elsewhere). Empty ⇒ all issuable.</summary>
@@ -346,13 +400,25 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
     /// SERVICE_CENTER, with-technician statuses flip to the serial's technician, installed/used flip
     /// to CUSTOMER, MISSING keeps the current custody. Returns null if the serial is missing.</summary>
     public async Task<ComponentSerial?> ChangeStatusAsync(
-        long serialId, SerialStatus newStatus, long byUser, string remarks, CancellationToken ct)
+        long serialId, SerialStatus newStatus, long byUser, string remarks, CancellationToken ct,
+        long? technicianId = null)
     {
         var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.Id == serialId, ct);
         if (c is null) return null;
         var old = c.Status.ToString();
         var now = DateTime.UtcNow;
         c.Status = newStatus;
+
+        // The technician goes on BEFORE custody is synced, because that is what the sync reads. With
+        // it set afterwards - or not at all - the RECEIVED / COLLECTED / IN_TRANSIT_TECH branch of
+        // SyncOwnerToStatusAsync simply does not match, and the unit ends up saying it is with a
+        // technician while its owner still says the service centre.
+        //
+        // Only where the status takes one. A status that forbids a technician keeps whatever custody
+        // the sync decides for it, which for MISSING means keeping what it had.
+        if (TechnicianNeededFor(newStatus) != TechnicianNeed.Forbidden && technicianId is { } tid)
+            c.TechnicianId = tid;
+
         await SyncOwnerToStatusAsync(c, ct);
         c.LastUpdatedAt = now;
         AddHistory(c, old, newStatus, byUser, remarks, now);

@@ -81,18 +81,24 @@ public static class SerialsEndpoints
             ToDto(row.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo), audit));
     }
 
-    /// <summary>Apply a manual status change.
+    /// <summary>Apply a manual status change, moving whatever balance the change implies.
     ///
-    /// No quantity moves with it, and that is now correct rather than an omission. A unit put back on
-    /// the shelf, or taken off it, moves the SHELF - and the shelf is counted by unit, as whichever
-    /// rows are SHELFED in the service centre's custody, so the status change IS the count change.
-    /// There is no second number to keep in step.
+    /// THE SHELF needs no quantity. A unit put on it, or taken off it, moves the shelf - and the
+    /// shelf is counted by unit, as whichever rows are SHELFED in the service centre's custody, so
+    /// the status change IS the count change. (This used to apply a +1/-1 to the WAREHOUSE, because
+    /// the shelf was then part of that count and the two could disagree: a unit written off as
+    /// missing and later found went re-issuable while the count stayed one short for ever.
+    /// Separating the two pools closed that by construction.)
     ///
-    /// This used to apply a +1/-1 to the warehouse here, because the shelf was then part of the
-    /// warehouse count and the two could disagree: a unit written off as missing and later found went
-    /// re-issuable while the count stayed one short for ever. Separating the shelf from the warehouse
-    /// closed that by construction. What remains refused is a shelf unit flipped straight to RECEIVED
-    /// - see <see cref="SerialService.ManualChangeBlocked"/>.</summary>
+    /// A TECHNICIAN does, and that is what this adds. Their holding is a quantity in
+    /// <c>stock_balances</c>, so a unit moving into or out of their hands has to move it - otherwise
+    /// a unit marked RECEIVED sits with somebody who cannot fit, transfer or return it, and a unit
+    /// marked off them leaves a quantity behind that the serial ledger says is elsewhere. Only
+    /// RECEIVED counts (<see cref="SerialService.IsTechnicianStock"/>), and a change between two
+    /// technicians moves both sides.
+    ///
+    /// Handing a unit over is still better done as an issue - that is what produces a challan and an
+    /// acknowledgement. This is the correction for when it was not.</summary>
     private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ChangeStatusAsync(
         long id, [FromBody] ChangeSerialStatusRequest req, ClaimsPrincipal user, AppDbContext db,
         SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
@@ -105,17 +111,34 @@ public static class SerialsEndpoints
 
         var before = await db.ComponentSerials.AsNoTracking()
             .Where(c => c.Id == id)
-            .Select(c => new { c.Status, c.PartId, c.SerialNumber })
+            .Select(c => new { c.Status, c.PartId, c.SerialNumber, c.TechnicianId })
             .FirstOrDefaultAsync(ct);
         if (before is null) return TypedResults.NotFound();
-        if (SerialService.ManualChangeBlocked(before.Status, newStatus, before.SerialNumber) is { } blocked)
+        if (SerialService.ManualChangeBlocked(newStatus, req.TechnicianId, before.SerialNumber) is { } blocked)
             return TypedResults.BadRequest(blocked);
+
+        // Checked by name before anything is written. Balances are keyed by user id, so crediting a
+        // non-technician would create a holding on a page that only lists technicians - stock that
+        // exists and that nobody can see or return, which is the same trap the direct issue guards.
+        if (req.TechnicianId is { } wanted)
+        {
+            var holder = await db.Users.AsNoTracking()
+                .Where(u => u.Id == wanted)
+                .Select(u => new { u.Id, u.Username, u.IsActive })
+                .FirstOrDefaultAsync(ct);
+            if (holder is null) return TypedResults.BadRequest("That technician does not exist.");
+            if (!holder.IsActive) return TypedResults.BadRequest($"{holder.Username} is deactivated.");
+            if (!await IsTechnicianAsync(db, wanted, ct))
+                return TypedResults.BadRequest(
+                    $"{holder.Username} is not a technician and cannot hold stock.");
+        }
 
         user.TryGetUserId(out var uid);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            var updated = await serial.ChangeStatusAsync(id, newStatus, uid, req.Remarks.Trim(), ct);
+            var updated = await serial.ChangeStatusAsync(id, newStatus, uid, req.Remarks.Trim(), ct,
+                req.TechnicianId);
             if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
 
             // A unit put ON the shelf by hand gets its shelf row, so the shelf's history reads the
@@ -126,8 +149,25 @@ public static class SerialsEndpoints
                 ledger.ShelveUnit(before.PartId, uid, "SERIAL_STATUS", id, before.SerialNumber,
                     $"{before.SerialNumber}: {before.Status} -> {newStatus} (manual)");
 
+            // The technician side. Written as two independent halves rather than one net move,
+            // because the holders can differ: correcting a unit from one technician to another takes
+            // it off the first and puts it on the second, and that is two balances and two rows. When
+            // the holder is the same person on both sides the two cancel and neither is written.
+            var heldBefore = SerialService.IsTechnicianStock(before.Status) ? before.TechnicianId : null;
+            var heldAfter = SerialService.IsTechnicianStock(newStatus) ? updated.TechnicianId : null;
+
+            if (heldBefore != heldAfter)
+            {
+                var note = $"{before.SerialNumber}: {before.Status} -> {newStatus} (manual)";
+                if (heldBefore is { } lost)
+                    await ledger.CustodyCorrectionAsync(before.PartId, lost, -1, uid, id, note, ct);
+                if (heldAfter is { } gained)
+                    await ledger.CustodyCorrectionAsync(before.PartId, gained, +1, uid, id, note, ct);
+            }
+
             audit.Log(uid, "serial.status", "component_serial", id,
-                details: newStatus.ToString(), ip: http.GetIp());
+                details: heldAfter is { } t ? $"{newStatus} (technician #{t})" : newStatus.ToString(),
+                ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -180,6 +220,15 @@ public static class SerialsEndpoints
     }
 
     // ---- helpers ----
+
+    /// <summary>Who may hold stock. Role-scoped the same way the issue paths are, and for the same
+    /// reason: a balance keyed to somebody who is not a technician is stock on a page nobody looks
+    /// at.</summary>
+    private static Task<bool> IsTechnicianAsync(AppDbContext db, long userId, CancellationToken ct) =>
+        (from ur in db.UserRoles
+         join r in db.Roles on ur.RoleId equals r.Id
+         where ur.UserId == userId && r.Name == RoleNames.Technician
+         select ur.UserId).AnyAsync(ct);
 
     private record SerialRow(ComponentSerial c, string ItemCode, string Name, string? TechName, string? ServiceNo);
 

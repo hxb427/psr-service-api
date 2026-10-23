@@ -401,14 +401,21 @@ public static class StockRequestsEndpoints
     /// and a fitted serial was validated against custody that in-house issues never created, so an
     /// in-house technician could neither transfer a tracked part nor record the unit they fitted.
     ///
+    /// SUPPLIED SERIALS ARE ALWAYS HONOURED, even for a part the catalogue does not mark tracked, and
+    /// that is a guard rather than a feature. The flag decides whether the store MUST name units; it
+    /// must not decide whether named units are believed. When it did, an issue of a part whose flag
+    /// had been turned off threw the serials away - so the warehouse was debited for units that came
+    /// off the shelf, and those units stayed SHELFED for ever: visible on the shelf page, impossible
+    /// to get off it. Honouring what was sent costs nothing when nothing was sent.
+    ///
     /// Returns the message to hand back, or null when the issue may go ahead.</summary>
     private static async Task<(bool NeedSerials, List<string> Serials, string? Error)> CheckSerialsAsync(
         Part part, User? holder, int qty, IReadOnlyList<string>? supplied,
         SerialService serial, CancellationToken ct)
     {
-        var needSerials = part.IsSerialTracked && holder is not null;
         var serials = (supplied ?? [])
             .Select(s => s?.Trim() ?? string.Empty).Where(s => s.Length > 0).ToList();
+        var needSerials = holder is not null && (part.IsSerialTracked || serials.Count > 0);
         if (!needSerials) return (false, serials, null);
 
         if (serials.Count != qty)

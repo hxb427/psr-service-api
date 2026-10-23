@@ -304,27 +304,30 @@ public static partial class ServicesEndpoints
             //    not dispatched, which is what this route checks before anything else.
             if (swap.OutgoingPartId is { } outPartId)
             {
-                // Back into the pool it came out of, which the swap row remembers. A unit that came
-                // off the shelf is credited no quantity - it is on the shelf again by status, and
-                // crediting the warehouse for it would turn a kept machine into purchased stock of
-                // its PS code, which is the one thing keeping the two pools apart exists to prevent.
-                // The unit's status cannot be read for this: SHELFED is where a cancelled unit lands
-                // whichever pool it came from.
-                await ledger.ReplacementReturnAsync(outPartId, 1, uid, job.Id, swap.OutgoingSerialNo,
-                    $"Advance replacement for {job.ServiceNo} cancelled — unit back on the shelf", ct, toShelf: swap.OutgoingFromShelf);
-                // SHELFED either way, which is the point of the toShelf above: the shelf IS the
-                // status, so a unit put back has to end up in it, and only the quantity side differs
-                // by where the unit came from.
+                // ONE condition drives both halves, and that is the whole point of writing it this
+                // way. A unit that comes back as a named SHELFED row is shelf stock, so no quantity is
+                // credited; one that comes back as a bare quantity has no unit record, so the
+                // warehouse is credited and nothing lands on the shelf. Deciding the two separately is
+                // what let them disagree: the quantity went back to the warehouse while a SHELFED row
+                // appeared as well, and that one machine was then counted twice - once as a unit on
+                // the shelf, once as an anonymous quantity in the warehouse.
                 //
-                // Recorded for any swap that named a unit, not only for a part flagged serial-tracked
-                // - same reason as "Keep in stock" on a job. The flag governs whether the store must
-                // name units when it ISSUES them; what physically came back is worth remembering
-                // either way, and the serial is what tells the next person which box this is. A swap
-                // with no serial on it still records nothing, because AcquireToServiceCentreAsync
-                // returns null for a blank serial.
+                // Derived rather than read off swap.OutgoingFromShelf, which records where the unit
+                // CAME from and is the wrong question here. What matters is whether this cancellation
+                // leaves a unit record behind, and AcquireToServiceCentreAsync writes one exactly when
+                // the part is tracked and the serial is not blank.
                 var outPart = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == outPartId, ct);
-                if (outPart is not null)
-                    await serial.AcquireToServiceCentreAsync(outPartId, swap.OutgoingSerialNo, outPart.Name,
+                var unitRecorded = outPart?.IsSerialTracked == true
+                    && !string.IsNullOrWhiteSpace(swap.OutgoingSerialNo);
+
+                await ledger.ReplacementReturnAsync(outPartId, 1, uid, job.Id, swap.OutgoingSerialNo,
+                    unitRecorded
+                        ? $"Advance replacement for {job.ServiceNo} cancelled - unit back on the shelf"
+                        : $"Advance replacement for {job.ServiceNo} cancelled - quantity back in the warehouse",
+                    ct, toShelf: unitRecorded);
+
+                if (unitRecorded)
+                    await serial.AcquireToServiceCentreAsync(outPartId, swap.OutgoingSerialNo, outPart!.Name,
                         SerialStatus.Shelfed, uid,
                         $"Advance replacement for {job.ServiceNo} cancelled before dispatch", ct);
             }

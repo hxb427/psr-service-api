@@ -132,15 +132,35 @@ and no lap of missing and found can mint anything. `WarehouseDeltaFor` and
 `SerialStatusCorrectionAsync` are both gone. A manual change onto the shelf writes a `ShelfIn` row,
 so the shelf's history reads the same however a unit got there, and that row moves no balance.
 
-**One transition is still refused:** shelf stock straight to `RECEIVED`. It is the only change where
-a unit would leave the shelf and arrive on no balance at all, because a technician's usable holding
-is credited by issuing. The error says to issue the unit instead.
+**The technician side, FIXED 2026-10-21.** A manual change into `RECEIVED` credited nobody, so the
+unit was in a technician's hands and on no balance: they could not fit it, transfer it or return it.
+Out of `RECEIVED` was the mirror — a quantity left on their holding that the serial ledger said was
+somewhere else.
 
-**Still not followed: the technician side.** A manual change into `RECEIVED` from an off-shelf status
-(say `MISSING` → `RECEIVED`) credits nobody, so the unit is in a technician's hands and on no
-balance. `MovementType.Adjustment` cannot carry it — the stock report reads every Adjustment as a
-warehouse movement — so this needs a movement type of its own. The refusal above covers the case
-where that would have lost a unit from the shelf; the rest is open.
+Three parts to it:
+
+* **The screen asks who.** `TechnicianNeededFor` makes a technician REQUIRED for the five statuses
+  that cannot be read without a name (`ISSUED`, `RECEIVED`, `COLLECTED`, `IN_TRANSIT_SC`,
+  `IN_TRANSIT_TECH`), OPTIONAL for `DEFECTIVE` alone — a faulty unit sits on either side — and
+  FORBIDDEN for the rest. `MISSING` is forbidden deliberately: a lost unit keeps whatever custody it
+  had, because that is the last true thing known about it.
+* **Custody is set before it is synced.** `SyncOwnerToStatusAsync` matches its technician branch only
+  `when c.TechnicianId is { } tid`, so a blank one silently fell through and left a unit saying
+  `RECEIVED` with owner `SERVICE_CENTER`. `ChangeStatusAsync` now sets the technician first.
+* **`MovementType.CustodyCorrection` carries the quantity.** Signed, one holder, never the warehouse.
+  It needed its own type for the reason this document gave: `Adjustment` is read as a warehouse
+  movement by both the stock ledger and the consumption report, so carrying a technician correction
+  on one would have moved a warehouse figure that nothing moved.
+
+`IsTechnicianStock` is the rule for when it fires, and it is one status: `RECEIVED`. Everything else
+a technician can hold is deliberately on no balance — `ISSUED` is in a van, `DEFECTIVE` is theirs to
+send in but not fittable, `COLLECTED` was never the shop's stock, and either in-transit has left the
+sender. A change between two technicians writes both halves.
+
+**Also lifted:** shelf stock straight to `RECEIVED` is no longer refused. It was refused because the
+unit would leave the shelf and arrive on no balance; naming the technician is what was missing rather
+than what was wrong about it. Issuing remains the better route, since that is what produces a challan
+and an acknowledgement.
 
 ## Open, and why they need a decision rather than a patch
 
