@@ -84,6 +84,7 @@ app.MapSerialEndpoints();
 app.MapStockAckEndpoints();
 app.MapTransferEndpoints();
 app.MapFieldOpsEndpoints();
+app.MapFieldCallEndpoints();
 app.MapMachineTestEndpoints();
 app.MapCustomerEndpoints();
 app.MapServiceEndpoints();

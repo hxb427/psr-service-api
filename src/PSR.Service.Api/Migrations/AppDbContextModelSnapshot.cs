@@ -405,6 +405,113 @@ namespace PSR.Service.Api.Migrations
                     b.ToTable("districts", (string)null);
                 });
 
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldCall", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("AttendedDate")
+                        .HasColumnType("date")
+                        .HasColumnName("attended_date");
+
+                    b.Property<string>("CallNo")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("varchar(40)")
+                        .HasColumnName("call_no");
+
+                    b.Property<DateTime>("CallReceivedDate")
+                        .HasColumnType("date")
+                        .HasColumnName("call_received_date");
+
+                    b.Property<string>("CallReferenceNo")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)")
+                        .HasColumnName("call_reference_no");
+
+                    b.Property<string>("CallStatus")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasColumnName("call_status");
+
+                    b.Property<string>("CallType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)")
+                        .HasColumnName("call_type");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CustomerAddress")
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)")
+                        .HasColumnName("customer_address");
+
+                    b.Property<long?>("CustomerId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("customer_id");
+
+                    b.Property<string>("CustomerName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .HasColumnName("customer_name");
+
+                    b.Property<long>("EngineerId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("engineer_id");
+
+                    b.Property<string>("Locality")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasColumnName("locality");
+
+                    b.Property<string>("MachineModel")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)")
+                        .HasColumnName("machine_model");
+
+                    b.Property<string>("MachineSerial")
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)")
+                        .HasColumnName("machine_serial");
+
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)")
+                        .HasColumnName("remarks");
+
+                    b.Property<string>("SoftwareVersion")
+                        .HasMaxLength(50)
+                        .HasColumnType("varchar(50)")
+                        .HasColumnName("software_version");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CallNo")
+                        .IsUnique();
+
+                    b.HasIndex("CallReceivedDate");
+
+                    b.HasIndex("CallStatus");
+
+                    b.HasIndex("CallType");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("EngineerId");
+
+                    b.ToTable("field_calls", (string)null);
+                });
+
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSale", b =>
                 {
                     b.Property<long>("Id")
@@ -944,6 +1051,12 @@ namespace PSR.Service.Api.Migrations
                             Key = "FIELD_SALE",
                             NextValue = 1L,
                             Prefix = "FSL"
+                        },
+                        new
+                        {
+                            Key = "FIELD_CALL",
+                            NextValue = 1L,
+                            Prefix = "CAL"
                         },
                         new
                         {
@@ -2925,6 +3038,20 @@ namespace PSR.Service.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("State");
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldCall", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.Customer", null)
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("EngineerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSale", b =>

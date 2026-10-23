@@ -22,6 +22,11 @@ public static class SequenceKeys
     public const string FieldService = "FIELD_SERVICE";
     public const string FieldSale = "FIELD_SALE";
 
+    /// <summary>The engineer call register (CALnnnnn). Its own book rather than a share of
+    /// <see cref="FieldService"/>'s: a call is logged whether or not it ends in a service, so hanging
+    /// the two off one counter would leave gaps in the service numbering for every demo attended.</summary>
+    public const string FieldCall = "FIELD_CALL";
+
     // Counter/spare sales of warehouse stock (legacy sparesales).
     public const string SpareSale = "SPARE_SALE";
     public const string SpareSaleReturn = "SPARE_SALE_RETURN";
