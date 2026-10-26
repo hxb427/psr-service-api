@@ -15,8 +15,10 @@ namespace PSR.Service.Api.Stock;
 /// A register and not a workflow. Creating an entry writes one row and nothing else — no stock
 /// movement, no serial transition, no pricing, no document. That is why this sits in its own file
 /// instead of joining <see cref="FieldOpsEndpoints"/>, whose every handler exists to drive the
-/// ledger: there is no transaction to open here, because there is nothing a half-finished save could
-/// leave inconsistent.</summary>
+/// ledger: nothing a half-finished save here could leave inconsistent. It still opens a transaction,
+/// but only for the call number — <see cref="NumberSequenceService"/> holds its row lock, and so
+/// keeps its promise of a unique number, for exactly as long as an enclosing transaction and no
+/// longer. It refuses to hand one out without it.</summary>
 public static class FieldCallsEndpoints
 {
     public static IEndpointRouteBuilder MapFieldCallEndpoints(this IEndpointRouteBuilder app)
@@ -91,7 +93,10 @@ public static class FieldCallsEndpoints
         return q.OrderByDescending(c => c.CallReceivedDate).ThenByDescending(c => c.Id).Take(take);
     }
 
-    private static async Task<Results<Created<FieldCallDto>, BadRequest<string>>> CreateAsync(
+    /// <summary>Internal for the same reason as <see cref="RegisterQuery"/>: so a test can run the
+    /// handler without a server. What only shows up when it runs is the transaction below — the
+    /// sequence refuses a number without one, and no compiler or route check can see that.</summary>
+    internal static async Task<Results<Created<FieldCallDto>, BadRequest<string>>> CreateAsync(
         [FromBody] CreateFieldCallRequest req, ClaimsPrincipal user, AppDbContext db,
         NumberSequenceService seq, IAuditService audit, HttpContext http, CancellationToken ct)
     {
@@ -140,15 +145,21 @@ public static class FieldCallsEndpoints
 
         if (FieldCallRules.Lengths(call) is { } lengthErr) return TypedResults.BadRequest(lengthErr);
 
-        call.CallNo = await seq.NextAsync(SequenceKeys.FieldCall, ct);
-        db.FieldCalls.Add(call);
-        // Saved before the audit row so that row can carry the id of the call it describes.
-        await db.SaveChangesAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            call.CallNo = await seq.NextAsync(SequenceKeys.FieldCall, ct);
+            db.FieldCalls.Add(call);
+            // Saved before the audit row so that row can carry the id of the call it describes.
+            await db.SaveChangesAsync(ct);
 
-        audit.Log(uid, "field-call.create", "field_call", call.Id,
-            details: $"{call.CallNo} {call.CallType} {call.CallStatus} '{call.CustomerName}'",
-            ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
+            audit.Log(uid, "field-call.create", "field_call", call.Id,
+                details: $"{call.CallNo} {call.CallType} {call.CallStatus} '{call.CustomerName}'",
+                ip: http.GetIp());
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
         return TypedResults.Created($"/field-calls/{call.Id}",
             ToDto(call, await EngineerNameAsync(db, uid, ct)));
