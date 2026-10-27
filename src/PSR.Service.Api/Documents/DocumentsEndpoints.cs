@@ -23,6 +23,10 @@ public static class DocumentsEndpoints
         docs.MapPost("/", GenerateAsync).RequireAuthorization("DocumentManage");          // multi-job generate (saves)
         docs.MapPost("/sale/preview", PreviewSaleAsync).RequireAuthorization("DocumentManage");
         docs.MapPost("/sale", GenerateSaleAsync).RequireAuthorization("DocumentManage");  // spare-sale PI / invoice
+        // A challan for parts going out as paperwork only, raised from the stock register. Items typed
+        // on the form, no job and no sale behind it, and NOTHING moved in the stock books.
+        docs.MapPost("/parts-challan/preview", PreviewPartsChallanAsync).RequireAuthorization("DocumentManage");
+        docs.MapPost("/parts-challan", GeneratePartsChallanAsync).RequireAuthorization("DocumentManage");
         docs.MapGet("/", ListAsync);
         docs.MapGet("/{id:long}", GetAsync);
         docs.MapGet("/{id:long}/pdf", PdfAsync);
@@ -120,6 +124,43 @@ public static class DocumentsEndpoints
         return TypedResults.Created($"/documents/{docId}", dto);
     }
 
+    private static async Task<Results<FileContentHttpResult, BadRequest<string>>> PreviewPartsChallanAsync(
+        [FromBody] GeneratePartsChallanRequest req, ClaimsPrincipal user,
+        BillingService billing, CompanyInfo company, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        try
+        {
+            // Computed only — nothing saved, and no number taken out of the PDC book for a preview
+            // that may never be kept.
+            var doc = await billing.BuildPartsChallanAsync(req, uid, ct);
+            var bytes = DocumentPdf.Render(doc, company, "PREVIEW — NOT SAVED");
+            return TypedResults.File(bytes, "application/pdf", "parts-challan-preview.pdf");
+        }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
+    }
+
+    private static async Task<Results<Created<DocumentDto>, BadRequest<string>>> GeneratePartsChallanAsync(
+        [FromBody] GeneratePartsChallanRequest req, ClaimsPrincipal user,
+        AppDbContext db, BillingService billing, IAuditService audit, HttpContext http, CancellationToken ct)
+    {
+        user.TryGetUserId(out var uid);
+        long docId;
+        try
+        {
+            docId = await billing.GeneratePartsChallanAsync(req, uid, ct);
+        }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
+
+        var dto = await BuildDtoAsync(db, docId, ct);
+        audit.Log(uid, "document.generate", "service_document", docId,
+            details: $"{dto.DocType} {dto.DocNo} — parts challan for {dto.PartyName}, "
+                + $"{dto.Lines.Count} item(s), no stock movement", ip: http.GetIp());
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Created($"/documents/{docId}", dto);
+    }
+
     private static async Task<Ok<List<DocumentListItemDto>>> ListForSaleAsync(long saleId, AppDbContext db, CancellationToken ct)
     {
         var rows = await db.ServiceDocuments.AsNoTracking()
@@ -201,7 +242,12 @@ public static class DocumentsEndpoints
             ? await db.SpareSales.AsNoTracking().Where(s => s.Id == sid).Select(s => s.SaleNo).FirstOrDefaultAsync(ct)
             : null;
         return new DocumentListItemDto(d.Id, d.DocType.ToString(), d.DocNo, d.DocDate, jobCount, d.PartyName,
-            d.TotalAmount, d.SpareSaleId is null ? "Service" : "Sale", saleNo);
+            d.TotalAmount,
+            // A parts challan bills neither a job nor a sale, so it is neither of the two labels this
+            // register started with — left on "Service" it would read as a service document covering
+            // no jobs, which is what a half-written one looks like.
+            d.SpareSaleId is not null ? "Sale" : jobCount > 0 ? "Service" : "Parts",
+            saleNo);
     }
 
     private static async Task<DocumentDto> BuildDtoAsync(AppDbContext db, long id, CancellationToken ct)

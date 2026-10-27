@@ -145,6 +145,7 @@ public class NumberSequenceConfiguration : IEntityTypeConfiguration<NumberSequen
             new NumberSequence { Key = SequenceKeys.Invoice, Prefix = "INV", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.DeliveryChallan, Prefix = "DC", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.StockIssueDc, Prefix = "SDC", NextValue = 1, Year = 2026 },
+            new NumberSequence { Key = SequenceKeys.PartsChallan, Prefix = "PDC", NextValue = 1, Year = 2026 },
             new NumberSequence { Key = SequenceKeys.Transfer, Prefix = "TRF", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldService, Prefix = "FSV", NextValue = 1 },
             new NumberSequence { Key = SequenceKeys.FieldSale, Prefix = "FSL", NextValue = 1 },

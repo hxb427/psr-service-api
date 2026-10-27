@@ -445,6 +445,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(20)")
                         .HasColumnName("call_type");
 
+                    b.Property<string>("ContactPhone")
+                        .HasMaxLength(50)
+                        .HasColumnType("varchar(50)")
+                        .HasColumnName("contact_phone");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)")
                         .HasColumnName("created_at");
@@ -489,10 +494,19 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(1000)")
                         .HasColumnName("remarks");
 
+                    b.Property<string>("ReportedComplaint")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)")
+                        .HasColumnName("reported_complaint");
+
                     b.Property<string>("SoftwareVersion")
                         .HasMaxLength(50)
                         .HasColumnType("varchar(50)")
                         .HasColumnName("software_version");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("updated_at");
 
                     b.HasKey("Id");
 
@@ -732,6 +746,10 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("int")
                         .HasColumnName("district_id");
 
+                    b.Property<long?>("FieldCallId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("field_call_id");
+
                     b.Property<decimal?>("Latitude")
                         .HasPrecision(9, 6)
                         .HasColumnType("decimal(9,6)")
@@ -853,6 +871,8 @@ namespace PSR.Service.Api.Migrations
                     b.HasIndex("CreatedAt");
 
                     b.HasIndex("DistrictId");
+
+                    b.HasIndex("FieldCallId");
 
                     b.HasIndex("ServiceChargeId");
 
@@ -1032,6 +1052,13 @@ namespace PSR.Service.Api.Migrations
                             Key = "STOCK_ISSUE_DC",
                             NextValue = 1L,
                             Prefix = "SDC",
+                            Year = 2026
+                        },
+                        new
+                        {
+                            Key = "PARTS_DC",
+                            NextValue = 1L,
+                            Prefix = "PDC",
                             Year = 2026
                         },
                         new
@@ -3089,6 +3116,11 @@ namespace PSR.Service.Api.Migrations
                     b.HasOne("PSR.Service.Api.Data.Entities.District", null)
                         .WithMany()
                         .HasForeignKey("DistrictId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.FieldCall", null)
+                        .WithMany()
+                        .HasForeignKey("FieldCallId")
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("PSR.Service.Api.Data.Entities.ServiceCharge", null)

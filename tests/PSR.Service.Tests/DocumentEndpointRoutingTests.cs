@@ -56,6 +56,10 @@ public class DocumentEndpointRoutingTests
     [InlineData("/documents/quote")]
     [InlineData("/documents/preview")]
     [InlineData("/documents/sale/preview")]
+    // The parts challan: items typed on the form, no job and no sale behind it. Two routes, because a
+    // preview must be reachable without a number being taken out of the PDC book.
+    [InlineData("/documents/parts-challan/preview")]
+    [InlineData("/documents/parts-challan")]
     public void Route_is_registered(string route)
     {
         var routes = BuildDocumentEndpoints().OfType<RouteEndpoint>()

@@ -13,6 +13,8 @@ namespace PSR.Service.Api.Documents;
 /// for — the figures are the declared value of what is in the box, which is what transit needs and what a
 /// customer receiving a free replacement signs against. A challan raised before that existed carries no
 /// value at all, and reprints as it was issued: without the money columns rather than with a page of zeros.
+/// A parts challan — spares going out to a dealer or a technician, with no job behind any line — reads
+/// off the same guard from the other side: its lines are goods, so it prints the spare-sale table.
 ///
 /// Both kinds of line print their money columns tax-EXCLUSIVE, so the last column adds up to the Taxable
 /// Value in the totals block directly underneath it and the GST is added once, below the table. A serviced
@@ -38,9 +40,7 @@ public static class DocumentPdf
             _ => "Delivery Challan",
         };
         var showMoney = ShowsMoney(doc);
-        // A spare sale bills catalogue items, so warranty and inward-challan columns are meaningless —
-        // it prints HSN instead, which a serviced unit doesn't carry.
-        var isSale = doc.SpareSaleId is not null;
+        var isGoods = ShowsGoodsColumns(doc);
         // A per-line remark prints under its own description rather than in a column of its own. It is
         // optional and usually unused (a spare-sale line never has one), so a column for it spent width
         // on nothing most of the time — and with HSN and Unit now on the table there was no width spare
@@ -121,7 +121,7 @@ public static class DocumentPdf
                             c.ConstantColumn(18);    // sr
                             c.RelativeColumn(1);     // description (+ the line's remark under it)
                             c.ConstantColumn(46);    // hsn / sac
-                            if (isSale)
+                            if (isGoods)
                             {
                                 c.ConstantColumn(40);    // gst %
                             }
@@ -149,7 +149,7 @@ public static class DocumentPdf
                             Head("#");
                             Head("Description");
                             Head("HSN/SAC");
-                            if (isSale) { Head("GST %", true); }
+                            if (isGoods) { Head("GST %", true); }
                             else { Head("Serial"); Head("Warranty"); Head("Service Challan"); }
                             Head("Qty", true);
                             Head("Unit");
@@ -168,7 +168,7 @@ public static class DocumentPdf
                                     d.Item().Text(l.Remarks).FontSize(7.5f).Italic().FontColor(Colors.Grey.Darken1);
                             });
                             table.Cell().Element(Body).Text(l.HsnCode ?? "-").FontSize(8);
-                            if (isSale)
+                            if (isGoods)
                             {
                                 table.Cell().Element(Body).AlignRight().Text(l.GstPercent.ToString("0.##")).FontSize(8);
                             }
@@ -240,6 +240,18 @@ public static class DocumentPdf
             });
         });
     }
+
+    /// <summary>Whether the table prints the GOODS column set — HSN and a GST % — rather than the
+    /// serial / warranty / inward-challan trio a serviced unit carries. The two sets are mutually
+    /// exclusive because there is only so much A4 to go round.
+    ///
+    /// Read off the lines, not off <see cref="ServiceDocument.SpareSaleId"/>. A spare sale is one source
+    /// of catalogue lines and a parts delivery challan — spares going out to a dealer or a technician,
+    /// billing no sale at all — is the other, and on the challan the trio would print three columns of
+    /// dashes where the tax rate should be. Every line of a service document carries its job, and every
+    /// line of the other two carries none, so the lines themselves say which document this is.</summary>
+    public static bool ShowsGoodsColumns(ServiceDocument doc)
+        => doc.Lines.Count > 0 && doc.Lines.All(l => l.ServiceJobId is null);
 
     /// <summary>Whether a document prints its money columns and its totals block.
     ///

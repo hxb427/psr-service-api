@@ -372,6 +372,117 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         return doc.Id;
     }
 
+    // ================================================================ parts challans
+
+    /// <summary>Validate + compute a parts delivery challan. Nothing is persisted and no number is
+    /// allocated; <see cref="GeneratePartsChallanAsync"/> does that.
+    ///
+    /// This is the one document path with no record underneath it. A service document covers jobs and a
+    /// sale document bills a sale; a parts challan is paperwork for spares leaving the counter — to a
+    /// dealer, or to a field technician — typed on the form and priced off the parts master. Which
+    /// also means it has nothing to stamp a number back onto, and nothing to move: the register, the
+    /// ledger and the stock balances are untouched by this and by the generate call below.</summary>
+    public async Task<ServiceDocument> BuildPartsChallanAsync(GeneratePartsChallanRequest req, long userId,
+        CancellationToken ct)
+    {
+        var lines = req.Lines ?? new List<PartsChallanLineRequest>();
+        if (lines.Count == 0) throw new BillingException("Add at least one item to the challan.");
+        // One parcel, one recipient. Both filled in is a form that cannot say who signs for the goods.
+        if (req.DealerId is not null && req.TechnicianUserId is not null)
+            throw new BillingException("A challan goes to one party — pick either a dealer or a technician.");
+
+        // A technician is a user account, not a party master: there is no address or GSTIN to fall back
+        // on, so the name is taken off the record and everything else is whatever the form carried.
+        var partyName = req.PartyName;
+        if (req.TechnicianUserId is { } tid)
+        {
+            var tech = await db.Users.AsNoTracking().Where(u => u.Id == tid)
+                           .Select(u => new { u.Username, u.FullName }).FirstOrDefaultAsync(ct)
+                       ?? throw new BillingException("That technician was not found.");
+            if (string.IsNullOrWhiteSpace(partyName))
+                partyName = string.IsNullOrWhiteSpace(tech.FullName) ? tech.Username : tech.FullName;
+        }
+
+        var party = await ResolvePartyAsync(req.DealerId, null, partyName, req.PartyAddress,
+            req.PartyGstin, req.PartyState, req.PartyStateCode, ct);
+
+        // Which rate column the master is read off, the same way a counter sale decides it.
+        var isDealer = req.DealerId is not null;
+
+        var doc = NewDocument(DocumentType.DC, party, req.DocDate, req.ConsigneeAddress,
+            req.CourierMode, req.CourierCharges, req.Remarks, userId);
+
+        decimal taxable = 0, tax = 0;
+        foreach (var l in lines)
+        {
+            if (l.Qty < 1) throw new BillingException("Quantity must be at least 1.");
+
+            // One at a time rather than one Contains filter over the lot — see BuildAsync for why.
+            var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == l.PartId, ct)
+                       ?? throw new BillingException($"Part {l.PartId} was not found.");
+
+            // Tax-exclusive, like every goods line: the master's own rates are exclusive and the challan
+            // prints an exclusive column. A typed rate is honoured as it stands — a dispatch note
+            // DECLARES a value for transit rather than billing one, so there is no master figure for it
+            // to be wrong against, which is also why the hand-pricing switch does not reach here (see
+            // the DC exemption in BuildAsync).
+            var unitRate = l.UnitRate ?? (isDealer ? part.DealerRate : part.CustomerRate);
+            if (unitRate < 0) throw new BillingException($"{part.ItemCode}: the rate cannot be negative.");
+
+            var lineTaxable = Math.Round(unitRate * l.Qty, 2);
+            var lineTax = Math.Round(lineTaxable * part.GstPercent / 100m, 2);
+            taxable += lineTaxable;
+            tax += lineTax;
+
+            doc.Lines.Add(new ServiceDocumentLine
+            {
+                // No job behind the line, and a catalogue item in front of it — which is what the PDF
+                // reads to print the goods columns rather than the serial/warranty/challan trio.
+                ServiceJobId = null,
+                PartId = part.Id,
+                Description = string.IsNullOrWhiteSpace(l.Description)
+                    ? $"{part.Name} ({part.ItemCode})"
+                    : l.Description.Trim(),
+                SerialNo = null,
+                Warranty = null,                 // meaningless on parts going out, as on a spare sale
+                ServiceChallan = null,
+                // The catalogue's code unless somebody typed over it. Not refused when both are empty:
+                // a spare-sale PI — an actual billing document — prints what the master has and no
+                // more, and a challan has no business being stricter than the invoice beside it.
+                HsnCode = string.IsNullOrWhiteSpace(l.HsnCode) ? part.HsnCode : l.HsnCode.Trim(),
+                Unit = string.IsNullOrWhiteSpace(l.Unit) ? part.Unit : l.Unit.Trim(),
+                Qty = l.Qty,
+                UnitRate = unitRate,
+                TaxableAmount = lineTaxable,
+                GstPercent = part.GstPercent,
+                TaxAmount = lineTax,
+                LineTotal = lineTaxable + lineTax,
+                Remarks = null,
+            });
+        }
+
+        ApplyTotals(doc, taxable, tax);
+        return doc;
+    }
+
+    /// <summary>Persist a parts challan: allocate the number and write the document. That is the whole
+    /// of it — there is no job to stamp, no sale to mark, and deliberately no stock movement. The
+    /// number comes out of its own book (<see cref="SequenceKeys.PartsChallan"/>, PDC), so neither the
+    /// customer challan register nor the store's issue dockets gain a number with nothing behind
+    /// it.</summary>
+    public async Task<long> GeneratePartsChallanAsync(GeneratePartsChallanRequest req, long userId,
+        CancellationToken ct)
+    {
+        var doc = await BuildPartsChallanAsync(req, userId, ct);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        doc.DocNo = await seq.NextAsync(SequenceKeys.PartsChallan, ct);
+        db.ServiceDocuments.Add(doc);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return doc.Id;
+    }
+
     // ================================================================ quoting
 
     /// <summary>What one job's own service lines price it at, before any manager edit: the tax-inclusive

@@ -41,4 +41,14 @@ public static class SequenceKeys
     /// unit going back, and interleaving the two would put a technician's parts docket in the middle of
     /// the numbering a customer document is audited on.</summary>
     public const string StockIssueDc = "STOCK_ISSUE_DC";
+
+    /// <summary>The challan a parts dispatch goes out on as paperwork only — spares sent to a dealer or
+    /// a field technician, raised from the stock register, moving nothing in the books.
+    ///
+    /// Its own book rather than a share of either challan sequence above. <see cref="DeliveryChallan"/>
+    /// is the customer's outward challan for a repaired unit and is read as one continuous run, so a
+    /// parts docket in the middle of it is a gap somebody has to account for; and every number out of
+    /// <see cref="StockIssueDc"/> is a consignment that physically left the store, which a document
+    /// that moves no stock would make untrue.</summary>
+    public const string PartsChallan = "PARTS_DC";
 }
