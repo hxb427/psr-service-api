@@ -62,6 +62,39 @@ internal static class FieldCallRules
         return (received, attended, null);
     }
 
+    /// <summary>The status a call carries once a visit filed against it has said how it went.
+    ///
+    /// Forward only, and the asymmetry is the whole rule. A visit reporting Complete completes the
+    /// call, which is what takes it off the engineer's open list. A visit reporting Incomplete says
+    /// nothing at all about a call that is already Complete: a second engineer whose afternoon ran
+    /// out must not retract the finished work somebody else recorded, and there is no step anywhere
+    /// in this register that reopens anything (see <see cref="FieldCallStatus"/>).
+    ///
+    /// So "Incomplete" here means leave it open, not set it open — and a call left open is one the
+    /// service entry form will offer again for the next visit, which is exactly what was asked
+    /// of it.</summary>
+    public static FieldCallStatus AfterVisit(FieldCallStatus current, FieldCallStatus reported)
+        => current == FieldCallStatus.Complete || reported == FieldCallStatus.Complete
+            ? FieldCallStatus.Complete
+            : FieldCallStatus.Incomplete;
+
+    /// <summary>Why a correction may not put <paramref name="next"/> on a call that currently stands
+    /// at <paramref name="current"/>, or null when it may.
+    ///
+    /// The same forward-only rule <see cref="AfterVisit"/> holds, and the reason is the same: a
+    /// completed call is finished business, and the register has no step that reopens anything. What
+    /// differs is the answer to a request to go backwards — clamped there, refused here.
+    ///
+    /// That asymmetry is deliberate. A visit's toggle answers "am I finished here", so an Incomplete
+    /// against a call somebody else already finished is a statement about the visit and is rightly
+    /// ignored. An edit is not a statement about anything: it is somebody choosing Incomplete off a
+    /// dropdown, and quietly storing Complete instead would show them a save that did not happen.
+    /// They would reload the call, see it closed, and have no way to know the form had lied.</summary>
+    public static string? Reopening(FieldCallStatus current, FieldCallStatus next)
+        => current == FieldCallStatus.Complete && next == FieldCallStatus.Incomplete
+            ? "A completed call cannot be reopened. Log the next visit as a new call."
+            : null;
+
     /// <summary>Why the value will not fit its column, or null when it will.
     ///
     /// Checked because nothing else checks it: this API registers no validation filter, so the
@@ -83,6 +116,8 @@ internal static class FieldCallRules
         TooLong(call.CustomerName, 200, "Customer name")
         ?? TooLong(call.CustomerAddress, 500, "Customer address")
         ?? TooLong(call.CallReferenceNo, 100, "Call reference number")
+        ?? TooLong(call.ContactPhone, 50, "Phone")
+        ?? TooLong(call.ReportedComplaint, 1000, "Reported complaint")
         ?? TooLong(call.MachineModel, 100, "Machine model")
         ?? TooLong(call.MachineSerial, 100, "Machine/part serial")
         ?? TooLong(call.SoftwareVersion, 50, "Software version")

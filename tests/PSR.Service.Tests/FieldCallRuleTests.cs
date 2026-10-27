@@ -196,15 +196,20 @@ public class FieldCallRuleTests
     }
 
     [Theory]
-    [InlineData(201, 500, 100, 100, 100, 50, 1000, "Customer name")]
-    [InlineData(200, 501, 100, 100, 100, 50, 1000, "Customer address")]
-    [InlineData(200, 500, 101, 100, 100, 50, 1000, "Call reference number")]
-    [InlineData(200, 500, 100, 101, 100, 50, 1000, "Machine model")]
-    [InlineData(200, 500, 100, 100, 101, 50, 1000, "Machine/part serial")]
-    [InlineData(200, 500, 100, 100, 100, 51, 1000, "Software version")]
-    [InlineData(200, 500, 100, 100, 100, 50, 1001, "Remarks")]
+    [InlineData(201, 500, 100, 100, 100, 50, 1000, 50, 1000, "Customer name")]
+    [InlineData(200, 501, 100, 100, 100, 50, 1000, 50, 1000, "Customer address")]
+    [InlineData(200, 500, 101, 100, 100, 50, 1000, 50, 1000, "Call reference number")]
+    [InlineData(200, 500, 100, 101, 100, 50, 1000, 50, 1000, "Machine model")]
+    [InlineData(200, 500, 100, 100, 101, 50, 1000, 50, 1000, "Machine/part serial")]
+    [InlineData(200, 500, 100, 100, 100, 51, 1000, 50, 1000, "Software version")]
+    [InlineData(200, 500, 100, 100, 100, 50, 1001, 50, 1000, "Remarks")]
+    // The two fields a service entry prefills from. Their widths match the equivalents on
+    // field_services, so a complaint that fits the visit fits the call it came from.
+    [InlineData(200, 500, 100, 100, 100, 50, 1000, 51, 1000, "Phone")]
+    [InlineData(200, 500, 100, 100, 100, 50, 1000, 50, 1001, "Reported complaint")]
     public void One_character_over_is_named_in_the_error(
-        int name, int address, int reference, int model, int serial, int version, int remarks, string expected)
+        int name, int address, int reference, int model, int serial, int version, int remarks,
+        int phone, int complaint, string expected)
     {
         // Without this check the string reaches MySQL, which either throws (a 500 for what is plainly
         // a bad request) or truncates it silently.
@@ -217,6 +222,8 @@ public class FieldCallRuleTests
             MachineSerial = new string('e', serial),
             SoftwareVersion = new string('f', version),
             Remarks = new string('g', remarks),
+            ContactPhone = new string('1', phone),
+            ReportedComplaint = new string('h', complaint),
         });
 
         error.Should().NotBeNull();
@@ -230,5 +237,79 @@ public class FieldCallRuleTests
         var padded = "  " + new string('a', 200) + "  ";
 
         FieldCallRules.TooLong(padded, 200, "Customer name").Should().BeNull();
+    }
+
+    // ---------------------------------------------------------------- after a visit
+
+    [Fact]
+    public void A_visit_that_finished_the_job_completes_the_call()
+    {
+        // The whole point of the toggle: the call drops off the engineer's open list, so nobody is
+        // sent back out to a machine that is already working.
+        FieldCallRules.AfterVisit(FieldCallStatus.Incomplete, FieldCallStatus.Complete)
+            .Should().Be(FieldCallStatus.Complete);
+    }
+
+    [Fact]
+    public void A_visit_that_did_not_finish_leaves_the_call_open_for_the_next_one()
+    {
+        FieldCallRules.AfterVisit(FieldCallStatus.Incomplete, FieldCallStatus.Incomplete)
+            .Should().Be(FieldCallStatus.Incomplete);
+    }
+
+    [Fact]
+    public void A_completed_call_is_not_reopened_by_a_later_visit_that_ran_out_of_time()
+    {
+        // One engineer's unfinished afternoon must not retract the finished work another already
+        // recorded - and nothing in this register reopens anything, so there would be no way back.
+        FieldCallRules.AfterVisit(FieldCallStatus.Complete, FieldCallStatus.Incomplete)
+            .Should().Be(FieldCallStatus.Complete);
+    }
+
+    [Fact]
+    public void A_completed_call_stays_completed()
+    {
+        FieldCallRules.AfterVisit(FieldCallStatus.Complete, FieldCallStatus.Complete)
+            .Should().Be(FieldCallStatus.Complete);
+    }
+
+    // ---------------------------------------------------------------- correcting a call
+
+    [Fact]
+    public void A_correction_cannot_reopen_a_completed_call()
+    {
+        // The same forward-only rule AfterVisit holds, which is the point - an edit is not a way
+        // round it.
+        FieldCallRules.Reopening(FieldCallStatus.Complete, FieldCallStatus.Incomplete)
+            .Should().NotBeNull();
+    }
+
+    [Fact]
+    public void A_correction_that_reopens_a_call_says_what_to_do_instead()
+    {
+        // The engineer standing at a machine that is not fixed needs somewhere to put that, so the
+        // refusal names it rather than only saying no.
+        FieldCallRules.Reopening(FieldCallStatus.Complete, FieldCallStatus.Incomplete)
+            .Should().Contain("new call");
+    }
+
+    [Fact]
+    public void A_correction_may_close_a_call_that_is_still_open()
+    {
+        // The gap this endpoint fills: a demo or a dealer visit never gets a field service, so
+        // nothing else would ever take it off the engineer's open list.
+        FieldCallRules.Reopening(FieldCallStatus.Incomplete, FieldCallStatus.Complete)
+            .Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(FieldCallStatus.Incomplete)]
+    [InlineData(FieldCallStatus.Complete)]
+    public void A_correction_that_leaves_the_status_alone_is_never_refused(FieldCallStatus standing)
+    {
+        // Every save from the form posts the status it is showing, so a correction to the remarks of
+        // a closed call arrives as Complete against Complete. Refusing that would make a finished
+        // call uneditable.
+        FieldCallRules.Reopening(standing, standing).Should().BeNull();
     }
 }

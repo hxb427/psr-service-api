@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
+using PSR.Service.Api.Common;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
 
@@ -93,6 +94,13 @@ public static class FieldOpsEndpoints
             return TypedResults.BadRequest(placeErr);
         var (charge, chargeErr) = await ResolveServiceChargeAsync(db, req.ServiceChargeId, ct);
         if (chargeErr is not null) return TypedResults.BadRequest(chargeErr);
+        var (call, callErr) = await ResolveFieldCallAsync(db, req.FieldCallId, uid, ct);
+        if (callErr is not null) return TypedResults.BadRequest(callErr);
+        // Incomplete when unsaid, matching the register's own default: a visit that says nothing
+        // about finishing has not claimed to have finished.
+        var (callStatus, callStatusErr) =
+            FieldCallRules.ParseOptional(req.CallStatus, FieldCallStatus.Incomplete, "call status");
+        if (callStatusErr is not null) return TypedResults.BadRequest(callStatusErr);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         FieldService fs;
@@ -105,6 +113,7 @@ public static class FieldOpsEndpoints
                 CustomerId = customerId,
                 TicketId = NormalizeTicketRef(req.TicketId),
                 TicketNumber = NormalizeTicketRef(req.TicketNumber),
+                FieldCallId = call?.Id,
                 Phone = req.Phone?.Trim(), Place = req.Place?.Trim(), MachineSerial = req.MachineSerial?.Trim(),
                 Complaint = req.Complaint?.Trim(), Cause = req.Cause?.Trim(),
                 WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
@@ -146,8 +155,14 @@ public static class FieldOpsEndpoints
             fs.TotalAmount = totals.Total;
             fs.AmountPayable = totals.Payable;
 
+            // Inside the transaction on purpose. "The call is updated along with the service" has to
+            // mean both rows or neither: a call completed with no visit behind it sends nobody back,
+            // and a visit whose call still sits open gets attended twice.
+            CloseOutCall(call, callStatus);
+
             audit.Log(uid, "field-service.create", "field_service", fs.Id,
-                details: $"{fs.ServiceNo} {fs.RateType} total {fs.TotalAmount:0.##} payable {fs.AmountPayable:0.##}",
+                details: $"{fs.ServiceNo} {fs.RateType} total {fs.TotalAmount:0.##} payable {fs.AmountPayable:0.##}"
+                    + (call is null ? string.Empty : $" call {call.CallNo} {call.CallStatus}"),
                 ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -156,6 +171,60 @@ public static class FieldOpsEndpoints
 
         var loaded = await db.FieldServices.AsNoTracking().Include(f => f.Lines).FirstAsync(f => f.Id == fs.Id, ct);
         return TypedResults.Created($"/field-services/{fs.Id}", await ServiceToDtoAsync(db, loaded, CanSeePricing(user), ct));
+    }
+
+    /// <summary>The call register entry this visit is being filed against, or why it cannot be.
+    ///
+    /// Tracked rather than <c>AsNoTracking</c>: where the save completes the call, that update has to
+    /// ride the same <c>SaveChanges</c> and the same transaction as the visit itself.
+    ///
+    /// Own calls only. The register is self-scoped on read for the same reason - one engineer's day
+    /// is not another's to write up - so the picker never offered anyone else's call, and an id that
+    /// names one is a stale list or a hand-made request rather than something to honour.</summary>
+    private static async Task<(FieldCall? call, string? error)> ResolveFieldCallAsync(
+        AppDbContext db, long? fieldCallId, long uid, CancellationToken ct)
+    {
+        if (fieldCallId is not { } id) return (null, null);
+        var call = await db.FieldCalls.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (call is null) return (null, $"Call {id} was not found.");
+        if (call.EngineerId != uid) return (null, $"{call.CallNo} was logged by another engineer.");
+        return (call, null);
+    }
+
+    /// <summary>Writes the visit back onto the call it answered.
+    ///
+    /// Two separate facts, and only one of them is a status. The attended date is set because a visit
+    /// IS the engineer having attended, but only where the call had none - a call logged with the day
+    /// they actually drove out keeps that day, which is not always the day somebody wrote it up.
+    ///
+    /// What the status becomes is <see cref="FieldCallRules.AfterVisit"/>'s to say, and it only ever
+    /// moves forward. Kept there rather than inlined here so the one rule that decides whether an
+    /// engineer gets sent back out is a function a test can pin.</summary>
+    private static void CloseOutCall(FieldCall? call, FieldCallStatus status)
+    {
+        if (call is null) return;
+        var touched = false;
+        if (call.AttendedDate is null)
+        {
+            call.AttendedDate = ShopClock.Today;
+            touched = true;
+        }
+
+        var next = FieldCallRules.AfterVisit(call.CallStatus, status);
+        // Assigned only where it actually moves, which - the rule being forward-only - means only
+        // ever to Complete. Writing the status back unchanged would be a lost update waiting to
+        // happen: two visits saved at the same moment both read the call as Incomplete, and the
+        // second to commit would put Incomplete back over the first one's Complete.
+        if (next != call.CallStatus)
+        {
+            call.CallStatus = next;
+            touched = true;
+        }
+
+        // Stamped only where something actually moved, for the same reason the status is. A second
+        // visit to a call that was already attended and already closed changes nothing about the
+        // call, and the register should not claim it was touched.
+        if (touched) call.UpdatedAt = DateTime.UtcNow;
     }
 
     /// <summary>Validates + consumes stock + drives serials for one Used/Collected line.
@@ -428,6 +497,11 @@ public static class FieldOpsEndpoints
         var techName = await TechNameAsync(db, f.TechnicianId, ct);
         var parts = await PartsForAsync(db, f.Lines.Select(l => l.PartId), ct);
         var (stateName, districtName) = await PlaceNamesAsync(db, f.StateId, f.DistrictId, ct);
+        // One extra round trip, and only for a visit that actually named a call.
+        var call = f.FieldCallId is { } callId
+            ? await db.FieldCalls.AsNoTracking().Where(c => c.Id == callId)
+                .Select(c => new { c.CallNo, c.CallStatus }).FirstOrDefaultAsync(ct)
+            : null;
         var lines = f.Lines.Select(l => new FieldServiceLineDto(
             l.Id, l.Kind.ToString(), l.PartId,
             parts.TryGetValue(l.PartId, out var p) ? p.ItemCode : $"#{l.PartId}", p?.Name ?? string.Empty,
@@ -453,7 +527,8 @@ public static class FieldOpsEndpoints
             pricing ? f.TaxableAmount : null, pricing ? f.TaxAmount : null,
             pricing ? f.AmountPayable : null,
             f.LocationLabel, f.Latitude, f.Longitude,
-            f.StateId, stateName, f.DistrictId, districtName);
+            f.StateId, stateName, f.DistrictId, districtName,
+            f.FieldCallId, call?.CallNo, call?.CallStatus.ToString());
     }
 
     /// <summary>State and district names for a record, in one round trip each. Resolved on read rather

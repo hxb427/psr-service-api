@@ -15,10 +15,16 @@ public enum FieldCallLocality { Local, Outstation }
 
 /// <summary>Whether the engineer finished what they went for.
 ///
-/// Not a workflow state and not a status that anything advances: nothing here reopens, reassigns or
-/// closes. It is the engineer's own account of how the visit ended, written once. A call left
-/// Incomplete is followed by a further call with its own record, which is why there is no
-/// "reopened" and no history table behind this.</summary>
+/// Advanced in exactly one direction and from exactly one place: a field service filed against the
+/// call carries the engineer's own answer to "did I finish", and saving it may move the call from
+/// Incomplete to Complete. Never the other way. A call already marked Complete is left alone by a
+/// later visit, because one engineer's "not finished yet" must not erase the finished work somebody
+/// else already recorded — and because nothing in this register edits or reopens anything, there is
+/// no step that would put it back.
+///
+/// Incomplete is therefore also what makes a call still pickable on the service entry form: the
+/// phone asks for the caller's Incomplete calls, and completing one is what takes it off that
+/// list.</summary>
 public enum FieldCallStatus { Complete, Incomplete }
 
 /// <summary>One call an engineer attended, as a register entry.
@@ -82,6 +88,22 @@ public class FieldCall
     /// the caller quoted. Free text on purpose: it comes from outside and has no shape we control.</summary>
     public string? CallReferenceNo { get; set; }
 
+    /// <summary>The number the call came in on, so the engineer can ring back before setting out.
+    ///
+    /// Not read off the customer master for the same reason <see cref="CustomerAddress"/> is not: the
+    /// person who rang is whoever was standing next to the machine, and their mobile is not the
+    /// account's switchboard. Seeded from the master when a customer is picked, then owned here.</summary>
+    public string? ContactPhone { get; set; }
+
+    /// <summary>What the caller said was wrong, in their words, taken when the call was logged.
+    ///
+    /// The same thing <see cref="FieldService.Complaint"/> holds, and that is the point: a service
+    /// entry filed against this call starts with this text already in the complaint box instead of
+    /// asking the engineer to retype what the office wrote down an hour ago. It stays the call's own
+    /// copy — editing the visit's complaint does not rewrite the register, because what the caller
+    /// reported and what the engineer eventually wrote up are two statements, not one.</summary>
+    public string? ReportedComplaint { get; set; }
+
     public string? MachineModel { get; set; }
 
     /// <summary>The machine or part number the call was about. Free text, like the equivalent on a
@@ -105,4 +127,22 @@ public class FieldCall
 
     /// <summary>When the row was written. A real instant and so UTC, unlike the two dates above.</summary>
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>When the call was last changed, or null while it still says what it said when it was
+    /// logged. A real instant and so UTC, like <see cref="CreatedAt"/>.
+    ///
+    /// Not a substitute for <see cref="AttendedDate"/>, and both are needed. The attended date is a
+    /// day in the field - the day somebody stood at the machine - and is the day the office reports
+    /// on. This is a moment on a clock: when the record was last touched. A call attended on the
+    /// Monday and written up on the Wednesday carries both, and they say different true things.
+    ///
+    /// Nullable rather than defaulted to the created stamp, because "nobody has touched this since it
+    /// was logged" is a fact worth being able to see. Every row that already exists is null, which is
+    /// right rather than a backfill left undone: none of them has been edited, because until the PUT
+    /// existed there was nothing that could edit one.
+    ///
+    /// WHAT changed is the audit log's business and not this column's - audit rows carry the
+    /// field-by-field diff. This is here so the phone can say "updated yesterday" without reading an
+    /// audit trail no engineer has access to.</summary>
+    public DateTime? UpdatedAt { get; set; }
 }

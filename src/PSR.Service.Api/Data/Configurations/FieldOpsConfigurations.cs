@@ -139,6 +139,7 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.Property(x => x.TechnicianId).HasColumnName("technician_id");
         b.Property(x => x.TicketId).HasColumnName("ticket_id").HasMaxLength(36);
         b.Property(x => x.TicketNumber).HasColumnName("ticket_number").HasMaxLength(64);
+        b.Property(x => x.FieldCallId).HasColumnName("field_call_id");
         b.Property(x => x.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
         b.Property(x => x.CustomerId).HasColumnName("customer_id");
         b.Property(x => x.Phone).HasColumnName("phone").HasMaxLength(50);
@@ -180,6 +181,9 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         // from under them, and the service charge keeps its own snapshotted description and figure so
         // the record still reads correctly even if the catalogue row is later deactivated.
         b.HasOne<ServiceCharge>().WithMany().HasForeignKey(x => x.ServiceChargeId).OnDelete(DeleteBehavior.Restrict);
+        // Restrict as well: the call is the register's account of why this visit happened, and a
+        // register entry must not be deletable out from under the visit that answers it.
+        b.HasOne<FieldCall>().WithMany().HasForeignKey(x => x.FieldCallId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<IndianState>().WithMany().HasForeignKey(x => x.StateId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<District>().WithMany().HasForeignKey(x => x.DistrictId).OnDelete(DeleteBehavior.Restrict);
 
@@ -191,6 +195,10 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         // only closes once the last of them is done. The index is what makes "has this ticket been
         // serviced yet" a lookup rather than a scan.
         b.HasIndex(x => x.TicketId);
+        // Not unique either, and for the same reason: a call left incomplete collects a second visit.
+        // EF adds this index for the foreign key regardless; it is named here so the intent is on the
+        // page next to the one above it.
+        b.HasIndex(x => x.FieldCallId);
     }
 }
 

@@ -31,6 +31,11 @@ public class FieldCallConfiguration : IEntityTypeConfiguration<FieldCall>
         b.Property(x => x.CustomerAddress).HasColumnName("customer_address").HasMaxLength(500);
 
         b.Property(x => x.CallReferenceNo).HasColumnName("call_reference_no").HasMaxLength(100);
+        // Same widths as the equivalents on field_services, so a call's details still fit after a
+        // service entry copies them across. A complaint narrowed here would truncate on the way in
+        // and leave the register holding half a sentence the visit holds in full.
+        b.Property(x => x.ContactPhone).HasColumnName("contact_phone").HasMaxLength(50);
+        b.Property(x => x.ReportedComplaint).HasColumnName("reported_complaint").HasMaxLength(1000);
         b.Property(x => x.MachineModel).HasColumnName("machine_model").HasMaxLength(100);
         b.Property(x => x.MachineSerial).HasColumnName("machine_serial").HasMaxLength(100);
         b.Property(x => x.SoftwareVersion).HasColumnName("software_version").HasMaxLength(50);
@@ -42,6 +47,9 @@ public class FieldCallConfiguration : IEntityTypeConfiguration<FieldCall>
         b.Property(x => x.CallStatus).HasColumnName("call_status").HasConversion<string>().HasMaxLength(16);
         b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(1000);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
+        // datetime, not date, unlike the two business days above: this one IS a moment, and the
+        // question it answers is "when was this last touched", not "on what day".
+        b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
 
         // Restrict both ways, as everywhere else in this schema: a register entry naming a customer
         // must not be deletable out from under the register, and deleting an engineer's account must

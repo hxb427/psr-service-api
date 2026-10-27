@@ -18,7 +18,10 @@ namespace PSR.Service.Tests;
 /// It earns its keep on the call register because the list handler takes eight loose query
 /// parameters, two of them <c>DateTime?</c>. A binder that cannot make a query parameter of one of
 /// those decides it must be the request body instead, and a GET with a body is a route that is
-/// registered and then never matches anything. No server listens and no database is touched.</summary>
+/// registered and then never matches anything. No server listens and no database is touched.
+///
+/// The update handler is the other reason: it mixes a route value, a body and three services, and a
+/// PUT whose <c>id</c> was inferred as a second body parameter fails the same silent way.</summary>
 public class FieldCallEndpointRoutingTests
 {
     private static IReadOnlyList<Endpoint> BuildEndpoints()
@@ -53,6 +56,8 @@ public class FieldCallEndpointRoutingTests
 
     [Theory]
     [InlineData("/field-calls/")]
+    [InlineData("/field-calls/{id:long}")]
+    [InlineData("/field-calls/{id:long}/attended")]
     [InlineData("/customers/addresses")]
     public void Route_is_registered(string route)
     {

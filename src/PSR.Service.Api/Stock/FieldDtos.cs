@@ -130,7 +130,19 @@ public record CreateFieldServiceRequest(
     decimal? Latitude = null,
     decimal? Longitude = null,
     int? StateId = null,
-    int? DistrictId = null);
+    int? DistrictId = null,
+    /// <summary>The call register entry this visit answers, when the technician picked one off their
+    /// open calls. Unlike <paramref name="CustomerId"/>, an id that does not resolve is REFUSED
+    /// rather than dropped: it was a deliberate pick with a consequence for the register, and losing
+    /// it quietly would leave the call open as though nobody had been.</summary>
+    long? FieldCallId = null,
+    /// <summary>Complete | Incomplete - the engineer's answer to "did I finish the job", applied to
+    /// the call named above. Absent means Incomplete, which leaves the call open for the next visit.
+    /// Ignored when no call is linked, there being nothing for it to say anything about.
+    ///
+    /// Only ever completes a call, never reopens one; see
+    /// <see cref="PSR.Service.Api.Data.Entities.FieldCallStatus"/>.</summary>
+    [StringLength(16)] string? CallStatus = null);
 
 /// <summary>Money is nullable throughout and that is the role projection, not missing data - see
 /// <see cref="PSR.Service.Api.Auth.PricingVisibility"/>. <c>Amount</c> is tax-exclusive;
@@ -158,7 +170,12 @@ public record FieldServiceDto(
     decimal? TaxableAmount = null, decimal? TaxAmount = null, decimal? AmountPayable = null,
     string? LocationLabel = null, decimal? Latitude = null, decimal? Longitude = null,
     int? StateId = null, string? StateName = null,
-    int? DistrictId = null, string? DistrictName = null);
+    int? DistrictId = null, string? DistrictName = null,
+    /// <summary>The call this visit was filed against, and that call's number and status AFTER the
+    /// save. Echoed back rather than left for the client to assume: the status is the server's to
+    /// decide (an already-complete call is not reopened), so the only honest way for the app to tell
+    /// the technician what became of their call is to be told.</summary>
+    long? FieldCallId = null, string? CallNo = null, string? CallStatus = null);
 
 /// <summary>Whether a ticket already has a service recorded against it. The app's OTP step is gated on
 /// this, and asking the server rather than trusting its own memory is what makes the gate survive a

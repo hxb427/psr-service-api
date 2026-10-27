@@ -32,6 +32,24 @@ public class FieldService
     /// the UUID, while every human names the ticket by its TKT-yyyymmdd-xxxxxxxx number.</summary>
     public string? TicketId { get; set; }
     public string? TicketNumber { get; set; }
+
+    /// <summary>The call register entry this visit answers, when the technician picked one.
+    ///
+    /// A different thing from <see cref="TicketId"/> and both can be set at once: a ticket is the
+    /// customer's own request raised in Poornasree, while a <see cref="FieldCall"/> is our record
+    /// that an engineer was sent out. The office logs calls that never had a ticket (a dealer rings
+    /// the branch) and tickets arrive that nobody logged a call for, so neither can stand in for the
+    /// other.
+    ///
+    /// Null for a visit filed on its own, which stays the ordinary case. Where it is set, saving the
+    /// visit may complete the call — see <see cref="FieldCallStatus"/> for why that only ever moves
+    /// one way.
+    ///
+    /// Not unique, deliberately: a call left Incomplete is picked again for the next visit, and the
+    /// two visits are both filed against the one call. That is the whole point of leaving it
+    /// incomplete.</summary>
+    public long? FieldCallId { get; set; }
+
     public string CustomerName { get; set; } = string.Empty;
     /// <summary>Set when the technician picked an existing customer rather than typing a new name.
     /// Free text stays authoritative for display; this is what carries ownership onto the serial.</summary>
