@@ -647,8 +647,14 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
+    /// <summary>Withdraw a job. The unit it booked in goes with it, or the delete is refused.
+    ///
+    /// The third guard is the one that was missing. Only paperwork used to stop a delete, and an
+    /// inward job carries none — so the common case was always deletable, and the unit it had
+    /// registered stayed at UNDER_REPAIR for ever, pointing at a job no list could show. That unit is
+    /// on no shelf, on no balance and on nobody's screen: the quietest way stock can go missing.</summary>
     internal static async Task<ApplyResult> ApplyDeleteAsync(ServiceJob job,
-        long uid, AppDbContext db, IAuditService audit, string? ip, CancellationToken ct)
+        long uid, AppDbContext db, SerialService serial, IAuditService audit, string? ip, CancellationToken ct)
     {
         if (job.IsDeleted) return ApplyResult.Applied;   // idempotent
         // A billed job must not vanish from underneath its paperwork — the document still references it,
@@ -659,6 +665,19 @@ public static partial class ServicesEndpoints
             || !string.IsNullOrWhiteSpace(job.OutwardDcNo))
             return ApplyResult.Invalid("Cannot delete — this job already carries a PI, invoice or DC number.");
 
+        // The unit this job registered, when it registered one. Withdrawn with the job only when
+        // booking it in was the only thing that ever happened to it; otherwise the delete is refused
+        // and somebody resolves the unit by hand, because what became of a machine is not a question
+        // a delete button should answer.
+        if (job.SourceComponentSerialId is { } unitId
+            && await serial.InwardWithdrawalStateAsync(unitId, job.Id, ct) is { } unit)
+        {
+            if (SerialService.InwardWithdrawalBlocked(unit.Status, unit.SerialNumber, unit.Withdrawable) is { } blocked)
+                return ApplyResult.Invalid(blocked);
+            await serial.WithdrawInwardUnitAsync(unitId, ct);
+            job.SourceComponentSerialId = null;
+        }
+
         job.IsDeleted = true;
         WriteNote(db, job, "Deleted", uid, "Job deleted (hidden from all lists)");
         audit.Log(uid, "service.delete", "service", job.Id, details: job.ServiceNo, ip: ip);
@@ -666,15 +685,24 @@ public static partial class ServicesEndpoints
     }
 
     private static async Task<Results<NoContent, NotFound, BadRequest<string>>> SoftDeleteAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http, CancellationToken ct)
+        long id, ClaimsPrincipal user, AppDbContext db, SerialService serial, IAuditService audit,
+        HttpContext http, CancellationToken ct)
     {
         var job = await db.Services.FirstOrDefaultAsync(s => s.Id == id, ct);
         if (job is null) return TypedResults.NotFound();
 
         user.TryGetUserId(out var uid);
-        var result = await ApplyDeleteAsync(job, uid, db, audit, http.GetIp(), ct);
-        if (result.Status != ApplyStatus.Applied) return TypedResults.BadRequest(result.Error!);
+        // Two tables now: the job is hidden and the unit it booked in is withdrawn. Half of that is
+        // worse than neither — a withdrawn unit under a job still on the lists, or the reverse.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var result = await ApplyDeleteAsync(job, uid, db, serial, audit, http.GetIp(), ct);
+        if (result.Status != ApplyStatus.Applied)
+        {
+            await tx.RollbackAsync(ct);
+            return TypedResults.BadRequest(result.Error!);
+        }
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return TypedResults.NoContent();
     }
 

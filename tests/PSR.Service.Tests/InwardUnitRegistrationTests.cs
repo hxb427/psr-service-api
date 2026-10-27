@@ -100,4 +100,54 @@ public class InwardUnitRegistrationTests
         SerialService.ShippableFor(StockReturnKind.GoodStock).Should().NotContain(SerialStatus.UnderRepair);
         SerialService.ShippableFor(StockReturnKind.Faulty).Should().NotContain(SerialStatus.UnderRepair);
     }
+
+    // ------------------------------------------------- correcting a mis-typed serial after booking
+
+    /// <summary>The case the record edit exists for: the serial was keyed in wrong at the counter and
+    /// the unit is still on the rack. The ledger has to move with the job, or the two name one machine
+    /// differently and stocking the job puts the typo on the shelf.</summary>
+    [Fact]
+    public void A_unit_still_on_the_rack_may_be_re_identified()
+    {
+        SerialService.IdentityCorrectionBlocked(SerialStatus.UnderRepair, "SN-777").Should().BeNull();
+    }
+
+    /// <summary>Once the unit has gone somewhere, its row is a record of where it WENT. Rewriting the
+    /// identity then rewrites somebody else's history — the shelf unit a store has already picked, or
+    /// the trail of a machine that has left the building.</summary>
+    [Theory]
+    [InlineData(SerialStatus.Used)]
+    [InlineData(SerialStatus.Shelfed)]
+    [InlineData(SerialStatus.Scrapped)]
+    [InlineData(SerialStatus.Received)]
+    [InlineData(SerialStatus.Missing)]
+    public void A_unit_that_has_moved_on_is_not_re_identified_from_the_job(SerialStatus status)
+    {
+        SerialService.IdentityCorrectionBlocked(status, "SN-777")
+            .Should().NotBeNull().And.Contain("SN-777");
+    }
+
+    // ------------------------------------------------- deleting a job that booked a unit in
+
+    /// <summary>Booking it in was the only thing that ever happened to this record, so withdrawing the
+    /// job withdraws the record. Nothing is being decided about a machine on anybody's behalf.</summary>
+    [Fact]
+    public void A_unit_this_job_created_is_withdrawn_with_it()
+    {
+        SerialService.InwardWithdrawalBlocked(SerialStatus.UnderRepair, "SN-777", withdrawable: true)
+            .Should().BeNull();
+    }
+
+    /// <summary>Anything else and the delete is refused. Left to go through, the unit stayed at
+    /// UNDER_REPAIR pointing at a job no list could show — on no shelf, no balance and nobody's
+    /// screen, which is the quietest way stock can go missing.</summary>
+    [Theory]
+    [InlineData(SerialStatus.UnderRepair)]
+    [InlineData(SerialStatus.Shelfed)]
+    [InlineData(SerialStatus.Used)]
+    public void A_unit_with_a_past_blocks_the_delete(SerialStatus status)
+    {
+        SerialService.InwardWithdrawalBlocked(status, "SN-777", withdrawable: false)
+            .Should().NotBeNull().And.Contain("SN-777");
+    }
 }

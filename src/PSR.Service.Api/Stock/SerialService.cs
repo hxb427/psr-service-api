@@ -129,6 +129,46 @@ public class SerialService(AppDbContext db)
             _ => null,
         };
 
+    /// <summary>Why the unit a job was booked for cannot be re-identified, or null when it may be.
+    ///
+    /// Correcting a mis-typed serial or PS code on a job has to move the ledger row with it, or the
+    /// two say different things about one machine — and the shelf later offers a serial printed on
+    /// nothing. But that is only true while the unit is still on the rack under that job. Once it has
+    /// gone back to a customer, onto the shelf or into the scrap bin, the row is a record of where a
+    /// unit WENT, and rewriting its identity would rewrite somebody else's history: the shelf unit a
+    /// store has already picked, or the trail of a machine that left the building.
+    ///
+    /// So UNDER_REPAIR, and only it. The refusal names the SN screen instead, which is where a unit
+    /// that has moved on is corrected one unit at a time with remarks.</summary>
+    internal static string? IdentityCorrectionBlocked(SerialStatus current, string serialNumber) =>
+        current is SerialStatus.UnderRepair
+            ? null
+            : $"Unit {serialNumber} has moved on since it was booked in (status {current}), so "
+              + "correcting the serial or PS code here would rewrite a unit that is no longer on the "
+              + "rack. Correct it from the SN management screen instead.";
+
+    /// <summary>Why a deleted job's unit cannot be withdrawn from the ledger along with it, or null
+    /// when it can.
+    ///
+    /// A job that booked a unit in and is then deleted used to leave that unit at UNDER_REPAIR for
+    /// ever, pointing at a job no list could show: on no shelf, on no balance and on nobody's screen,
+    /// which is the quietest way stock can go missing. Two outcomes are honest, and which applies is
+    /// a fact about the row rather than a choice:
+    ///
+    /// <list type="bullet">
+    /// <item>the job created the record and nothing has happened to it since — booking it in was the
+    /// only event, so withdrawing the job withdraws the record.</item>
+    /// <item>anything else — the shop knew this unit before, or something has moved it. Deleting the
+    /// job must not decide what became of a machine nobody has looked at, so it is refused and the
+    /// unit is resolved by hand first.</item>
+    /// </list></summary>
+    internal static string? InwardWithdrawalBlocked(SerialStatus unitStatus, string serialNumber, bool withdrawable)
+        => withdrawable
+            ? null
+            : $"{serialNumber} is in the serial ledger as {unitStatus}, and deleting this job would "
+              + "leave it there with no job to explain it — on no shelf, no balance and nobody's "
+              + "list. Resolve the unit from the SN management screen first, then delete the job.";
+
     /// <summary>Returns serial → reason for any serial that cannot be issued for this part
     /// (duplicated in the request, or currently deployed elsewhere). Empty ⇒ all issuable.</summary>
     public async Task<Dictionary<string, string>> FindIssueConflictsAsync(
@@ -931,6 +971,94 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
         if (c.Status != SerialStatus.Received)
             return $"Serial '{c.SerialNumber}' is not available (status {c.Status}).";
         return null;
+    }
+
+    /// <summary>Move the ledger row to the identity the job now carries: a corrected serial number, a
+    /// corrected PS code, or both. Returns an error message, or null when there was nothing to do or
+    /// the correction was applied.
+    ///
+    /// This exists because the record edit is FOR correcting a mis-typed serial, and until now it
+    /// corrected only the job. The unit kept the typo, so the SN screen named a machine the desk had
+    /// already renamed, and shelving the finished job put the typo on the shelf — where an issue
+    /// would offer a serial that is printed on nothing.
+    ///
+    /// The status does not move: the unit is where it was, and only its name was wrong. A history row
+    /// is still written, carrying the old identity in its remarks, because a unit's serial changing
+    /// is exactly the kind of thing somebody will later need to account for.</summary>
+    public async Task<string?> CorrectIdentityAsync(
+        long serialId, long newPartId, string newSerialNumber, string? itemName,
+        long byUser, string remarks, CancellationToken ct)
+    {
+        var sn = newSerialNumber.Trim();
+        if (sn.Length == 0) return "A corrected unit still needs a serial number.";
+
+        var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.Id == serialId, ct);
+        if (c is null) return null;                                     // nothing registered to correct
+        if (c.PartId == newPartId && c.SerialNumber == sn) return null;  // the job's own fields moved, not the unit's
+
+        if (IdentityCorrectionBlocked(c.Status, c.SerialNumber) is { } blocked) return blocked;
+
+        // The ledger is unique on (part_id, serial_number), so a row already sitting there is a
+        // DIFFERENT machine. Writing over it would fold two units into one record and lose whichever
+        // history was shorter - so it is refused by name, which is also the honest answer: one of the
+        // two serials in front of the desk is wrong.
+        if (await db.ComponentSerials.AnyAsync(
+                x => x.Id != c.Id && x.PartId == newPartId && x.SerialNumber == sn, ct))
+            return $"Another unit is already registered as {sn} under this item. One of the two "
+                 + "serials is wrong — check the number on the machine before correcting the job.";
+
+        var was = $"{c.SerialNumber}";
+        var now = DateTime.UtcNow;
+        c.PartId = newPartId;
+        c.SerialNumber = sn;
+        if (itemName is not null) c.ItemName = itemName;
+        c.LastUpdatedAt = now;
+        AddHistory(c, c.Status.ToString(), c.Status, byUser, $"{remarks} (was {was})", now);
+        return null;
+    }
+
+    /// <summary>What deleting this job would do to the unit it booked in: the unit's status and serial
+    /// for the message, and whether the record can be withdrawn with the job. Null when the job
+    /// registered nothing, which is every job booked before inward registration existed.
+    ///
+    /// Withdrawable means booking it in was the only thing that ever happened to this record: it
+    /// still belongs to this job, it is still UNDER_REPAIR, and its history is the single creation
+    /// row. Anything else and the shop knew the unit before, or something has moved it since — see
+    /// <see cref="InwardWithdrawalBlocked"/>.</summary>
+    public async Task<(SerialStatus Status, string SerialNumber, bool Withdrawable)?> InwardWithdrawalStateAsync(
+        long serialId, long serviceJobId, CancellationToken ct)
+    {
+        var c = await db.ComponentSerials.AsNoTracking()
+            .Where(x => x.Id == serialId)
+            .Select(x => new { x.Status, x.SerialNumber, x.CurrentServiceJobId })
+            .FirstOrDefaultAsync(ct);
+        if (c is null) return null;
+
+        // Counted rather than fetched: one row means creation and nothing since, and the second row
+        // is enough to know that is no longer true however many there are.
+        var events = await db.SerialStatusHistory.AsNoTracking()
+            .Where(h => h.ComponentSerialId == serialId).Take(2).CountAsync(ct);
+
+        var withdrawable = c.CurrentServiceJobId == serviceJobId
+            && c.Status == SerialStatus.UnderRepair
+            && events <= 1;
+        return (c.Status, c.SerialNumber, withdrawable);
+    }
+
+    /// <summary>Withdraw a unit that only ever existed because of a job now being deleted: the row and
+    /// its single history line go. Same shape the cancelled advance replacement uses on a record IT
+    /// created — the shop never knew this unit, so leaving a service-centre-owned row behind would put
+    /// a machine nobody has seen on the ledger for good.
+    ///
+    /// Only ever called behind <see cref="InwardWithdrawalStateAsync"/>, so it cannot erase a unit
+    /// with a past.</summary>
+    public async Task WithdrawInwardUnitAsync(long serialId, CancellationToken ct)
+    {
+        var c = await db.ComponentSerials.FirstOrDefaultAsync(x => x.Id == serialId, ct);
+        if (c is null) return;
+        var history = await db.SerialStatusHistory.Where(h => h.ComponentSerialId == serialId).ToListAsync(ct);
+        db.SerialStatusHistory.RemoveRange(history);
+        db.ComponentSerials.Remove(c);
     }
 
     public Task<ComponentSerial?> FindAsync(long partId, string serialNumber, CancellationToken ct)

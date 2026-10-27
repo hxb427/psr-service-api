@@ -26,13 +26,28 @@ public static partial class ServicesEndpoints
     private static async Task<string?> RegisterInwardUnitAsync(
         AppDbContext db, SerialService serial, ServiceJob job, long uid, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(job.PsCode) || string.IsNullOrWhiteSpace(job.SerialNo)) return null;
+        if (string.IsNullOrWhiteSpace(job.SerialNo)) return null;
+
+        // The two ways an item misses the ledger by accident, each said at the counter rather than
+        // discovered months later when "keep in stock" refuses the job. Neither is refused here: a
+        // ten-item challan must still book, and whether the shop follows this item is not a question
+        // the inward desk should be stopped on. It is a question somebody can answer while the machine
+        // is still on the counter, which is the whole value of saying it now.
+        if (string.IsNullOrWhiteSpace(job.PsCode))
+            return $"Unit {job.SerialNo.Trim()} was booked with no PS code, so it is not being followed "
+                 + "by serial. Set the PS code on the job if the shop tracks this item unit by unit.";
 
         var code = job.PsCode.Trim();
         var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.ItemCode == code, ct);
+        if (part is null)
+            return $"PS code {code} is not in the catalogue, so unit {job.SerialNo.Trim()} is not being "
+                 + "followed by serial. Correct the code, or add the item to the catalogue.";
+
         // Not serial-tracked means the shop does not follow this item unit by unit, and registering it
-        // here would start a ledger nobody maintains anywhere else in the system.
-        if (part is null || !part.IsSerialTracked) return null;
+        // here would start a ledger nobody maintains anywhere else in the system. Silent on purpose:
+        // this is the whole-machine case, the commonest thing the inward desk books, and a warning on
+        // every one of them is a warning nobody reads.
+        if (!part.IsSerialTracked) return null;
 
         var party = await PartyLabelAsync(db, job, ct);
         var result = await serial.ReceiveForServiceAsync(part.Id, job.SerialNo, job.Description ?? part.Name,

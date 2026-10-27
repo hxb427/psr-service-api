@@ -251,11 +251,11 @@ public static partial class ServicesEndpoints
     }
 
     private static Task<Results<Ok<BulkActionResultDto>, BadRequest<string>>> BulkDeleteAsync(
-        [FromBody] BulkIdsRequest req, ClaimsPrincipal user, AppDbContext db,
+        [FromBody] BulkIdsRequest req, ClaimsPrincipal user, AppDbContext db, SerialService serial,
         IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         return RunBulkAsync(req.Ids, db, ct, job =>
-            ApplyDeleteAsync(job, uid, db, audit, http.GetIp(), ct));
+            ApplyDeleteAsync(job, uid, db, serial, audit, http.GetIp(), ct));
     }
 }

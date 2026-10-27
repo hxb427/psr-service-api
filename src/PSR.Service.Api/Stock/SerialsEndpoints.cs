@@ -35,11 +35,15 @@ public static class SerialsEndpoints
         var pageNum = page is null or < 1 ? 1 : page.Value;
         var size = pageSize is null or < 1 or > MaxPageSize ? 50 : pageSize.Value;
 
+        // Deleted jobs are excluded from the job join, not just left to show. Every other list filters
+        // IsDeleted out, so printing a withdrawn job's number here named a job the desk could not open
+        // and global search could never return — the SN screen's status looked explained when it was
+        // not. A unit whose job has gone shows no number, which is the truth about it.
         var q = from c in db.ComponentSerials.AsNoTracking()
                 join p in db.Parts on c.PartId equals p.Id
                 join u in db.Users on c.TechnicianId equals (long?)u.Id into ug
                 from u in ug.DefaultIfEmpty()
-                join j in db.Services on c.CurrentServiceJobId equals (long?)j.Id into jg
+                join j in db.Services.Where(s => !s.IsDeleted) on c.CurrentServiceJobId equals (long?)j.Id into jg
                 from j in jg.DefaultIfEmpty()
                 select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null,
                              ServiceNo = j != null ? j.ServiceNo : null };
@@ -238,7 +242,7 @@ public static class SerialsEndpoints
                          join p in db.Parts on c.PartId equals p.Id
                          join u in db.Users on c.TechnicianId equals (long?)u.Id into ug
                          from u in ug.DefaultIfEmpty()
-                         join j in db.Services on c.CurrentServiceJobId equals (long?)j.Id into jg
+                         join j in db.Services.Where(s => !s.IsDeleted) on c.CurrentServiceJobId equals (long?)j.Id into jg
                          from j in jg.DefaultIfEmpty()
                          where c.Id == id
                          select new { c, p.ItemCode, p.Name, TechName = u != null ? (u.FullName ?? u.Username) : null,
