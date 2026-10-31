@@ -35,22 +35,50 @@ public static class FieldOpsEndpoints
 
     // ---------------------------------------------------------------- field services
 
+    /// <param name="from">Earliest shop day to include, inclusive. Filtered on the day the visit was
+    /// filed. Without it the list is the newest <paramref name="limit"/> visits and nothing older,
+    /// which is a window and not a search: an office looking for last quarter's work needs the range
+    /// rather than a bigger page.</param>
+    /// <param name="to">Latest shop day to include, also inclusive.</param>
     private static async Task<Ok<List<FieldServiceDto>>> ListServicesAsync(
-        AppDbContext db, ClaimsPrincipal user, long? technicianId, int? limit, CancellationToken ct)
+        AppDbContext db, ClaimsPrincipal user, long? technicianId,
+        DateTime? from, DateTime? to, int? limit, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         var manage = StockRoles.CanManage(user);
         var take = limit is null or < 1 or > 500 ? 100 : limit.Value;
 
-        var q = db.FieldServices.AsNoTracking().Include(f => f.Lines).AsQueryable();
-        if (!manage) q = q.Where(f => f.TechnicianId == uid);
-        else if (technicianId is { } tid) q = q.Where(f => f.TechnicianId == tid);
+        // Decided here rather than inside the query builder, because it is the one filter that is
+        // not the caller's to ask for — the same split as FieldCallsEndpoints.ListAsync.
+        var ownerOnly = manage ? technicianId : uid;
 
-        var rows = await q.OrderByDescending(f => f.Id).Take(take).ToListAsync(ct);
+        var rows = await VisitQuery(db, ownerOnly, from, to, take).ToListAsync(ct);
         var pricing = CanSeePricing(user);
         var dtos = new List<FieldServiceDto>();
         foreach (var f in rows) dtos.Add(await ServiceToDtoAsync(db, f, pricing, ct));
         return TypedResults.Ok(dtos);
+    }
+
+    /// <summary>The visit selection, as one query.
+    ///
+    /// Internal and separate so a test can make the provider translate it without a database, the
+    /// way <see cref="FieldCallsEndpoints.RegisterQuery"/> is. What only fails against real MySQL
+    /// here is the date window: created_at is a UTC timestamp, not a day, and the bounds are shop
+    /// days — see <see cref="ShopClock.UtcWindow"/> for why that is not a comparison against
+    /// midnight.</summary>
+    internal static IQueryable<FieldService> VisitQuery(
+        AppDbContext db, long? technicianId, DateTime? from, DateTime? to, int take)
+    {
+        var q = db.FieldServices.AsNoTracking().Include(f => f.Lines).AsQueryable();
+        if (technicianId is { } tid) q = q.Where(f => f.TechnicianId == tid);
+
+        var (fromUtc, toUtc) = ShopClock.UtcWindow(from, to);
+        if (fromUtc is { } fu) q = q.Where(f => f.CreatedAt >= fu);
+        // Exclusive, and so the start of the day AFTER the one asked for: that is what makes the
+        // upper bound inclusive of its own day without naming a last instant to miss things past.
+        if (toUtc is { } tu) q = q.Where(f => f.CreatedAt < tu);
+
+        return q.OrderByDescending(f => f.Id).Take(take);
     }
 
     /// <summary>Has this ticket been serviced yet, by the caller? Scoped to the caller's own records
@@ -284,22 +312,38 @@ public static class FieldOpsEndpoints
 
     // ---------------------------------------------------------------- field sales
 
+    /// <param name="from">Earliest shop day to include, inclusive — the day the sale was filed.</param>
+    /// <param name="to">Latest shop day to include, also inclusive.</param>
     private static async Task<Ok<List<FieldSaleDto>>> ListSalesAsync(
-        AppDbContext db, ClaimsPrincipal user, long? technicianId, int? limit, CancellationToken ct)
+        AppDbContext db, ClaimsPrincipal user, long? technicianId,
+        DateTime? from, DateTime? to, int? limit, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         var manage = StockRoles.CanManage(user);
         var take = limit is null or < 1 or > 500 ? 100 : limit.Value;
 
-        var q = db.FieldSales.AsNoTracking().Include(f => f.Lines).AsQueryable();
-        if (!manage) q = q.Where(f => f.TechnicianId == uid);
-        else if (technicianId is { } tid) q = q.Where(f => f.TechnicianId == tid);
+        var ownerOnly = manage ? technicianId : uid;
 
-        var rows = await q.OrderByDescending(f => f.Id).Take(take).ToListAsync(ct);
+        var rows = await SaleQuery(db, ownerOnly, from, to, take).ToListAsync(ct);
         var pricing = CanSeePricing(user);
         var dtos = new List<FieldSaleDto>();
         foreach (var f in rows) dtos.Add(await SaleToDtoAsync(db, f, pricing, ct));
         return TypedResults.Ok(dtos);
+    }
+
+    /// <summary>The sale selection, as one query. Internal for the same reason as
+    /// <see cref="VisitQuery"/>, and the same shop-day window over a UTC timestamp.</summary>
+    internal static IQueryable<FieldSale> SaleQuery(
+        AppDbContext db, long? technicianId, DateTime? from, DateTime? to, int take)
+    {
+        var q = db.FieldSales.AsNoTracking().Include(f => f.Lines).AsQueryable();
+        if (technicianId is { } tid) q = q.Where(f => f.TechnicianId == tid);
+
+        var (fromUtc, toUtc) = ShopClock.UtcWindow(from, to);
+        if (fromUtc is { } fu) q = q.Where(f => f.CreatedAt >= fu);
+        if (toUtc is { } tu) q = q.Where(f => f.CreatedAt < tu);
+
+        return q.OrderByDescending(f => f.Id).Take(take);
     }
 
     private static async Task<Results<Created<FieldSaleDto>, BadRequest<string>, ForbidHttpResult>> CreateSaleAsync(

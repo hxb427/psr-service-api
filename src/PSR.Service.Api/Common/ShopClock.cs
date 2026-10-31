@@ -55,4 +55,31 @@ public static class ShopClock
 
     /// <summary>The nullable form, so a caller can write <c>BusinessDate(req.Date) ?? Today</c>.</summary>
     public static DateTime? BusinessDate(DateTime? value) => value is { } v ? BusinessDate(v) : null;
+
+    /// <summary>The span of UTC instants covered by the shop days <paramref name="from"/> to
+    /// <paramref name="to"/>, both inclusive, for filtering a column that holds a TIMESTAMP rather
+    /// than a day.
+    ///
+    /// <see cref="BusinessDate(DateTime)"/> answers "which day did the client mean", which is all a
+    /// `date` column needs — a received date is compared against it directly. A created_at is a
+    /// different problem: it is an instant stored in UTC, so comparing it against a shop day's
+    /// midnight is wrong by the offset in both directions. Asking for the 9th would take in the
+    /// evening of the 8th and lose the evening of the 9th — the same off-by-a-day that
+    /// <see cref="BusinessDate(DateTime)"/> exists to stop, reappearing one layer down.
+    ///
+    /// So the shop day's own boundaries are converted instead: the 9th in Kochi begins at 18:30 UTC
+    /// on the 8th and ends at 18:30 UTC on the 9th. The upper bound comes back EXCLUSIVE — the start
+    /// of the day after the one asked for — because the alternative is an inclusive instant, and
+    /// there is no last instant of a day to name: "&lt;= 23:59:59" silently drops whatever was
+    /// recorded in the final second.
+    ///
+    /// Both halves are Unspecified, like everything else read out of and compared against a MySQL
+    /// datetime column in this API. The VALUE is the UTC instant, which is what those columns hold.</summary>
+    public static (DateTime? FromUtc, DateTime? ToUtcExclusive) UtcWindow(DateTime? from, DateTime? to)
+    {
+        var f = BusinessDate(from);
+        var t = BusinessDate(to);
+        return (f is { } fd ? fd.AddHours(-_offsetHours) : null,
+                t is { } td ? td.AddDays(1).AddHours(-_offsetHours) : null);
+    }
 }
