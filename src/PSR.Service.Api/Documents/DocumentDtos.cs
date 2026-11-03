@@ -54,8 +54,8 @@ public record GenerateSaleDocumentRequest(
     [Range(0, 10_000_000)] decimal? CourierCharges,
     [StringLength(500)] string? Remarks);
 
-/// <summary>One item on a parts delivery challan. <paramref name="UnitRate"/> is tax-EXCLUSIVE — the
-/// convention every goods line prints under — and optional: left null the server reads it off the parts
+/// <summary>One item on a parts delivery challan. <paramref name="UnitRate"/> is the value declared per
+/// unit — a challan adds no tax to it — and optional: left null the server reads it off the parts
 /// master, taking the dealer column when the challan goes to a dealer and the customer column otherwise.
 /// A rate that IS supplied is used as it stands, because a dispatch note declares a value rather than
 /// billing one and the declared figure is the person's to set.
@@ -78,8 +78,8 @@ public record PartsChallanLineRequest(
 /// user record and the address is typed). Neither is required — a name on its own raises a challan for
 /// somebody who is in no list — but both together is refused: a challan goes to one party.
 ///
-/// A state still has to be settled, by code, name, a GSTIN that opens with one, or the dealer master:
-/// the challan carries GST, and the code is what decides whether that is CGST + SGST or IGST.
+/// A state still has to be settled, by code, name, a GSTIN that opens with one, or the dealer master. Not
+/// for the tax — a challan carries none — but because it is part of the party block the document prints.
 ///
 /// Nothing on this request touches stock. It writes the document and its lines, and that is all — no
 /// ledger movement, no request row, no stamp on any job or sale.</summary>

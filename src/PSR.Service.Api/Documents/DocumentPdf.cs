@@ -1,3 +1,4 @@
+using PSR.Service.Api.Common;
 using PSR.Service.Api.Data.Entities;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
@@ -16,11 +17,19 @@ namespace PSR.Service.Api.Documents;
 /// A parts challan — spares going out to a dealer or a technician, with no job behind any line — reads
 /// off the same guard from the other side: its lines are goods, so it prints the spare-sale table.
 ///
+/// What a challan does NOT carry is GST, anywhere on the page: no GST % column, no CGST / SGST / IGST rows,
+/// and a bottom line that is the declared value of the goods plus the courier (see
+/// <see cref="ServiceDocument.CarriesTax"/>). Declaring a value is not billing one, and a challan that
+/// printed tax read as a bill for work the customer is not being charged for. It holds for a reprint too,
+/// so a challan raised while they still carried tax comes out as a challan now does.
+///
 /// Both kinds of line print their money columns tax-EXCLUSIVE, so the last column adds up to the Taxable
 /// Value in the totals block directly underneath it and the GST is added once, below the table. A serviced
-/// unit is PRICED tax-inclusive — the old app's "Rate (incl. tax)" box, and what BillingService stores — so
-/// its printed rate is derived back out; a spare sale already carries an exclusive rate. Printing the
-/// inclusive figures instead gave a column that summed to nothing shown anywhere on the document.</summary>
+/// unit on a PI or an invoice is PRICED tax-inclusive — the old app's "Rate (incl. tax)" box, and what
+/// BillingService stores — so its printed rate is derived back out; a spare sale already carries an
+/// exclusive rate. Printing the inclusive figures instead gave a column that summed to nothing shown
+/// anywhere on the document. On a challan the distinction does not arise: there is no tax, so the rate
+/// stored is the value declared.</summary>
 public static class DocumentPdf
 {
     public static byte[] Render(ServiceDocument doc, CompanyInfo company, string? watermark = null, string? sourcePiNo = null)
@@ -41,6 +50,7 @@ public static class DocumentPdf
         };
         var showMoney = ShowsMoney(doc);
         var isGoods = ShowsGoodsColumns(doc);
+        var showTax = ServiceDocument.CarriesTax(doc.DocType);
         // A per-line remark prints under its own description rather than in a column of its own. It is
         // optional and usually unused (a spare-sale line never has one), so a column for it spent width
         // on nothing most of the time — and with HSN and Unit now on the table there was no width spare
@@ -123,7 +133,10 @@ public static class DocumentPdf
                             c.ConstantColumn(46);    // hsn / sac
                             if (isGoods)
                             {
-                                c.ConstantColumn(40);    // gst %
+                                // Only where there is a tax to state a rate for. A challan carries none,
+                                // and the width goes back to the description rather than to a column of
+                                // percentages that apply to nothing on the page.
+                                if (showTax) c.ConstantColumn(40);    // gst %
                             }
                             else
                             {
@@ -149,11 +162,14 @@ public static class DocumentPdf
                             Head("#");
                             Head("Description");
                             Head("HSN/SAC");
-                            if (isGoods) { Head("GST %", true); }
+                            if (isGoods) { if (showTax) Head("GST %", true); }
                             else { Head("Serial"); Head("Warranty"); Head("Service Challan"); }
                             Head("Qty", true);
                             Head("Unit");
-                            if (showMoney) { Head("Rate", true); Head("Taxable", true); }
+                            // "Taxable" is what the column is on a document that goes on to add tax to it.
+                            // On a challan the same figure is the whole of what the line declares, so it is
+                            // labelled as that rather than as a tax base nothing is taxed on.
+                            if (showMoney) { Head("Rate", true); Head(showTax ? "Taxable" : "Value", true); }
                         });
 
                         var i = 1;
@@ -170,7 +186,8 @@ public static class DocumentPdf
                             table.Cell().Element(Body).Text(l.HsnCode ?? "-").FontSize(8);
                             if (isGoods)
                             {
-                                table.Cell().Element(Body).AlignRight().Text(l.GstPercent.ToString("0.##")).FontSize(8);
+                                if (showTax)
+                                    table.Cell().Element(Body).AlignRight().Text(l.GstPercent.ToString("0.##")).FontSize(8);
                             }
                             else
                             {
@@ -188,21 +205,26 @@ public static class DocumentPdf
                         }
                     });
 
-                    // ---- totals (skipped for a delivery challan) ----
+                    // ---- totals (skipped for a challan carrying no value at all) ----
                     if (showMoney)
                         col.Item().PaddingTop(8).AlignRight().Width(230).Column(c =>
                         {
-                            TotalRow(c, "Taxable Value", doc.TaxableAmount);
-                            if (doc.IsInterState)
+                            TotalRow(c, showTax ? "Taxable Value" : "Value of Goods", doc.TaxableAmount);
+                            // No tax heads on a challan — it declares a value for transit and charges
+                            // nothing, so there is nothing to split under CGST, SGST or IGST.
+                            if (showTax)
                             {
-                                TotalRow(c, "IGST" + GstRateSuffix(doc), doc.IgstAmount);
-                            }
-                            else
-                            {
-                                // Half the line rate on each head, because that is how the one rate splits.
-                                var half = GstRateSuffix(doc, 0.5m);
-                                TotalRow(c, "CGST" + half, doc.CgstAmount);
-                                TotalRow(c, "SGST" + half, doc.SgstAmount);
+                                if (doc.IsInterState)
+                                {
+                                    TotalRow(c, "IGST" + GstRateSuffix(doc), doc.IgstAmount);
+                                }
+                                else
+                                {
+                                    // Half the line rate on each head, because that is how the one rate splits.
+                                    var half = GstRateSuffix(doc, 0.5m);
+                                    TotalRow(c, "CGST" + half, doc.CgstAmount);
+                                    TotalRow(c, "SGST" + half, doc.SgstAmount);
+                                }
                             }
                             if (doc.CourierCharges > 0) TotalRow(c, CourierLabel(doc), doc.CourierCharges);
 
@@ -212,8 +234,8 @@ public static class DocumentPdf
                             c.Item().PaddingTop(2).BorderTop(1).BorderColor(Colors.Grey.Medium);
                             c.Item().Row(r =>
                             {
-                                r.RelativeItem().Text("Total Amount").Bold();
-                                r.ConstantItem(110).AlignRight().Text(Money(doc.TotalAmount)).Bold();
+                                r.RelativeItem().Text(showTax ? "Total Amount" : "Declared Value").Bold();
+                                r.ConstantItem(110).AlignRight().Text(Money(PrintedTotal(doc))).Bold();
                             });
                         });
 
@@ -282,14 +304,30 @@ public static class DocumentPdf
             ? Math.Round(l.TaxableAmount / l.Qty, 2)
             : l.UnitRate;
 
+    /// <summary>The figure the bottom line prints: what the document adds up to from the rows above it.
+    ///
+    /// For a PI or an invoice that is the stored total — the snapshot of what the customer was billed. A
+    /// delivery challan carries no GST (see <see cref="ServiceDocument.CarriesTax"/>), so its bottom line is
+    /// the declared value of the goods plus the courier, rounded the same way. Derived rather than read off
+    /// the record so that a challan raised while challans still carried tax reprints as a challan now does
+    /// — without GST anywhere on it — instead of under a total nothing on the page adds up to.</summary>
+    public static decimal PrintedTotal(ServiceDocument doc) => ServiceDocument.CarriesTax(doc.DocType)
+        ? doc.TotalAmount
+        : BillMoney.RoundUp(doc.TaxableAmount + doc.CourierCharges);
+
     /// <summary>What the Round off line prints, or zero when there is nothing to print. The total is rounded
     /// up to the whole rupee that actually gets collected while the parts above it keep their paise, so the
     /// gap has to be shown or the column does not add up to the figure under it.
     ///
     /// Derived from the document rather than stored on it, which also means a document raised before the
     /// rounding rule came in reproduces exactly as it was issued, with no line at all.</summary>
-    public static decimal RoundOff(ServiceDocument doc) => doc.TotalAmount
-        - (doc.TaxableAmount + doc.CgstAmount + doc.SgstAmount + doc.IgstAmount + doc.CourierCharges);
+    public static decimal RoundOff(ServiceDocument doc) => PrintedTotal(doc)
+        - (doc.TaxableAmount + Tax(doc) + doc.CourierCharges);
+
+    /// <summary>The tax the printed block shows, which is none on a challan whatever the record carries.</summary>
+    private static decimal Tax(ServiceDocument doc) => ServiceDocument.CarriesTax(doc.DocType)
+        ? doc.CgstAmount + doc.SgstAmount + doc.IgstAmount
+        : 0m;
 
     /// <summary>" @ 18%" for the tax line, when every line on the document carries the same GST rate.
     ///

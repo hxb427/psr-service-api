@@ -18,6 +18,16 @@ public class ServiceDocument
     /// schedule, not a choice, so it is applied rather than asked for on the generate form.</summary>
     public const string CourierSacCode = "9985";
 
+    /// <summary>Whether this kind of document carries GST at all. A PI and a tax invoice bill the customer,
+    /// so they do; a delivery challan does not. A challan moves goods — in-warranty units going back, or
+    /// spares going out to a dealer or a technician — and the figure against a line is the declared value
+    /// of what is in the parcel for transit, not a charge, so there is no tax to split off it and no tax
+    /// head for it to be split under.
+    ///
+    /// One rule in one place: the amounts are computed off it (<c>BillingService</c>) and the PDF prints
+    /// off it (<c>DocumentPdf</c>), so a challan cannot be totalled one way and printed the other.</summary>
+    public static bool CarriesTax(DocumentType docType) => docType != DocumentType.DC;
+
     public long Id { get; set; }
     public DocumentType DocType { get; set; }
     public string DocNo { get; set; } = string.Empty;   // unique per type (PI-2026-0001, INV-2026-0001, DC-2026-0001)

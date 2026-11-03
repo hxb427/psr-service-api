@@ -23,7 +23,8 @@ internal sealed record PartySnapshot(string Name, string? Address, string? Gstin
 internal readonly record struct JobPrice(decimal BlendedGst, decimal UnitInclusive);
 
 /// <summary>Builds a PI / Invoice / DC over one or more completed jobs of a single customer (old-app workflow):
-/// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter).
+/// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter) on
+/// the two documents that bill — a delivery challan carries none, see <see cref="ServiceDocument.CarriesTax"/>.
 /// <see cref="BuildAsync"/> validates + computes WITHOUT touching the DB (preview); <see cref="GenerateAsync"/>
 /// then allocates an atomic number, stamps it onto every covered job, and writes an item-history entry.</summary>
 // CompanyInfo is injected to compare the party's state against the company's own — see GstStates. The
@@ -115,7 +116,10 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         foreach (var job in jobs.OrderBy(j => j.Id))
         {
             var price = await PriceJobAsync(job, ct);
-            var blendedGst = price.BlendedGst;
+            // Zero on a delivery challan, which carries no GST — see ServiceDocument.CarriesTax. The rate
+            // typed on a challan is the declared value of the unit, so nothing is split off it: the line
+            // goes out with no GST rate, no tax amount and no head, and what was declared is what prints.
+            var blendedGst = ServiceDocument.CarriesTax(docType) ? price.BlendedGst : 0m;
 
             overrides.TryGetValue(job.Id, out var ov);
             var hsn = RequireLineHsn(ov?.HsnCode, await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct),
@@ -412,7 +416,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         var doc = NewDocument(DocumentType.DC, party, req.DocDate, req.ConsigneeAddress,
             req.CourierMode, req.CourierCharges, req.Remarks, userId);
 
-        decimal taxable = 0, tax = 0;
+        decimal taxable = 0;
         foreach (var l in lines)
         {
             if (l.Qty < 1) throw new BillingException("Quantity must be at least 1.");
@@ -421,18 +425,18 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
             var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == l.PartId, ct)
                        ?? throw new BillingException($"Part {l.PartId} was not found.");
 
-            // Tax-exclusive, like every goods line: the master's own rates are exclusive and the challan
-            // prints an exclusive column. A typed rate is honoured as it stands — a dispatch note
+            // The master's own rates, which are tax-exclusive — and a challan adds no tax to them, so the
+            // rate IS the value declared per unit. A typed rate is honoured as it stands: a dispatch note
             // DECLARES a value for transit rather than billing one, so there is no master figure for it
             // to be wrong against, which is also why the hand-pricing switch does not reach here (see
             // the DC exemption in BuildAsync).
             var unitRate = l.UnitRate ?? (isDealer ? part.DealerRate : part.CustomerRate);
             if (unitRate < 0) throw new BillingException($"{part.ItemCode}: the rate cannot be negative.");
 
-            var lineTaxable = Math.Round(unitRate * l.Qty, 2);
-            var lineTax = Math.Round(lineTaxable * part.GstPercent / 100m, 2);
-            taxable += lineTaxable;
-            tax += lineTax;
+            // The declared value of this item, and no tax on it: a challan carries none — see
+            // ServiceDocument.CarriesTax. The master's GST percentage is read past rather than applied.
+            var lineValue = Math.Round(unitRate * l.Qty, 2);
+            taxable += lineValue;
 
             doc.Lines.Add(new ServiceDocumentLine
             {
@@ -453,15 +457,15 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 Unit = string.IsNullOrWhiteSpace(l.Unit) ? part.Unit : l.Unit.Trim(),
                 Qty = l.Qty,
                 UnitRate = unitRate,
-                TaxableAmount = lineTaxable,
-                GstPercent = part.GstPercent,
-                TaxAmount = lineTax,
-                LineTotal = lineTaxable + lineTax,
+                TaxableAmount = lineValue,
+                GstPercent = 0m,
+                TaxAmount = 0m,
+                LineTotal = lineValue,
                 Remarks = null,
             });
         }
 
-        ApplyTotals(doc, taxable, tax);
+        ApplyTotals(doc, taxable, tax: 0m);
         return doc;
     }
 
@@ -586,15 +590,19 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         // and no code (typed before the picker existed), or neither and a GSTIN that opens with one. A name
         // already filled in is left alone — what somebody typed is not ours to rewrite.
         //
-        // A party that carries none of the three is refused. The code is what decides whether the document
-        // bills CGST + SGST or IGST, and the old answer — treat a party with no state as local — made that
-        // decision by itself for every walk-in and every dealer master nobody had filled in, which is a tax
-        // treatment arrived at by omission. The generate form now opens with no state picked, so this is
-        // the same question asked in the one place that cannot be skipped.
+        // A party that carries none of the three is refused. On a PI or an invoice the code is what decides
+        // whether the document bills CGST + SGST or IGST, and the old answer — treat a party with no state
+        // as local — made that decision by itself for every walk-in and every dealer master nobody had
+        // filled in, which is a tax treatment arrived at by omission. The generate form now opens with no
+        // state picked, so this is the same question asked in the one place that cannot be skipped. A
+        // delivery challan carries no tax for the code to decide (see ServiceDocument.CarriesTax) and is
+        // held to the same rule anyway: the state is on the party block the challan prints, and a dispatch
+        // note that cannot say where a parcel is going is worse paperwork than one that asks.
         var resolvedCode = GstStates.ResolveCode(partyStateCode, partyState, partyGstin)
             ?? throw new BillingException(
-                "Pick the party's state on the generate form. Its GST code is what decides whether the "
-                + "document carries CGST + SGST or IGST.");
+                "Pick the party's state on the generate form. It is printed on the document, and on a PI "
+                + "or an invoice its GST code is what decides whether the tax goes out as CGST + SGST or "
+                + "IGST.");
         partyStateCode = resolvedCode;
         if (string.IsNullOrWhiteSpace(partyState)) partyState = GstStates.ByCode(resolvedCode)?.Name;
 

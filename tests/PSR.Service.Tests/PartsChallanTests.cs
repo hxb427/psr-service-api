@@ -27,7 +27,8 @@ public class PartsChallanTests
     static PartsChallanTests() => QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
     /// <summary>A challan as the generate path builds one: a dealer, goods lines off the catalogue, and
-    /// neither a service job nor a sale behind it.</summary>
+    /// neither a service job nor a sale behind it. No tax on any of it — a challan declares a value for
+    /// transit rather than billing one, so the rate off the master IS the figure declared per unit.</summary>
     private static ServiceDocument PartsChallan()
     {
         var doc = new ServiceDocument
@@ -45,9 +46,7 @@ public class PartsChallanTests
             CourierCharges = 180m,
             CourierHsnCode = ServiceDocument.CourierSacCode,
             TaxableAmount = 3400m,
-            CgstAmount = 306m,
-            SgstAmount = 306m,
-            TotalAmount = 4192m,
+            TotalAmount = 3580m,
         };
         doc.Lines.Add(new ServiceDocumentLine
         {
@@ -56,8 +55,8 @@ public class PartsChallanTests
             Description = "Load cell 500kg stainless, single point (PS-LC-500S)",
             HsnCode = "84239090",
             Unit = "Nos",
-            Qty = 2, UnitRate = 1200m, TaxableAmount = 2400m, GstPercent = 18m, TaxAmount = 432m,
-            LineTotal = 2832m,
+            Qty = 2, UnitRate = 1200m, TaxableAmount = 2400m, GstPercent = 0m, TaxAmount = 0m,
+            LineTotal = 2400m,
         });
         doc.Lines.Add(new ServiceDocumentLine
         {
@@ -66,8 +65,8 @@ public class PartsChallanTests
             Description = "Indicator keypad membrane (PS-IND-KPD)",
             HsnCode = "84733099",
             Unit = "Pcs",
-            Qty = 4, UnitRate = 250m, TaxableAmount = 1000m, GstPercent = 18m, TaxAmount = 180m,
-            LineTotal = 1180m,
+            Qty = 4, UnitRate = 250m, TaxableAmount = 1000m, GstPercent = 0m, TaxAmount = 0m,
+            LineTotal = 1000m,
         });
         return doc;
     }
@@ -162,14 +161,33 @@ public class PartsChallanTests
         act.Should().NotThrow();
     }
 
-    /// <summary>Rate × Qty has to equal the Taxable column printed beside it. A parts line is priced
-    /// tax-EXCLUSIVE — the parts master's own convention, and the spare sale's — so the stored rate
-    /// prints as it stands rather than being derived back out of the taxable amount.</summary>
+    /// <summary>Rate × Qty has to equal the Value column printed beside it. A parts line is priced off the
+    /// master's tax-exclusive rate and the challan adds nothing to it, so the stored rate prints as it
+    /// stands rather than being derived back out of the declared amount.</summary>
     [Fact]
     public void A_parts_line_prints_the_rate_it_was_priced_at()
     {
         foreach (var l in PartsChallan().Lines)
             DocumentPdf.LineRate(l).Should().Be(l.UnitRate);
+    }
+
+    /// <summary>No GST on it anywhere: not a rate on a line, not a head in the totals block, and a bottom
+    /// line that is the items plus the courier and nothing else. A parcel of spares going to a dealer is
+    /// moving goods, and a challan that printed tax read as a bill for them.</summary>
+    [Fact]
+    public void A_parts_challan_carries_no_gst()
+    {
+        var doc = PartsChallan();
+
+        ServiceDocument.CarriesTax(doc.DocType).Should().BeFalse();
+        doc.Lines.Should().OnlyContain(l => l.GstPercent == 0m && l.TaxAmount == 0m);
+        doc.CgstAmount.Should().Be(0m);
+        doc.SgstAmount.Should().Be(0m);
+        doc.IgstAmount.Should().Be(0m);
+
+        // 3400 declared, 180 of courier on top of it.
+        DocumentPdf.PrintedTotal(doc).Should().Be(3580m);
+        DocumentPdf.RoundOff(doc).Should().Be(0m);
     }
 
     // ---------------------------------------------------------------- and moves nothing

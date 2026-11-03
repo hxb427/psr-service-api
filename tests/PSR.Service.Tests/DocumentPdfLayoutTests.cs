@@ -149,6 +149,58 @@ public class DocumentPdfLayoutTests
         => DocumentPdf.ShowsMoney(new ServiceDocument { DocType = DocumentType.DC, TotalAmount = 7330m })
             .Should().BeTrue();
 
+    // ---- a challan carries no GST ----
+
+    /// <summary>The rule, in the one place both the figures and the page read it off. A PI and an invoice
+    /// bill the customer; a challan moves goods and declares what they are worth.</summary>
+    [Theory]
+    [InlineData(DocumentType.PI, true)]
+    [InlineData(DocumentType.Invoice, true)]
+    [InlineData(DocumentType.DC, false)]
+    public void Only_the_documents_that_bill_carry_tax(DocumentType docType, bool carries)
+        => ServiceDocument.CarriesTax(docType).Should().Be(carries);
+
+    /// <summary>A challan's bottom line is the declared value of the goods plus the courier, with no tax
+    /// added. Asserted against a record that still HOLDS tax — a challan raised while they carried it has
+    /// to reprint the way one is issued now, not under a total nothing on the page adds up to.</summary>
+    [Fact]
+    public void A_delivery_challan_totals_without_its_stored_tax()
+    {
+        var doc = ServiceInvoice(withRemarks: false);
+        doc.DocType = DocumentType.DC;
+        doc.DocNo = "DC-2026-0088";
+
+        // 6000 of goods and 250 of courier. The 1080 of CGST + SGST on the record is not printed, so it
+        // is not totalled either.
+        DocumentPdf.PrintedTotal(doc).Should().Be(6250m);
+        DocumentPdf.RoundOff(doc).Should().Be(0m);
+    }
+
+    /// <summary>And the round-off line still works off that total, or a challan declaring paise would not
+    /// add up to the whole rupee printed under it.</summary>
+    [Fact]
+    public void A_delivery_challan_rounds_its_declared_value_up()
+    {
+        var doc = ServiceInvoice(withRemarks: false);
+        doc.DocType = DocumentType.DC;
+        doc.TaxableAmount = 6000.40m;
+        doc.CourierCharges = 250m;
+
+        DocumentPdf.PrintedTotal(doc).Should().Be(6251m);
+        DocumentPdf.RoundOff(doc).Should().Be(0.60m);
+    }
+
+    /// <summary>Unchanged on the two that bill: the stored total is the snapshot of what the customer was
+    /// charged, tax included, and the printed block adds up to it.</summary>
+    [Fact]
+    public void A_billing_document_still_totals_with_its_tax()
+    {
+        var doc = ServiceInvoice(withRemarks: false);
+
+        DocumentPdf.PrintedTotal(doc).Should().Be(doc.TotalAmount);
+        DocumentPdf.RoundOff(doc).Should().Be(0m);
+    }
+
     /// <summary>The courier charge is on the document, not on a line, so the only place its SAC can print
     /// is the label of its own totals row.</summary>
     [Fact]
