@@ -6,9 +6,19 @@ namespace PSR.Service.Api.Stock;
 
 public record PendingIssueSerialDto(long IssueSerialId, long ComponentSerialId, string SerialNumber);
 
+/// <summary>One issue waiting to be acknowledged, with the provenance the technician needs to decide
+/// whether what is in their hands is what was sent.
+///
+/// <paramref name="IssuedAt"/> is the movement's own stamp, not the request's <c>IssuedDate</c>:
+/// a partially-issued request overwrites that column on every further issue, so it would report the
+/// LAST dispatch against the request rather than the date of this consignment. Everything from
+/// <paramref name="RequestNo"/> through <paramref name="IssuedByName"/> is null on a direct issue,
+/// which has no request behind it.</summary>
 public record PendingIssueDto(
     long MovementId, long PartId, string ItemCode, string PartName, int Qty,
-    string? RequestNo, string? Courier, string? TrackingNo, DateTime IssuedAt,
+    string? RequestNo, DateTime? RequestedAt,
+    string? Courier, string? TrackingNo, string? DcNo, string? IssuedByName,
+    DateTime IssuedAt,
     List<PendingIssueSerialDto> Serials);
 
 public record AckSerialLine(long IssueSerialId, [Required] string Status);   // Received | Defective | Missing

@@ -47,13 +47,21 @@ public static class StockAcksEndpoints
                           join p in db.Parts on m.PartId equals p.Id
                           join r in db.StockRequests on m.ReferenceId equals (long?)r.Id into rg
                           from r in rg.DefaultIfEmpty()
+                          // Who dispatched it, for the technician who has to ring somebody about a
+                          // short delivery. Left-joined like the request itself: a direct issue has
+                          // no request row, so there is no issuer to look up either.
+                          join iu in db.Users on r.IssuedByUserId equals (long?)iu.Id into iug
+                          from iu in iug.DefaultIfEmpty()
                           orderby m.Id descending
                           select new
                           {
                               m.Id, m.PartId, p.ItemCode, p.Name, m.Quantity, m.CreatedAt,
                               RequestNo = r != null ? r.RequestNo : null,
+                              RequestedAt = r != null ? (DateTime?)r.RequestDate : null,
                               Courier = r != null ? r.Courier : null,
                               TrackingNo = r != null ? r.TrackingNo : null,
+                              DcNo = r != null ? r.DcNo : null,
+                              IssuedByName = iu != null ? (iu.FullName ?? iu.Username) : null,
                           }).ToListAsync(ct);
 
         var movementIds = rows.Select(x => x.Id).ToList();
@@ -66,7 +74,8 @@ public static class StockAcksEndpoints
                 .ToListAsync(ct);
 
         var items = rows.Select(x => new PendingIssueDto(
-            x.Id, x.PartId, x.ItemCode, x.Name, x.Quantity, x.RequestNo, x.Courier, x.TrackingNo, x.CreatedAt,
+            x.Id, x.PartId, x.ItemCode, x.Name, x.Quantity,
+            x.RequestNo, x.RequestedAt, x.Courier, x.TrackingNo, x.DcNo, x.IssuedByName, x.CreatedAt,
             serials.Where(s => s.StockMovementId == x.Id)
                 .Select(s => new PendingIssueSerialDto(s.IssueSerialId, s.ComponentSerialId, s.SerialNumber)).ToList())).ToList();
 
