@@ -239,6 +239,7 @@ public static class FieldOpsEndpoints
         }
 
         var next = FieldCallRules.AfterVisit(call.CallStatus, status);
+        var closed = false;
         // Assigned only where it actually moves, which - the rule being forward-only - means only
         // ever to Complete. Writing the status back unchanged would be a lost update waiting to
         // happen: two visits saved at the same moment both read the call as Incomplete, and the
@@ -246,13 +247,23 @@ public static class FieldOpsEndpoints
         if (next != call.CallStatus)
         {
             call.CallStatus = next;
+            closed = true;
             touched = true;
         }
 
         // Stamped only where something actually moved, for the same reason the status is. A second
         // visit to a call that was already attended and already closed changes nothing about the
         // call, and the register should not claim it was touched.
-        if (touched) call.UpdatedAt = DateTime.UtcNow;
+        if (touched)
+        {
+            var now = DateTime.UtcNow;
+            call.UpdatedAt = now;
+            // This visit is the moment the call closed, and the rule above only moves forward - so a
+            // status that moved moved to Complete. The same instant as the touch stamp, because one
+            // save did not happen at two times; and only where it moved, so the second visit to an
+            // already-closed call does not restate when the first one finished it.
+            if (closed) call.CompletedAt = now;
+        }
     }
 
     /// <summary>Validates + consumes stock + drives serials for one Used/Collected line.

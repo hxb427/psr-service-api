@@ -58,6 +58,7 @@ public class FieldCallEndpointRoutingTests
     [InlineData("/field-calls/")]
     [InlineData("/field-calls/{id:long}")]
     [InlineData("/field-calls/{id:long}/attended")]
+    [InlineData("/field-calls/tat")]
     [InlineData("/customers/addresses")]
     public void Route_is_registered(string route)
     {
@@ -80,5 +81,20 @@ public class FieldCallEndpointRoutingTests
 
         routes.Should().Contain("/customers/{id:long}");
         routes.Should().Contain("/customers/addresses");
+    }
+
+    /// <summary>The turnaround route must not be swallowed by the call-by-id route either.
+    ///
+    /// Same shape of risk as the address route above, and safe for the same reason: {id:long} cannot
+    /// match "tat". That safety is a property of the constraint, and relaxing a constraint to
+    /// {id} later would turn this read into a route that is registered and never matched.</summary>
+    [Fact]
+    public void The_turnaround_route_is_not_shadowed_by_the_call_by_id_route()
+    {
+        var routes = BuildEndpoints().OfType<RouteEndpoint>()
+            .Select(e => e.RoutePattern.RawText).ToList();
+
+        routes.Should().Contain("/field-calls/{id:long}");
+        routes.Should().Contain("/field-calls/tat");
     }
 }

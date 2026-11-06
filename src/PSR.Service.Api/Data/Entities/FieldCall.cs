@@ -123,6 +123,27 @@ public class FieldCall
 
     public FieldCallStatus CallStatus { get; set; } = FieldCallStatus.Incomplete;
 
+    /// <summary>The moment the call reached <see cref="FieldCallStatus.Complete"/>, or null while it
+    /// is still open. A real instant and so UTC, like <see cref="CreatedAt"/>.
+    ///
+    /// Here because this register has no history table and <see cref="UpdatedAt"/> cannot stand in
+    /// for it. Updated-at is the LAST touch, which is a different fact: a call completed on the
+    /// Monday and corrected on the Wednesday would read as a three-day job, and one logged Complete
+    /// on the way in would read as never having been touched at all. The turnaround figure the office
+    /// asks for is the gap between this and <see cref="CreatedAt"/>, so it needs a column that can
+    /// only ever mean "finished".
+    ///
+    /// Written in exactly the three places a call can close, and nowhere else: logged Complete on the
+    /// way in, where it takes the created stamp because the two ARE the same moment; corrected to
+    /// Complete; and closed out by a field service filed against it. The status is forward-only (see
+    /// <see cref="FieldCallStatus"/>), so this is written once and nothing clears it.
+    ///
+    /// Rows that predate the column carry a backfilled value - updated-at where the call had been
+    /// touched, created-at where it had not - which is the most the old data supports. A turnaround
+    /// figure covering that period is therefore an estimate rather than a reading; see the
+    /// AddFieldCallCompletedStamp migration.</summary>
+    public DateTime? CompletedAt { get; set; }
+
     public string? Remarks { get; set; }
 
     /// <summary>When the row was written. A real instant and so UTC, unlike the two dates above.</summary>
@@ -145,4 +166,42 @@ public class FieldCall
     /// field-by-field diff. This is here so the phone can say "updated yesterday" without reading an
     /// audit trail no engineer has access to.</summary>
     public DateTime? UpdatedAt { get; set; }
+}
+
+/// <summary>One day an engineer attended a call, with whatever they wanted to say about that day.
+///
+/// A row per day, because a call is not always one visit. An engineer who drove out on the Monday,
+/// found the wrong part in the van and went back on the Thursday attended twice, and until this
+/// existed the register could only hold the Monday - <see cref="FieldCall.AttendedDate"/> is a single
+/// column and the first attendance kept it. The second trip was invisible, which matters most for
+/// exactly the calls that take several: the ones somebody is asked about.
+///
+/// <see cref="FieldCall.AttendedDate"/> is deliberately still there and still means the FIRST day.
+/// It is what the office reports on and what the correction form edits, and redefining it as "the
+/// latest" would quietly restate every figure already built on it.</summary>
+public class FieldCallAttendance
+{
+    public long Id { get; set; }
+
+    public long FieldCallId { get; set; }
+
+    /// <summary>The day in the field. A day and not a moment, like the register's other business
+    /// dates: the question is which day somebody stood at the machine. The server decides it from
+    /// the shop clock rather than taking it from the handset, so a phone whose clock is a day out
+    /// cannot stamp a date the office has no way to explain.</summary>
+    public DateTime AttendedDate { get; set; }
+
+    /// <summary>What the engineer wanted recorded about that day - "customer site closed", "waiting
+    /// on the replacement board". Optional, and genuinely so: the common case is a tap with nothing
+    /// to add, and a required note would be answered with a full stop.</summary>
+    public string? Remarks { get; set; }
+
+    /// <summary>Who marked it. The call's engineer in every case the endpoint allows today, but
+    /// stored rather than inferred: the gate is a rule about who may write, and a record of what
+    /// happened should not depend on that rule never changing.</summary>
+    public long MarkedByUserId { get; set; }
+
+    /// <summary>When the row was written, as against the day it is about. The two differ whenever
+    /// somebody marks a day late, and the gap is the only thing that says they did.</summary>
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

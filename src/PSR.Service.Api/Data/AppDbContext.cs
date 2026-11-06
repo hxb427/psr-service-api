@@ -32,6 +32,7 @@ public class AppDbContext : DbContext
     public DbSet<FieldSale> FieldSales => Set<FieldSale>();
     public DbSet<FieldSaleLine> FieldSaleLines => Set<FieldSaleLine>();
     public DbSet<FieldCall> FieldCalls => Set<FieldCall>();
+    public DbSet<FieldCallAttendance> FieldCallAttendances => Set<FieldCallAttendance>();
     public DbSet<NumberSequence> NumberSequences => Set<NumberSequence>();
     public DbSet<ServiceJob> Services => Set<ServiceJob>();
     public DbSet<ServiceLine> ServiceLines => Set<ServiceLine>();

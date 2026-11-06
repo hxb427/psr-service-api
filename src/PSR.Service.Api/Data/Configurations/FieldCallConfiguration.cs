@@ -50,6 +50,10 @@ public class FieldCallConfiguration : IEntityTypeConfiguration<FieldCall>
         // datetime, not date, unlike the two business days above: this one IS a moment, and the
         // question it answers is "when was this last touched", not "on what day".
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+        // The status's own stamp, and the only column the office's turnaround figure can be read
+        // from - see FieldCall.CompletedAt for why updated_at cannot stand in for it. datetime like
+        // the two above, because it is a moment and not a day.
+        b.Property(x => x.CompletedAt).HasColumnName("completed_at");
 
         // Restrict both ways, as everywhere else in this schema: a register entry naming a customer
         // must not be deletable out from under the register, and deleting an engineer's account must
@@ -64,5 +68,45 @@ public class FieldCallConfiguration : IEntityTypeConfiguration<FieldCall>
         b.HasIndex(x => x.CallReceivedDate);
         b.HasIndex(x => x.CallType);
         b.HasIndex(x => x.CallStatus);
+        // What the critical-alert query asks for: the still-open calls, oldest first. Status alone
+        // has two values and so is an index MySQL is entitled to ignore; with the created stamp
+        // behind it the same read is "the Incomplete ones older than this", which is a range over a
+        // prefix. The single-column index above is left in place - the register's other filters ask
+        // for status without an age, and the table takes a handful of inserts a day.
+        b.HasIndex(x => new { x.CallStatus, x.CreatedAt });
+    }
+}
+
+/// <summary>Schema for the per-day attendance log. The one thing a call does carry lines of.</summary>
+public class FieldCallAttendanceConfiguration : IEntityTypeConfiguration<FieldCallAttendance>
+{
+    public void Configure(EntityTypeBuilder<FieldCallAttendance> b)
+    {
+        b.ToTable("field_call_attendances");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+
+        b.Property(x => x.FieldCallId).HasColumnName("field_call_id");
+        // `date` for the same reason the register's other business days are: this is a day somebody
+        // was somewhere, and a column that can hold a time of day invites one to be stored.
+        b.Property(x => x.AttendedDate).HasColumnName("attended_date").HasColumnType("date");
+        b.Property(x => x.Remarks).HasColumnName("remarks").HasMaxLength(1000);
+        b.Property(x => x.MarkedByUserId).HasColumnName("marked_by_user_id");
+        // datetime: a moment, unlike the day above.
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+
+        // Cascade, unlike the Restrict used everywhere else in this schema, and for a reason that
+        // does not apply there: these rows are PART of the call rather than a reference to it. An
+        // attendance with no call is not history worth protecting, it is a row nothing can reach.
+        // (Nothing deletes a call today; this says what should happen if that ever changes.)
+        b.HasOne<FieldCall>().WithMany().HasForeignKey(x => x.FieldCallId).OnDelete(DeleteBehavior.Cascade);
+        // Restrict, because this one IS a reference: removing an account must not quietly edit the
+        // record of who marked a day.
+        b.HasOne<User>().WithMany().HasForeignKey(x => x.MarkedByUserId).OnDelete(DeleteBehavior.Restrict);
+
+        // One attendance per call per day, enforced in the schema rather than only in the handler.
+        // This is what keeps a retry on a dropped field connection from becoming a second visit —
+        // the handler checks first, but two taps racing each other would both pass that check.
+        b.HasIndex(x => new { x.FieldCallId, x.AttendedDate }).IsUnique();
     }
 }

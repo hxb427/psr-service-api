@@ -38,13 +38,18 @@ namespace PSR.Service.Api.Stock;
 ///
 /// The <c>callStatus=Incomplete</c> filter on the list is therefore load-bearing, not a convenience:
 /// it is what the service entry form asks for to offer the engineer their still-open calls.</summary>
-public static class FieldCallsEndpoints
+public static partial class FieldCallsEndpoints
 {
     public static IEndpointRouteBuilder MapFieldCallEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/field-calls").WithTags("field-calls").RequireAuthorization();
 
         group.MapGet("/", ListAsync);
+
+        // Turnaround and the overdue-call alert - see FieldCallsEndpoints.Tat.cs. The same plain
+        // authorization as the list above, and self-scoped in the handler the same way: reading how
+        // long your own calls take is not oversight.
+        group.MapGet("/tat", TatAsync);
 
         // The same policy the sibling field records use, and deliberately WITHOUT the
         // is_field_technician check they add on top of it.
@@ -89,7 +94,12 @@ public static class FieldCallsEndpoints
         var rows = await RegisterQuery(db, ownerOnly, callType, callStatus, from, to, take).ToListAsync(ct);
 
         var names = await EngineerNamesAsync(db, rows.Select(r => r.EngineerId), ct);
-        return TypedResults.Ok(rows.Select(r => ToDto(r, names.GetValueOrDefault(r.EngineerId))).ToList());
+        // Loaded for the whole page in one read — the history card shows the days inline, so leaving
+        // them out would mean a request per row the moment anybody expanded one.
+        var log = await AttendanceLogAsync(db, rows.Select(r => r.Id).ToList(), ct);
+        return TypedResults.Ok(rows
+            .Select(r => ToDto(r, names.GetValueOrDefault(r.EngineerId), log.GetValueOrDefault(r.Id)))
+            .ToList());
     }
 
     /// <summary>The register selection, as one query.
@@ -172,6 +182,12 @@ public static class FieldCallsEndpoints
             Remarks = Trimmed(req.Remarks),
         };
 
+        // A call logged Complete was finished before anybody wrote it down, so its turnaround is nil
+        // rather than unknown. Taken off the entity instead of reading the clock a second time: the
+        // two calls differ by microseconds, and a nil turnaround that printed as 0.0001 hours would
+        // be a figure somebody had to explain.
+        if (call.CallStatus == FieldCallStatus.Complete) call.CompletedAt = call.CreatedAt;
+
         if (FieldCallRules.Lengths(call) is { } lengthErr) return TypedResults.BadRequest(lengthErr);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -190,8 +206,10 @@ public static class FieldCallsEndpoints
         }
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
+        // Empty rather than null, and not a query: a call logged a moment ago has no attended days,
+        // and reading the table to be told so would be a round trip for a known answer.
         return TypedResults.Created($"/field-calls/{call.Id}",
-            ToDto(call, await EngineerNameAsync(db, uid, ct)));
+            ToDto(call, await EngineerNameAsync(db, uid, ct), []));
     }
 
     /// <summary>Corrects what a call SAYS. Internal for the same reason as the two above.
@@ -267,6 +285,11 @@ public static class FieldCallsEndpoints
         // it was.
         var customerId = await ResolveCustomerIdAsync(db, req.CustomerId, ct);
 
+        // Read before the diff below, which assigns as it compares: once it has run, the call no
+        // longer remembers which status it arrived with, and that is the only thing that separates
+        // "this edit closed the call" from "this edit corrected a call that was already closed".
+        var wasComplete = call.CallStatus == FieldCallStatus.Complete;
+
         // Field by field, so the audit row says what moved rather than only that something did. In the
         // order the form shows the boxes, so somebody reading the log reads it in the order the
         // engineer saw them.
@@ -294,20 +317,31 @@ public static class FieldCallsEndpoints
         diff.Set("remarks", call.Remarks, edited.Remarks, v => call.Remarks = v);
 
         var engineerName = await EngineerNameAsync(db, call.EngineerId, ct);
+        // Read here so both exits carry it. A correction does not touch the day log, but the phone
+        // replaces its row with whatever comes back — returning null would blank the days on screen.
+        var log = await AttendanceLogAsync(db, [call.Id], ct);
+        var days = log.GetValueOrDefault(call.Id) ?? [];
         // Handed back as read when nothing moved, and no audit row written for it. A form re-posted
         // untouched - Save tapped on a call the engineer only opened to look at - is not an event in
         // the life of the call.
-        if (!diff.HasChanges) return TypedResults.Ok(ToDto(call, engineerName));
+        if (!diff.HasChanges) return TypedResults.Ok(ToDto(call, engineerName, days));
 
-        call.UpdatedAt = DateTime.UtcNow;
+        var now = DateTime.UtcNow;
+        call.UpdatedAt = now;
+        // Guarded on the MOVE, not on the status: a later correction to a call that was already
+        // Complete must leave the original completion moment alone, which is the whole reason the
+        // turnaround figure is not read off updated_at. Forward-only means the move can only be to
+        // Complete (FieldCallRules.Reopening refuses the other direction), so there is no branch here
+        // that would clear the stamp.
+        if (!wasComplete && call.CallStatus == FieldCallStatus.Complete) call.CompletedAt = now;
         audit.Log(uid, "field-call.update", "field_call", call.Id,
             details: diff.Describe(call.CallNo), ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
-        return TypedResults.Ok(ToDto(call, engineerName));
+        return TypedResults.Ok(ToDto(call, engineerName, days));
     }
 
-    /// <summary>Stamps today onto a call as the day the engineer attended, and changes nothing else.
+    /// <summary>Records that the engineer was at the call today, and changes nothing else.
     ///
     /// The status is untouched, and that is the feature rather than an omission. Attending and
     /// finishing are two different claims: an engineer who drove out, found the part was wrong and
@@ -320,14 +354,23 @@ public static class FieldCallsEndpoints
     /// assembled from a list row would rewrite every other field from whatever that row was holding,
     /// which on a stale list means quietly undoing somebody's correction.
     ///
-    /// First attendance wins, as it does in <see cref="FieldOpsEndpoints"/>'s close-out: a call that
-    /// already carries a day keeps it, and comes back unchanged rather than refused. So tapping twice
-    /// is the same as tapping once, which is what a button on a list has to be - the engineer cannot
-    /// see whether the first tap landed until the list reloads, and a handset on a field connection
-    /// is the one place a request gets sent twice.</summary>
+    /// ONE ROW PER DAY, and a call can be marked on as many days as it takes. It used to be one row
+    /// per CALL - the first attendance won and every later tap came back unchanged - which meant the
+    /// Thursday in the example above could not be recorded at all. Now the first tap of each day
+    /// writes a day; a second tap the same day is the same day, so a retry on a dropped field
+    /// connection is still not a second visit. That idempotency is why this can stay a single button
+    /// on a list: the engineer cannot see whether the first tap landed until the list reloads.
+    ///
+    /// Repeating a day WITH remarks replaces that day's note, because the engineer correcting what
+    /// they wrote has nowhere else to do it. Repeating it without remarks leaves the note alone,
+    /// which is what keeps the retry case from blanking one.
+    ///
+    /// <see cref="FieldCall.AttendedDate"/> still holds the FIRST day and is still written here, so
+    /// the reports, the correction form and <see cref="FieldOpsEndpoints"/>'s close-out all go on
+    /// meaning what they meant.</summary>
     internal static async Task<Results<Ok<FieldCallDto>, NotFound, BadRequest<string>>> MarkAttendedAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, IAuditService audit, HttpContext http,
-        CancellationToken ct)
+        long id, [FromBody] MarkAttendedRequest? req, ClaimsPrincipal user, AppDbContext db,
+        IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
 
@@ -337,18 +380,79 @@ public static class FieldCallsEndpoints
         if (call.EngineerId != uid)
             return TypedResults.BadRequest($"{call.CallNo} was logged by another engineer.");
 
-        var engineerName = await EngineerNameAsync(db, call.EngineerId, ct);
-        if (call.AttendedDate is not null) return TypedResults.Ok(ToDto(call, engineerName));
+        var remarks = Trimmed(req?.Remarks);
+        // Checked here rather than left to MySQL, for the reason FieldCallRules.TooLong gives.
+        if (FieldCallRules.TooLong(remarks, 1000, "Remarks") is { } tooLong)
+            return TypedResults.BadRequest(tooLong);
 
         var today = ShopClock.Today;
-        call.AttendedDate = today;
-        call.UpdatedAt = DateTime.UtcNow;
-        audit.Log(uid, "field-call.attended", "field_call", call.Id,
-            details: $"{call.CallNo}: attended {today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}",
-            ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
+        var existing = await db.FieldCallAttendances
+            .FirstOrDefaultAsync(a => a.FieldCallId == call.Id && a.AttendedDate == today, ct);
 
-        return TypedResults.Ok(ToDto(call, engineerName));
+        var day = today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        switch (FieldCallRules.Attendance(existing is not null, existing?.Remarks, remarks))
+        {
+            case FieldCallRules.AttendanceAction.AddDay:
+                db.FieldCallAttendances.Add(new FieldCallAttendance
+                {
+                    FieldCallId = call.Id,
+                    AttendedDate = today,
+                    Remarks = remarks,
+                    MarkedByUserId = uid,
+                });
+
+                // The first day the call was ever attended keeps its own column. Left alone
+                // afterwards: it is the FIRST attendance, and a later day must not restate it.
+                if (call.AttendedDate is null) call.AttendedDate = today;
+                call.UpdatedAt = DateTime.UtcNow;
+
+                audit.Log(uid, "field-call.attended", "field_call", call.Id,
+                    details: $"{call.CallNo}: attended {day}" + (remarks is null ? "" : $" — {remarks}"),
+                    ip: http.GetIp());
+                await db.SaveChangesAsync(ct);
+                break;
+
+            case FieldCallRules.AttendanceAction.ChangeNote:
+                existing!.Remarks = remarks;
+                // Not call.UpdatedAt: the call still says what it said. What moved is one day's note,
+                // and "updated" on the register card means the entry itself was corrected.
+                audit.Log(uid, "field-call.attended.remarks", "field_call", call.Id,
+                    details: $"{call.CallNo}: {day} note — {remarks}", ip: http.GetIp());
+                await db.SaveChangesAsync(ct);
+                break;
+
+            case FieldCallRules.AttendanceAction.NothingToDo:
+                // A second tap on a day already recorded. Answered with the call as it stands, which
+                // is what makes a retry on a dropped connection harmless.
+                break;
+        }
+
+        var engineerName = await EngineerNameAsync(db, call.EngineerId, ct);
+        var log = await AttendanceLogAsync(db, [call.Id], ct);
+        return TypedResults.Ok(ToDto(call, engineerName, log.GetValueOrDefault(call.Id)));
+    }
+
+    /// <summary>Every attendance day for the given calls, oldest first, keyed by call.
+    ///
+    /// One query for the whole page rather than one per row — the register list returns up to 500
+    /// calls, and a per-row read would be 500 round trips to render one screen.</summary>
+    private static async Task<Dictionary<long, List<FieldCallAttendanceDto>>> AttendanceLogAsync(
+        AppDbContext db, IReadOnlyCollection<long> callIds, CancellationToken ct)
+    {
+        if (callIds.Count == 0) return [];
+
+        var rows = await db.FieldCallAttendances.AsNoTracking()
+            .Where(a => callIds.Contains(a.FieldCallId))
+            .OrderBy(a => a.AttendedDate).ThenBy(a => a.Id)
+            .ToListAsync(ct);
+        if (rows.Count == 0) return [];
+
+        var names = await EngineerNamesAsync(db, rows.Select(r => r.MarkedByUserId), ct);
+        return rows
+            .GroupBy(r => r.FieldCallId)
+            .ToDictionary(g => g.Key, g => g.Select(r => new FieldCallAttendanceDto(
+                r.Id, r.AttendedDate, r.Remarks, r.MarkedByUserId,
+                names.GetValueOrDefault(r.MarkedByUserId), r.CreatedAt)).ToList());
     }
 
     // ---------------------------------------------------------------- helpers
@@ -402,10 +506,17 @@ public static class FieldCallsEndpoints
             .ToDictionaryAsync(u => u.Id, u => u.FullName ?? u.Username, ct);
     }
 
-    private static FieldCallDto ToDto(FieldCall c, string? engineerName) =>
+    /// <summary><paramref name="attendances"/> passes straight through, null included, and the two
+    /// cases are different answers: an empty list means this call has no recorded days, null means
+    /// this endpoint did not read them. Only the turnaround projection sends null - it is a page
+    /// about how long calls take, and loading a day log per critical row to leave it undrawn would be
+    /// a query per row for nothing.</summary>
+    private static FieldCallDto ToDto(
+        FieldCall c, string? engineerName, List<FieldCallAttendanceDto>? attendances = null) =>
         new(c.Id, c.CallNo, c.CallType.ToString(), c.EngineerId, engineerName,
             c.CallReceivedDate, c.Locality.ToString(), c.CustomerName, c.CustomerId, c.CustomerAddress,
             c.CallReferenceNo, c.ContactPhone, c.ReportedComplaint,
             c.MachineModel, c.MachineSerial, c.SoftwareVersion,
-            c.AttendedDate, c.CallStatus.ToString(), c.Remarks, c.CreatedAt, c.UpdatedAt);
+            c.AttendedDate, c.CallStatus.ToString(), c.Remarks, c.CreatedAt, c.UpdatedAt,
+            c.CompletedAt, attendances);
 }

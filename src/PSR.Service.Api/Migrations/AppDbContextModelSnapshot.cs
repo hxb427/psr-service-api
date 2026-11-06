@@ -445,6 +445,10 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(20)")
                         .HasColumnName("call_type");
 
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("completed_at");
+
                     b.Property<string>("ContactPhone")
                         .HasMaxLength(50)
                         .HasColumnType("varchar(50)")
@@ -523,7 +527,49 @@ namespace PSR.Service.Api.Migrations
 
                     b.HasIndex("EngineerId");
 
+                    b.HasIndex("CallStatus", "CreatedAt");
+
                     b.ToTable("field_calls", (string)null);
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldCallAttendance", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("AttendedDate")
+                        .HasColumnType("date")
+                        .HasColumnName("attended_date");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("created_at");
+
+                    b.Property<long>("FieldCallId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("field_call_id");
+
+                    b.Property<long>("MarkedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("marked_by_user_id");
+
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)")
+                        .HasColumnName("remarks");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MarkedByUserId");
+
+                    b.HasIndex("FieldCallId", "AttendedDate")
+                        .IsUnique();
+
+                    b.ToTable("field_call_attendances", (string)null);
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldSale", b =>
@@ -3077,6 +3123,21 @@ namespace PSR.Service.Api.Migrations
                     b.HasOne("PSR.Service.Api.Data.Entities.User", null)
                         .WithMany()
                         .HasForeignKey("EngineerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldCallAttendance", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.FieldCall", null)
+                        .WithMany()
+                        .HasForeignKey("FieldCallId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("MarkedByUserId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

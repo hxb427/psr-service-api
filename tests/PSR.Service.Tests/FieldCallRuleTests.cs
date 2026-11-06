@@ -312,4 +312,79 @@ public class FieldCallRuleTests
         // call uneditable.
         FieldCallRules.Reopening(standing, standing).Should().BeNull();
     }
+
+    // ---------------------------------------------------------------- attendance
+    // A call is not always one visit. The register used to hold a single attended day per call and
+    // the first one won, so an engineer who went back on the Thursday had nowhere to say so. These
+    // pin the rule that replaced it, and in particular the two cases a second tap can mean.
+
+    [Fact]
+    public void A_day_not_yet_recorded_is_added()
+    {
+        FieldCallRules.Attendance(dayAlreadyMarked: false, recordedRemarks: null, sentRemarks: null)
+            .Should().Be(FieldCallRules.AttendanceAction.AddDay);
+    }
+
+    [Fact]
+    public void A_fresh_day_is_added_with_whatever_note_came_with_it()
+    {
+        FieldCallRules.Attendance(false, null, "Site closed, going back Thursday")
+            .Should().Be(FieldCallRules.AttendanceAction.AddDay);
+    }
+
+    [Fact]
+    public void A_second_tap_on_the_same_day_is_not_a_second_visit()
+    {
+        // The retry case, and the reason this can stay one button on a list: a handset on a field
+        // connection resends what it could not confirm, and the engineer cannot see whether the
+        // first tap landed until the list reloads.
+        FieldCallRules.Attendance(dayAlreadyMarked: true, recordedRemarks: null, sentRemarks: null)
+            .Should().Be(FieldCallRules.AttendanceAction.NothingToDo);
+    }
+
+    [Fact]
+    public void A_retry_carrying_no_note_does_not_blank_the_one_already_written()
+    {
+        // The case that makes the "silence leaves it alone" rule worth having: this is a resend, not
+        // somebody asking for the note to be cleared.
+        FieldCallRules.Attendance(true, "Waiting on the replacement board", null)
+            .Should().Be(FieldCallRules.AttendanceAction.NothingToDo);
+    }
+
+    [Fact]
+    public void A_different_note_for_a_day_already_recorded_corrects_it()
+    {
+        // The sheet is the only place the engineer can reach that note, so a second tap has to be
+        // able to carry a correction even though the day itself cannot change.
+        FieldCallRules.Attendance(true, "Waiting on the board", "Board fitted, machine running")
+            .Should().Be(FieldCallRules.AttendanceAction.ChangeNote);
+    }
+
+    [Fact]
+    public void Re_sending_the_same_note_changes_nothing()
+    {
+        // Still a retry, just one that happened to carry its note again. Writing it back would put an
+        // audit row against a day nothing happened to.
+        FieldCallRules.Attendance(true, "Site closed", "Site closed")
+            .Should().Be(FieldCallRules.AttendanceAction.NothingToDo);
+    }
+
+    [Fact]
+    public void A_first_note_against_a_day_marked_silently_is_a_correction()
+    {
+        // Tapped first thing with nothing to say, then again once there was. The day stands; the
+        // note is new.
+        FieldCallRules.Attendance(true, null, "Customer rescheduled")
+            .Should().Be(FieldCallRules.AttendanceAction.ChangeNote);
+    }
+
+    [Fact]
+    public void An_over_long_attendance_note_is_refused_rather_than_truncated()
+    {
+        // Same limit and same reason as the call's own remarks: unchecked it reaches MySQL, which
+        // either 500s or quietly cuts the sentence in half.
+        FieldCallRules.TooLong(new string('x', 1001), 1000, "Remarks")
+            .Should().Be("Remarks cannot be longer than 1000 characters.");
+        FieldCallRules.TooLong(new string('x', 1000), 1000, "Remarks").Should().BeNull();
+    }
 }

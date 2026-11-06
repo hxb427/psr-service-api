@@ -122,4 +122,42 @@ internal static class FieldCallRules
         ?? TooLong(call.MachineSerial, 100, "Machine/part serial")
         ?? TooLong(call.SoftwareVersion, 50, "Software version")
         ?? TooLong(call.Remarks, 1000, "Remarks");
+
+    /// <summary>What a tap on "Attended today" actually does to the register.</summary>
+    public enum AttendanceAction
+    {
+        /// <summary>Nothing recorded for today yet — write the day.</summary>
+        AddDay,
+
+        /// <summary>Today is already recorded and the engineer has sent a different note for it.</summary>
+        ChangeNote,
+
+        /// <summary>Today is already recorded and nothing about it has changed.</summary>
+        NothingToDo,
+    }
+
+    /// <summary>Whether marking attendance today adds a day, edits today's note, or does nothing.
+    ///
+    /// The whole rule in one place because the three cases are easy to collapse into two by accident,
+    /// and the one that gets lost is the third. A handset on a field connection resends requests it
+    /// could not confirm, so a second tap on a day already marked must not write a second visit — but
+    /// it must still be able to carry a correction to the note, because the sheet that collects the
+    /// note is the only place the engineer can reach it.
+    ///
+    /// A repeat that carries NO note leaves the recorded one alone. That asymmetry is deliberate:
+    /// the silent retry is the common case and it must not blank what somebody typed. The cost is
+    /// that a note cannot be cleared back to nothing once written, only replaced — a trade worth
+    /// making in the direction of not losing what was said.</summary>
+    /// <param name="dayAlreadyMarked">Whether this call already carries today.</param>
+    /// <param name="recordedRemarks">The note held against today, where there is one.</param>
+    /// <param name="sentRemarks">What arrived on this request, already trimmed to null when blank.</param>
+    public static AttendanceAction Attendance(
+        bool dayAlreadyMarked, string? recordedRemarks, string? sentRemarks)
+    {
+        if (!dayAlreadyMarked) return AttendanceAction.AddDay;
+        if (sentRemarks is null) return AttendanceAction.NothingToDo;
+        return sentRemarks == recordedRemarks
+            ? AttendanceAction.NothingToDo
+            : AttendanceAction.ChangeNote;
+    }
 }
