@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 
 namespace PSR.Service.Api.Auth;
 
@@ -47,7 +48,7 @@ public static class AuthEndpoints
         user.LastLoginAt = DateTime.UtcNow;
 
         var roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray();
-        var (token, expires) = jwt.Issue(user, roles);
+        var (token, expires) = jwt.Issue(user, roles, http.GetClientId());
 
         await LogAuditAsync(db, user.Id, "auth.login.ok", ip: http.GetIp(), ct: ct);
         await db.SaveChangesAsync(ct);
@@ -71,6 +72,7 @@ public static class AuthEndpoints
         ClaimsPrincipal principal,
         AppDbContext db,
         JwtTokenService jwt,
+        HttpContext http,
         CancellationToken ct)
     {
         if (!principal.TryGetUserId(out var userId))
@@ -85,8 +87,11 @@ public static class AuthEndpoints
 
         // The token-version middleware has already matched the caller's tv against the database, so
         // reaching here means this session is current. Re-issue on the same version.
+        //
+        // Re-reading the client id matters here: a renewal has to land on the same lifetime the login
+        // did, and the only thing saying which client this is is the header on this request.
         var roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray();
-        var (token, expires) = jwt.Issue(user, roles);
+        var (token, expires) = jwt.Issue(user, roles, http.GetClientId());
 
         // Not audited: a renewal is not a security event, and one row per user per renewal interval
         // would bury the logins that do matter.
@@ -129,7 +134,7 @@ public static class AuthEndpoints
         user.TokenVersion++;
 
         var roles = user.UserRoles.Select(ur => ur.Role.Name).ToArray();
-        var (token, expires) = jwt.Issue(user, roles);
+        var (token, expires) = jwt.Issue(user, roles, http.GetClientId());
 
         await LogAuditAsync(db, user.Id, "auth.password.change.ok", ip: http.GetIp(), ct: ct);
         await db.SaveChangesAsync(ct);
@@ -217,4 +222,10 @@ internal static class HttpContextExtensions
 {
     public static string? GetIp(this HttpContext ctx)
         => ctx.Connection.RemoteIpAddress?.ToString();
+
+    /// <summary>Which app is calling, for the token lifetime. Deliberately the raw header —
+    /// <see cref="JwtTokenService.Issue"/> normalises it and treats anything it does not recognise as
+    /// the desktop client, so there is nothing to validate here.</summary>
+    public static string? GetClientId(this HttpContext ctx)
+        => ctx.Request.Headers[ClientVersionGate.ClientIdHeaderName].FirstOrDefault();
 }

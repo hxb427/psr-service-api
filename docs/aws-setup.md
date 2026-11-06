@@ -220,9 +220,13 @@ Jwt__Signing=<32+_CHAR_RANDOM_STRING>
 Jwt__Issuer=psr-service
 Jwt__Audience=psr-service-wpf
 Jwt__ExpiryHours=24
-# Nightly session cutoff — 03:00 IST. Sessions die overnight, not mid-shift.
+# Nightly cutoff for DESKTOP sessions — 03:00 IST. They die overnight, not mid-shift.
 Jwt__DailyCutoffLocalHour=3
 Jwt__LocalUtcOffsetHours=5.5
+# Android field portal: one week per login, exempt from the nightly cutoff (a phone is one
+# technician's, not a shared bench PC). Setting the cutoff flag true also caps it back to a day.
+Jwt__FieldPortalExpiryHours=168
+Jwt__FieldPortalDailyCutoff=false
 
 # Cert password from generate-cert.sh output
 Kestrel__Endpoints__Https__Certificate__Password=<PASSWORD_FROM_STEP_6>

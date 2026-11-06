@@ -4,6 +4,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Options;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 using Xunit;
 
 namespace PSR.Service.Tests;
@@ -116,5 +117,88 @@ public class JwtTokenServiceTests
         expires.Should().BeAfter(DateTime.UtcNow);
         expires.Should().BeOnOrBefore(svc.NextCutoffUtc(DateTime.UtcNow));
         expires.Should().BeOnOrBefore(DateTime.UtcNow.AddHours(24));
+    }
+
+    // ------------------------------------------------------- per-client lifetime (field portal)
+    // The Android field portal gets a week per login and is out of the nightly cutoff; the desktop
+    // keeps its day and its 3am wall. Which one applies is decided by the X-Client-Id header value
+    // the caller sent, because the risk the cutoff answers to belongs to the machine, not the account.
+
+    private static User Alice => new() { Id = 1, Username = "alice" };
+
+    [Fact]
+    public void Field_portal_token_lasts_a_week_and_ignores_the_nightly_cutoff()
+    {
+        var svc = NewService(Cutoff());
+        var (_, expires) = svc.Issue(Alice, new[] { "technician" }, ClientKinds.FieldPortal);
+
+        // A week out, so necessarily past tonight's cutoff — the point of the whole change.
+        expires.Should().BeAfter(svc.NextCutoffUtc(DateTime.UtcNow));
+        expires.Should().BeCloseTo(DateTime.UtcNow.AddHours(168), TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public void Desktop_token_keeps_its_cutoff_when_the_field_portal_lifetime_is_a_week()
+    {
+        // Both clients, one options object: raising the phone's lifetime must not reach across and
+        // leave a shared bench machine signed in overnight.
+        var svc = NewService(Cutoff());
+        var (_, expires) = svc.Issue(Alice, new[] { "admin" }, ClientKinds.Wpf);
+
+        expires.Should().BeOnOrBefore(svc.NextCutoffUtc(DateTime.UtcNow));
+    }
+
+    [Theory]
+    [InlineData(null)]          // desktop builds that predate the header
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-a-client")]
+    public void Unknown_client_ids_get_the_shorter_desktop_session(string? clientId)
+    {
+        // Same rule as the version gate: an id nobody recognises lands on the stricter treatment, so
+        // dropping the header is not a way to buy a week-long token.
+        var svc = NewService(Cutoff());
+        var (_, expires) = svc.Issue(Alice, new[] { "admin" }, clientId);
+
+        expires.Should().BeOnOrBefore(svc.NextCutoffUtc(DateTime.UtcNow));
+    }
+
+    [Fact]
+    public void Field_portal_client_id_is_matched_regardless_of_case_or_padding()
+    {
+        var svc = NewService(Cutoff());
+        var (_, expires) = svc.Issue(Alice, new[] { "technician" }, "  Field-Portal  ");
+
+        expires.Should().BeAfter(svc.NextCutoffUtc(DateTime.UtcNow));
+    }
+
+    [Fact]
+    public void Field_portal_can_be_put_back_under_the_cutoff_by_configuration()
+    {
+        var opts = Cutoff();
+        opts.FieldPortalDailyCutoff = true;
+
+        var svc = NewService(opts);
+        var (_, expires) = svc.Issue(Alice, new[] { "technician" }, ClientKinds.FieldPortal);
+
+        // Which also makes the week unreachable — 3am always arrives first. That is the documented
+        // consequence of the switch, not a bug in it.
+        expires.Should().BeOnOrBefore(svc.NextCutoffUtc(DateTime.UtcNow));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Constructor_throws_if_a_configured_lifetime_is_not_positive(int hours)
+    {
+        // A non-positive lifetime mints already-expired tokens: login succeeds and every call 401s.
+        var byDesktop = Cutoff(expiryHours: hours);
+        var act = () => NewService(byDesktop);
+        act.Should().Throw<InvalidOperationException>();
+
+        var byFieldPortal = Cutoff();
+        byFieldPortal.FieldPortalExpiryHours = hours;
+        var act2 = () => NewService(byFieldPortal);
+        act2.Should().Throw<InvalidOperationException>();
     }
 }
