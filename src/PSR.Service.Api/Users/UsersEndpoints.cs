@@ -94,8 +94,15 @@ public static class UsersEndpoints
         {
             Username = username,
             PasswordHash = PasswordHasher.Hash(req.Password),
-            FullName = req.FullName?.Trim(),
-            Email = req.Email?.Trim(),
+            // Blank becomes NULL, not "". This used to be a bare Trim(), and the asymmetry with the
+            // update path below - where AuditDiff.Set normalises blank to null - was a real bug on
+            // every screen that shows a person's name. Those all resolve it as
+            // `FullName ?? Username`, and a coalesce only catches null: a user created with the name
+            // box left empty carried "", so the fallback never fired and the name column came back
+            // blank. Editing the same user later silently repaired them, which is why it showed up
+            // on some records and not others.
+            FullName = Blank(req.FullName),
+            Email = Blank(req.Email),
             IsActive = true,
             IsFieldTechnician = req.IsFieldTechnician,
             MustChangePassword = true,
@@ -319,6 +326,17 @@ public static class UsersEndpoints
 
         return matched.Count == names.Count ? matched : null;
     }
+
+    /// <summary>Trimmed, or null when nothing is left of it.
+    ///
+    /// An optional text column holds one value for "not given", and that value is NULL. Storing ""
+    /// there means two of them, and then every reader has to know about both - which is how a name
+    /// resolved as <c>FullName ?? Username</c> ends up blank. Same rule as
+    /// <see cref="Audit.AuditDiff.Set(string, string?, string?, Action{string?})"/> applies on the
+    /// way through an update, so a user now reads the same whether they were just created or just
+    /// corrected.</summary>
+    private static string? Blank(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static UserListItemDto ToListItem(User u, int actorRank) => new(
         u.Id, u.Username, u.FullName, u.Email, u.IsActive, u.IsFieldTechnician, u.MustChangePassword, u.LastLoginAt,
