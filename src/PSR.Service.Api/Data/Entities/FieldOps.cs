@@ -72,14 +72,29 @@ public class FieldService
     /// not charged customer rates for the seal in the same breath.</summary>
     public FieldRateType RateType { get; set; } = FieldRateType.Customer;
 
-    // The chosen service charge, snapshotted. The id stays live so the catalogue can still be ranked by
-    // what technicians actually pick, but the description and the figure are copies - repricing a
-    // charge next month must not rewrite what a customer was told last month.
-    public long? ServiceChargeId { get; set; }
-    public string? ServiceChargeDescription { get; set; }
-    /// <summary>Tax-exclusive, like every other rate in this system.</summary>
-    public decimal ServiceChargeAmount { get; set; }
-    public decimal ServiceChargeTaxPercent { get; set; }
+    /// <summary>The charges agreed for the work itself, as opposed to the parts. Several, because one
+    /// visit routinely does several priced jobs - a mainboard swap AND a calibration - and billing one
+    /// of them meant the other was either given away or written into the parts.
+    ///
+    /// Each one is snapshotted onto its own row; see <see cref="FieldServiceCharge"/>. The visit used
+    /// to carry a single charge in four columns of its own, which this replaces - those columns were
+    /// copied into this table and dropped, so the charges a visit billed live in exactly one place.</summary>
+    public List<FieldServiceCharge> Charges { get; set; } = new();
+
+    /// <summary>Whether the standing field visit charge was added to this visit.
+    ///
+    /// Kept apart from <see cref="VisitChargeAmount"/> rather than inferred from it being non-zero: a
+    /// visit the technician charged for at a rate the office had set to nil is a different fact from a
+    /// visit they waived, and only this flag can tell the two apart afterwards.</summary>
+    public bool VisitChargeApplied { get; set; }
+
+    /// <summary>What the visit charge was when this visit was filed, snapshotted for the same reason
+    /// every other figure here is: the office may raise it next month, and this record has to keep
+    /// saying what the customer was told today. Nil when it was not applied.
+    ///
+    /// Carries no tax of its own - it is a flat attendance fee, so it lands in
+    /// <see cref="TaxableAmount"/> and adds nothing to <see cref="TaxAmount"/>.</summary>
+    public decimal VisitChargeAmount { get; set; }
 
     public FieldPaymentMethod? PaymentMethod { get; set; }
     public FieldWarrantyStatus? WarrantyStatus { get; set; }
@@ -119,6 +134,28 @@ public class FieldService
     public List<FieldServiceLine> Lines { get; set; } = new();
 }
 
+/// <summary>One service charge billed on a visit, snapshotted.
+///
+/// <see cref="ServiceChargeId"/> stays live so the catalogue can still be ranked by what technicians
+/// actually pick, while the description and the figures are copies — repricing a charge next month must
+/// not rewrite what a customer was told last month.</summary>
+public class FieldServiceCharge
+{
+    public long Id { get; set; }
+    public long FieldServiceId { get; set; }
+    public long ServiceChargeId { get; set; }
+    public string? Description { get; set; }
+    /// <summary>Tax-exclusive, like every other rate in this system.</summary>
+    public decimal Amount { get; set; }
+    public decimal TaxPercent { get; set; }
+    /// <summary>Tax on <see cref="Amount"/>, rounded to the paise when the charge was priced. Stored
+    /// rather than recomputed on read, so the visit's own tax figure is reproducible from its parts:
+    /// rounding per charge and once at the end are not the same number.</summary>
+    public decimal TaxAmount { get; set; }
+
+    public FieldService FieldService { get; set; } = null!;
+}
+
 public enum FieldLineKind
 {
     Used,       // part fitted/consumed from technician stock
@@ -146,6 +183,20 @@ public class FieldServiceLine
     public string? SerialNo { get; set; }
     /// <summary>Collected lines: technician declared the collected unit faulty.</summary>
     public bool Defective { get; set; }
+
+    /// <summary>Whether this line's money is added to what the customer owes.
+    ///
+    /// The line is priced either way — <see cref="UnitPrice"/>, <see cref="Amount"/> and
+    /// <see cref="TaxAmount"/> say what the part was worth whichever way this falls — and only the
+    /// visit totals are affected. That is the same split <see cref="FieldService.AmountPayable"/>
+    /// makes against <see cref="FieldService.TotalAmount"/> on a warranty job, for the same reason:
+    /// the shop needs to be able to see what it handed over without charging for.
+    ///
+    /// False for a Collected line, always: that is the customer's own broken part coming off their
+    /// machine. False for a serial-tracked unit, always: those are billed on the paperwork the office
+    /// raises against the machine, never on a visit receipt — see <see cref="Stock.FieldLineRules"/>.
+    /// Otherwise it is the technician's answer on the form, and it defaults to NOT billing.</summary>
+    public bool Billable { get; set; }
 
     public FieldService FieldService { get; set; } = null!;
 }

@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using System.Globalization;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,7 +18,11 @@ public record AppSettingsDto(
     string MinClientVersion, int DefaultWarrantyMonths,
     bool ServiceRecordEditEnabled = false,
     bool DocumentLineEditEnabled = true,
-    string MinFieldPortalVersion = "0.0.0");
+    string MinFieldPortalVersion = "0.0.0",
+    /// <summary>What a field visit is charged for attendance, or null where the caller is not shown
+    /// money at all — the one figure on this payload, so it follows the same rule every rate in the
+    /// system does (<see cref="PricingVisibility"/>) rather than being the back door around it.</summary>
+    decimal? FieldVisitCharge = null);
 
 /// <summary>Null fields are left untouched, which is what lets an older client that does not know about
 /// the sale switch save the settings it does know without silently turning the other one off.</summary>
@@ -26,7 +31,8 @@ public record UpdateAppSettingsRequest(
     string? MinClientVersion, int? DefaultWarrantyMonths,
     bool? ServiceRecordEditEnabled = null,
     bool? DocumentLineEditEnabled = null,
-    string? MinFieldPortalVersion = null);
+    string? MinFieldPortalVersion = null,
+    decimal? FieldVisitCharge = null);
 
 /// <summary>What a client — possibly one too old to log in — may learn anonymously: the version
 /// floor that applies to it. Served on /app-version, which the version gate exempts.</summary>
@@ -82,6 +88,21 @@ public class AppSettingsService(AppDbContext db)
     public Task<int> DefaultWarrantyMonthsAsync(CancellationToken ct)
         => GetIntAsync(SettingKeys.DefaultWarrantyMonths, 0, ct);
 
+    /// <summary>Parsed invariantly, because this is a stored decimal and not something a human typed
+    /// in their locale: a row written as "250.00" must read back the same on a server set to a comma
+    /// decimal separator. An unparseable row reads as the fallback rather than throwing — a corrupt
+    /// setting should cost the feature, not every request that touches settings.</summary>
+    public async Task<decimal> GetDecimalAsync(string key, decimal fallback, CancellationToken ct)
+    {
+        var v = await db.AppSettings.AsNoTracking().Where(s => s.Key == key).Select(s => s.Value).FirstOrDefaultAsync(ct);
+        return decimal.TryParse(v, NumberStyles.Number, CultureInfo.InvariantCulture, out var d) ? d : fallback;
+    }
+
+    /// <summary>What the shop charges for attending a field visit. 0 — the default — means it does
+    /// not, and an estate that has never been told about this keeps billing exactly as it did.</summary>
+    public Task<decimal> FieldVisitChargeAsync(CancellationToken ct)
+        => GetDecimalAsync(SettingKeys.FieldVisitCharge, 0m, ct);
+
     /// <summary>Defaults OFF. Rewriting what a booked record says about a machine is a correction
     /// tool, so an estate that has never heard of it must not silently have it switched on.</summary>
     public Task<bool> ServiceRecordEditEnabledAsync(CancellationToken ct)
@@ -120,7 +141,8 @@ public static class SettingsEndpoints
         return TypedResults.Ok(new AppVersionDto(floor));
     }
 
-    private static async Task<Ok<AppSettingsDto>> GetAsync(AppSettingsService settings, CancellationToken ct)
+    private static async Task<Ok<AppSettingsDto>> GetAsync(
+        AppSettingsService settings, ClaimsPrincipal user, CancellationToken ct)
         => TypedResults.Ok(new AppSettingsDto(
             await settings.InvoiceGenerationEnabledAsync(ct),
             await settings.SaleInvoiceGenerationEnabledAsync(ct),
@@ -128,7 +150,11 @@ public static class SettingsEndpoints
             await settings.DefaultWarrantyMonthsAsync(ct),
             await settings.ServiceRecordEditEnabledAsync(ct),
             await settings.DocumentLineEditEnabledAsync(ct),
-            await settings.MinFieldPortalVersionAsync(ct)));
+            await settings.MinFieldPortalVersionAsync(ct),
+            // The field portal reads this to quote the visit, so a technician must see it — which
+            // PricingScope.Quoting already allows. The roles that see no money anywhere (store_manager,
+            // accounts, inward) do not get a rate handed to them by way of the settings payload.
+            PricingVisibility.SellingRates(user) ? await settings.FieldVisitChargeAsync(ct) : null));
 
     private static async Task<Results<Ok<AppSettingsDto>, BadRequest<string>>> UpdateAsync(
         [FromBody] UpdateAppSettingsRequest req, ClaimsPrincipal user,
@@ -162,6 +188,11 @@ public static class SettingsEndpoints
         if (req.DefaultWarrantyMonths is { } dwm && (dwm < 0 || dwm > 600))
             return TypedResults.BadRequest("Default warranty months must be between 0 and 600 (0 = no fallback).");
 
+        // Capped, not just floored. A visit charge is added to every service entry by default, so a
+        // slipped decimal point does not show up as one odd bill — it shows up as a week of them.
+        if (req.FieldVisitCharge is { } fvc && (fvc < 0m || fvc > 100_000m))
+            return TypedResults.BadRequest("The field visit charge must be between 0 and 1,00,000 (0 = no charge).");
+
         // Managers may work the invoice switches, not the two settings that reach past billing: the
         // version floor can lock every client out of the API, and the warranty default silently
         // changes what the whole estate calls in-warranty. Compared against what is stored rather
@@ -189,6 +220,12 @@ public static class SettingsEndpoints
         // an older client leaves it alone rather than reading as "off".
         if (req.DocumentLineEditEnabled is { } lineEditFlag)
             await settings.SetBoolAsync(SettingKeys.DocumentLineEditEnabled, lineEditFlag, ct);
+        // A manager's to set, like the invoice switches: it is a price the shop quotes, not a control
+        // over what other people are allowed to do. Written invariantly so the stored row reads back
+        // the same whatever the server's locale — see GetDecimalAsync.
+        if (req.FieldVisitCharge is { } visitCharge)
+            await settings.SetStringAsync(SettingKeys.FieldVisitCharge,
+                visitCharge.ToString("0.##", CultureInfo.InvariantCulture), ct);
         if (req.DefaultWarrantyMonths is { } months && isAdmin)
             await settings.SetStringAsync(SettingKeys.DefaultWarrantyMonths, months.ToString(), ct);
         if (req.ServiceRecordEditEnabled is { } editFlag && isAdmin)
@@ -211,7 +248,8 @@ public static class SettingsEndpoints
                    + (minToStore is not null ? $", {SettingKeys.MinClientVersion}={minToStore}" : "")
                    + (fieldMinToStore is not null ? $", {SettingKeys.MinFieldPortalVersion}={fieldMinToStore}" : "")
                    + (req.DefaultWarrantyMonths is { } d ? $", {SettingKeys.DefaultWarrantyMonths}={d}" : "")
-                   + (req.ServiceRecordEditEnabled is { } e ? $", {SettingKeys.ServiceRecordEditEnabled}={e}" : ""),
+                   + (req.ServiceRecordEditEnabled is { } e ? $", {SettingKeys.ServiceRecordEditEnabled}={e}" : "")
+                   + (req.FieldVisitCharge is { } v ? $", {SettingKeys.FieldVisitCharge}={v:0.##}" : ""),
             ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
@@ -222,6 +260,10 @@ public static class SettingsEndpoints
             await settings.DefaultWarrantyMonthsAsync(ct),
             await settings.ServiceRecordEditEnabledAsync(ct),
             await settings.DocumentLineEditEnabledAsync(ct),
-            await settings.MinFieldPortalVersionAsync(ct)));
+            await settings.MinFieldPortalVersionAsync(ct),
+            // Not projected here: only Admin and Manager reach this endpoint at all, and both see
+            // money. Reading it back rather than echoing the request is what shows a rejected or
+            // reformatted figure as what was actually stored.
+            await settings.FieldVisitChargeAsync(ct)));
     }
 }

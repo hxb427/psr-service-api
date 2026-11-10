@@ -48,4 +48,23 @@ internal static class FieldLineRules
     /// followed unit by unit AND the technician could actually read the number off it.</summary>
     public static bool CollectedEntersSerialTracking(Part part, string? serialNo) =>
         part.IsSerialTracked && !string.IsNullOrWhiteSpace(serialNo);
+
+    /// <summary>Whether this line's money goes onto what the customer owes.
+    ///
+    /// Two of the three answers are not the technician's to give, which is why this is a rule here
+    /// rather than a flag the request is believed about:
+    ///
+    /// <list type="bullet">
+    /// <item>A <b>Collected</b> line is never billed. It is the customer's own broken part coming off
+    /// their machine; it rides the record for traceability, not for money.</item>
+    /// <item>A <b>serial-tracked</b> unit is never billed on a visit. Those are followed unit by unit
+    /// and invoiced by the office against the machine they went onto — a technician's receipt billing
+    /// one as well is how a customer ends up paying for a board twice, months apart, with two pieces
+    /// of paper that each look right.</item>
+    /// <item>Everything else — the seals, oils and fasteners a technician carries — is
+    /// <paramref name="requested"/>, the answer given on the form. It defaults to not billing, so a
+    /// part is charged for because somebody ticked it rather than because nobody unticked it.</item>
+    /// </list></summary>
+    public static bool Billable(FieldLineKind kind, Part part, bool requested) =>
+        kind == FieldLineKind.Used && !part.IsSerialTracked && requested;
 }

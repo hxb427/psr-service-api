@@ -33,20 +33,42 @@ internal static class FieldVisitRules
 
     /// <summary>What a visit adds up to.
     ///
+    /// Three things are billed and they are deliberately three parameters rather than one summed
+    /// figure: the parts that were marked to bill, the service charges agreed for the work, and the
+    /// standing visit charge. A visit routinely has one of them and not the others — a free part fitted
+    /// under goodwill with a calibration charged for, or an attendance fee and nothing else — so none
+    /// of them may assume another is there.
+    ///
+    /// <paramref name="lines"/> is every part line, billable or not, because which ones count is this
+    /// rule's to decide and not the caller's. A line that is not billed still carries its rate: see
+    /// <see cref="Data.Entities.FieldServiceLine.Billable"/>.
+    ///
+    /// <paramref name="visitChargeAmount"/> carries no tax of its own — it is a flat attendance fee —
+    /// so it adds to the taxable base and nothing to the tax.
+    ///
     /// <paramref name="warranty"/> decides only the last figure. An in-warranty repair still has a
     /// value — the parts left the shop's stock and somebody's day went into fitting them — so taxable,
     /// tax and total record it in full, and <see cref="VisitTotals.Payable"/> alone goes to nil. That
     /// is the figure the technician collects and the receipt prints, and keeping it apart from the
     /// total is what stops a covered repair reading as a repair that cost nothing to carry out.</summary>
     public static VisitTotals Totals(
-        IEnumerable<(decimal Amount, decimal TaxAmount)> lines,
-        decimal chargeAmount, decimal chargeTaxPercent,
+        IEnumerable<(decimal Amount, decimal TaxAmount, bool Billable)> lines,
+        IEnumerable<(decimal Amount, decimal TaxAmount)> charges,
+        decimal visitChargeAmount,
         FieldWarrantyStatus? warranty)
     {
-        var taxable = chargeAmount;
-        var tax = Tax(chargeAmount, chargeTaxPercent);
+        var taxable = visitChargeAmount;
+        var tax = 0m;
+        foreach (var c in charges)
+        {
+            taxable += c.Amount;
+            tax += c.TaxAmount;
+        }
         foreach (var l in lines)
         {
+            // A part nobody is charging for contributes neither its amount nor its tax. It stays
+            // priced on its own line so the shop can see what it gave away.
+            if (!l.Billable) continue;
             taxable += l.Amount;
             tax += l.TaxAmount;
         }

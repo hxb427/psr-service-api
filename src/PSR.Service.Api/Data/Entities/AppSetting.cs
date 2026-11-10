@@ -47,6 +47,15 @@ public static class SettingKeys
     /// up to, and nobody can hand-price a unit on the way out.</summary>
     public const string DocumentLineEditEnabled = "document_line_edit_enabled";
 
+    /// <summary>The standing charge for attending a field visit, in rupees — what the shop asks for
+    /// turning up, before any parts or service charges. The field portal adds it to a service entry by
+    /// default and the technician may take it off; the figure itself is the office's to set.
+    ///
+    /// 0 = the shop does not charge for attendance, and the phone then does not offer the box at all:
+    /// a tick that adds nothing is a question nobody should have to answer. Flat, with no tax of its
+    /// own — unlike a service charge, which carries its own rate.</summary>
+    public const string FieldVisitCharge = "field_visit_charge";
+
     /// <summary>Whether the Global Search page may edit a booked job's descriptive fields directly
     /// (the legacy app's "Edit Service Record"). Off unless an admin turns it on: it rewrites what a
     /// record says about a machine without the workflow having moved, so it is a correction tool for

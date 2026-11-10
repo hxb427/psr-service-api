@@ -29,6 +29,7 @@ public class AppDbContext : DbContext
     public DbSet<TechnicianTransferSerial> TechnicianTransferSerials => Set<TechnicianTransferSerial>();
     public DbSet<FieldService> FieldServices => Set<FieldService>();
     public DbSet<FieldServiceLine> FieldServiceLines => Set<FieldServiceLine>();
+    public DbSet<FieldServiceCharge> FieldServiceCharges => Set<FieldServiceCharge>();
     public DbSet<FieldSale> FieldSales => Set<FieldSale>();
     public DbSet<FieldSaleLine> FieldSaleLines => Set<FieldSaleLine>();
     public DbSet<FieldCall> FieldCalls => Set<FieldCall>();

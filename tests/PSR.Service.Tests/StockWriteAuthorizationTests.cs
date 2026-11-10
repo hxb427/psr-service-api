@@ -13,6 +13,7 @@ using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 using Xunit;
 
@@ -49,6 +50,8 @@ public class StockWriteAuthorizationTests
         builder.Services.AddScoped<NumberSequenceService>();
         builder.Services.AddScoped<StockLedgerService>();
         builder.Services.AddScoped<SerialService>();
+        // Read by the field service handler for the standing field visit charge.
+        builder.Services.AddScoped<AppSettingsService>();
 
         var app = builder.Build();
 

@@ -154,10 +154,10 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         // default is the truth about them rather than a placeholder.
         b.Property(x => x.RateType).HasColumnName("rate_type").HasConversion<string>()
             .HasMaxLength(16).HasDefaultValue(FieldRateType.Customer);
-        b.Property(x => x.ServiceChargeId).HasColumnName("service_charge_id");
-        b.Property(x => x.ServiceChargeDescription).HasColumnName("service_charge_description").HasMaxLength(200);
-        b.Property(x => x.ServiceChargeAmount).HasColumnName("service_charge_amount").HasPrecision(12, 2);
-        b.Property(x => x.ServiceChargeTaxPercent).HasColumnName("service_charge_tax_percent").HasPrecision(5, 2);
+        // False for existing rows: the visit charge did not exist when they were filed, so none of
+        // them had one — which is exactly what the default says about them.
+        b.Property(x => x.VisitChargeApplied).HasColumnName("visit_charge_applied").HasDefaultValue(false);
+        b.Property(x => x.VisitChargeAmount).HasColumnName("visit_charge_amount").HasPrecision(12, 2);
         b.Property(x => x.PaymentMethod).HasColumnName("payment_method").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.WarrantyStatus).HasColumnName("warranty_status").HasConversion<string>().HasMaxLength(10);
 
@@ -177,10 +177,6 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.Property(x => x.CreatedByUserId).HasColumnName("created_by_user_id");
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
 
-        // Restrict, not Cascade: a reference row that field records point at must not be deletable out
-        // from under them, and the service charge keeps its own snapshotted description and figure so
-        // the record still reads correctly even if the catalogue row is later deactivated.
-        b.HasOne<ServiceCharge>().WithMany().HasForeignKey(x => x.ServiceChargeId).OnDelete(DeleteBehavior.Restrict);
         // Restrict as well: the call is the register's account of why this visit happened, and a
         // register entry must not be deletable out from under the visit that answers it.
         b.HasOne<FieldCall>().WithMany().HasForeignKey(x => x.FieldCallId).OnDelete(DeleteBehavior.Restrict);
@@ -188,6 +184,8 @@ public class FieldServiceConfiguration : IEntityTypeConfiguration<FieldService>
         b.HasOne<District>().WithMany().HasForeignKey(x => x.DistrictId).OnDelete(DeleteBehavior.Restrict);
 
         b.HasMany(x => x.Lines).WithOne(x => x.FieldService)
+            .HasForeignKey(x => x.FieldServiceId).OnDelete(DeleteBehavior.Cascade);
+        b.HasMany(x => x.Charges).WithOne(x => x.FieldService)
             .HasForeignKey(x => x.FieldServiceId).OnDelete(DeleteBehavior.Cascade);
         b.HasIndex(x => x.TechnicianId);
         b.HasIndex(x => x.CreatedAt);
@@ -219,8 +217,37 @@ public class FieldServiceLineConfiguration : IEntityTypeConfiguration<FieldServi
         b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
         b.Property(x => x.SerialNo).HasColumnName("serial_no").HasMaxLength(128);
         b.Property(x => x.Defective).HasColumnName("defective");
+        // No default. Every existing row is backfilled by the migration to what it actually billed —
+        // true for a fitted part, false for a collected unit — because the totals already stored on
+        // those visits were computed that way, and a default would have to be wrong for one of them.
+        b.Property(x => x.Billable).HasColumnName("billable");
 
         b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+/// <summary>One snapshotted service charge on a visit. Restrict on the catalogue row, not Cascade: a
+/// reference row that field records point at must not be deletable out from under them, and the
+/// snapshot here means the record still reads correctly after the catalogue row is deactivated.</summary>
+public class FieldServiceChargeConfiguration : IEntityTypeConfiguration<FieldServiceCharge>
+{
+    public void Configure(EntityTypeBuilder<FieldServiceCharge> b)
+    {
+        b.ToTable("field_service_charges");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.FieldServiceId).HasColumnName("field_service_id");
+        b.Property(x => x.ServiceChargeId).HasColumnName("service_charge_id");
+        b.Property(x => x.Description).HasColumnName("description").HasMaxLength(200);
+        b.Property(x => x.Amount).HasColumnName("amount").HasPrecision(12, 2);
+        b.Property(x => x.TaxPercent).HasColumnName("tax_percent").HasPrecision(5, 2);
+        b.Property(x => x.TaxAmount).HasColumnName("tax_amount").HasPrecision(12, 2);
+
+        b.HasOne<ServiceCharge>().WithMany().HasForeignKey(x => x.ServiceChargeId)
+            .OnDelete(DeleteBehavior.Restrict);
+        // One row per charge per visit. The form offers each charge once, and a duplicate could only
+        // ever be a double-tap or a replayed request — both of which would bill the customer twice.
+        b.HasIndex(x => new { x.FieldServiceId, x.ServiceChargeId }).IsUnique();
     }
 }
 

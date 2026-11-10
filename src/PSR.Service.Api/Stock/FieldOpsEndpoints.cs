@@ -7,6 +7,7 @@ using PSR.Service.Api.Auth;
 using PSR.Service.Api.Common;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 
 namespace PSR.Service.Api.Stock;
 
@@ -69,7 +70,8 @@ public static class FieldOpsEndpoints
     internal static IQueryable<FieldService> VisitQuery(
         AppDbContext db, long? technicianId, DateTime? from, DateTime? to, int take)
     {
-        var q = db.FieldServices.AsNoTracking().Include(f => f.Lines).AsQueryable();
+        var q = db.FieldServices.AsNoTracking()
+            .Include(f => f.Lines).Include(f => f.Charges).AsQueryable();
         if (technicianId is { } tid) q = q.Where(f => f.TechnicianId == tid);
 
         var (fromUtc, toUtc) = ShopClock.UtcWindow(from, to);
@@ -99,7 +101,7 @@ public static class FieldOpsEndpoints
     private static async Task<Results<Created<FieldServiceDto>, BadRequest<string>, ForbidHttpResult>> CreateServiceAsync(
         [FromBody] CreateFieldServiceRequest req, ClaimsPrincipal user, AppDbContext db,
         NumberSequenceService seq, StockLedgerService ledger, SerialService serial,
-        IAuditService audit, HttpContext http, CancellationToken ct)
+        AppSettingsService settings, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
         var tech = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
@@ -120,8 +122,13 @@ public static class FieldOpsEndpoints
             return TypedResults.BadRequest(fixErr);
         if (await ValidatePlaceAsync(db, req.StateId, req.DistrictId, ct) is { } placeErr)
             return TypedResults.BadRequest(placeErr);
-        var (charge, chargeErr) = await ResolveServiceChargeAsync(db, req.ServiceChargeId, ct);
+        var (charges, chargeErr) =
+            await ResolveServiceChargesAsync(db, req.ServiceChargeIds, req.ServiceChargeId, ct);
         if (chargeErr is not null) return TypedResults.BadRequest(chargeErr);
+        // The office's figure, never the request's, and snapshotted onto the visit below so a raise
+        // next month does not rewrite what this customer was told. Looked up only when the box was
+        // ticked: a visit with no attendance fee has no figure to snapshot.
+        var visitCharge = req.ApplyVisitCharge ? await settings.FieldVisitChargeAsync(ct) : 0m;
         var (call, callErr) = await ResolveFieldCallAsync(db, req.FieldCallId, uid, ct);
         if (callErr is not null) return TypedResults.BadRequest(callErr);
         // Incomplete when unsaid, matching the register's own default: a visit that says nothing
@@ -146,12 +153,8 @@ public static class FieldOpsEndpoints
                 Complaint = req.Complaint?.Trim(), Cause = req.Cause?.Trim(),
                 WorkDone = req.WorkDone?.Trim(), Remarks = req.Remarks?.Trim(),
                 RateType = rateType,
-                ServiceChargeId = charge?.Id,
-                // Snapshotted, not joined on read: the charge may be renamed or repriced tomorrow and
-                // this record has to keep saying what the customer was told today.
-                ServiceChargeDescription = charge?.Name,
-                ServiceChargeAmount = charge?.Charge ?? 0m,
-                ServiceChargeTaxPercent = charge?.TaxPercent ?? 0m,
+                VisitChargeApplied = req.ApplyVisitCharge,
+                VisitChargeAmount = visitCharge,
                 PaymentMethod = payment,
                 WarrantyStatus = warranty,
                 LocationLabel = Trimmed(req.LocationLabel),
@@ -166,7 +169,7 @@ public static class FieldOpsEndpoints
             foreach (var lineReq in req.Lines ?? [])
             {
                 var (line, err) = await BuildLineAsync(db, ledger, serial, lineReq.Kind, lineReq.PartId,
-                    lineReq.Qty, lineReq.SerialNo, lineReq.Defective, uid, techName,
+                    lineReq.Qty, lineReq.SerialNo, lineReq.Defective, lineReq.Billable, uid, techName,
                     fs.CustomerName, customerId, "FIELD_SERVICE", fs.Id, rateType, ct);
                 if (err is not null) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(err); }
                 line!.FieldServiceId = fs.Id;
@@ -174,10 +177,27 @@ public static class FieldOpsEndpoints
                 lines.Add(line);
             }
 
-            // Computed here from the lines the server just priced, never from anything the client sent.
+            // Snapshotted, not joined on read: a charge may be renamed or repriced tomorrow and this
+            // record has to keep saying what the customer was told today. Its tax is rounded here, per
+            // charge, for the same reason a line's is — rounding once at the end is a different number.
+            var chargeRows = charges.Select(sc => new FieldServiceCharge
+            {
+                FieldServiceId = fs.Id,
+                ServiceChargeId = sc.Id,
+                Description = sc.Name,
+                Amount = sc.Charge,
+                TaxPercent = sc.TaxPercent,
+                TaxAmount = FieldVisitRules.Tax(sc.Charge, sc.TaxPercent),
+            }).ToList();
+            db.FieldServiceCharges.AddRange(chargeRows);
+
+            // Computed here from the lines and charges the server just priced, never from anything the
+            // client sent — and from the rows just built rather than from the catalogue a second
+            // time, so the per-charge tax stored and the tax the visit totals cannot drift apart.
             var totals = FieldVisitRules.Totals(
-                lines.Select(l => (l.Amount, l.TaxAmount)),
-                fs.ServiceChargeAmount, fs.ServiceChargeTaxPercent, warranty);
+                lines.Select(l => (l.Amount, l.TaxAmount, l.Billable)),
+                chargeRows.Select(c => (c.Amount, c.TaxAmount)),
+                fs.VisitChargeAmount, warranty);
             fs.TaxableAmount = totals.Taxable;
             fs.TaxAmount = totals.Tax;
             fs.TotalAmount = totals.Total;
@@ -190,6 +210,11 @@ public static class FieldOpsEndpoints
 
             audit.Log(uid, "field-service.create", "field_service", fs.Id,
                 details: $"{fs.ServiceNo} {fs.RateType} total {fs.TotalAmount:0.##} payable {fs.AmountPayable:0.##}"
+                    // What the bill was made of, because the total alone cannot be argued with later:
+                    // a figure queried by the office is queried as "which parts did you charge for".
+                    + $" parts {lines.Count(l => l.Billable)}/{lines.Count} billed"
+                    + (charges.Count == 0 ? string.Empty : $" charges {string.Join("+", charges.Select(c => c.Name))}")
+                    + (fs.VisitChargeApplied ? $" visit charge {fs.VisitChargeAmount:0.##}" : string.Empty)
                     + (call is null ? string.Empty : $" call {call.CallNo} {call.CallStatus}"),
                 ip: http.GetIp());
             await db.SaveChangesAsync(ct);
@@ -197,7 +222,8 @@ public static class FieldOpsEndpoints
         }
         catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
 
-        var loaded = await db.FieldServices.AsNoTracking().Include(f => f.Lines).FirstAsync(f => f.Id == fs.Id, ct);
+        var loaded = await db.FieldServices.AsNoTracking()
+            .Include(f => f.Lines).Include(f => f.Charges).FirstAsync(f => f.Id == fs.Id, ct);
         return TypedResults.Created($"/field-services/{fs.Id}", await ServiceToDtoAsync(db, loaded, CanSeePricing(user), ct));
     }
 
@@ -272,7 +298,7 @@ public static class FieldOpsEndpoints
     /// tracked unit wherever the person who fitted it is based.</summary>
     private static async Task<(FieldServiceLine? line, string? error)> BuildLineAsync(
         AppDbContext db, StockLedgerService ledger, SerialService serial,
-        string kindRaw, long partId, int qty, string? serialNo, bool defective,
+        string kindRaw, long partId, int qty, string? serialNo, bool defective, bool billRequested,
         long uid, string techName, string customerName, long? customerId,
         string referenceType, long referenceId, FieldRateType rateType, CancellationToken ct)
     {
@@ -291,8 +317,15 @@ public static class FieldOpsEndpoints
         var line = new FieldServiceLine
         {
             Kind = kind, PartId = partId, Qty = qty, SerialNo = sn, Defective = defective,
+            // Whether the customer is asked for this part. Not simply what the request said - a
+            // collected unit and a serial-tracked one are never billed. See FieldLineRules.Billable.
+            Billable = FieldLineRules.Billable(kind, part, billRequested),
             // A collected unit is not billed: it is the customer's own broken part coming off their
             // machine, and it rides the record for traceability rather than for money.
+            //
+            // A FITTED part is priced whether or not it is billed. The rate is what the part was
+            // worth, and a line left unbilled is the shop handing that value over - which it needs to
+            // be able to see. Only the visit totals know the difference.
             UnitPrice = kind == FieldLineKind.Used ? FieldVisitRules.UnitRate(part, rateType) : 0m,
             GstPercent = kind == FieldLineKind.Used ? part.GstPercent : 0m,
         };
@@ -432,9 +465,12 @@ public static class FieldOpsEndpoints
             }
             db.FieldSaleLines.AddRange(saleLines);
 
-            // A sale carries no warranty, so its total IS what the customer pays.
+            // A sale carries no warranty, so its total IS what the customer pays. Every line bills:
+            // goods changed hands, and a sale has no equivalent of a part fitted under goodwill. It
+            // has no service charges and no visit charge either — those are things a VISIT bills for.
             var totals = FieldVisitRules.Totals(
-                saleLines.Select(l => (l.Amount, l.TaxAmount)), 0m, 0m, warranty: null);
+                saleLines.Select(l => (l.Amount, l.TaxAmount, Billable: true)),
+                charges: [], visitChargeAmount: 0m, warranty: null);
             sale.TaxableAmount = totals.Taxable;
             sale.TaxAmount = totals.Tax;
             sale.TotalAmount = totals.Total;
@@ -450,20 +486,34 @@ public static class FieldOpsEndpoints
         return TypedResults.Created($"/field-sales/{sale.Id}", await SaleToDtoAsync(db, loaded, CanSeePricing(user), ct));
     }
 
-    /// <summary>The chosen service charge, read from the catalogue so the record is priced by the
+    /// <summary>The chosen service charges, read from the catalogue so the record is priced by the
     /// server. An id that does not resolve is refused rather than dropped, unlike a stale customer id
     /// below: a customer id that no longer exists loses a link, while a charge id that no longer
-    /// exists loses money off the bill, and the technician has already quoted that figure.</summary>
-    private static async Task<(ServiceCharge? charge, string? error)> ResolveServiceChargeAsync(
-        AppDbContext db, long? chargeId, CancellationToken ct)
+    /// exists loses money off the bill, and the technician has already quoted that figure.
+    ///
+    /// Returned in the order asked for, de-duplicated. A repeated id is a double-tap or a replayed
+    /// request, and the one reading it must not be "charge for it twice".
+    ///
+    /// <paramref name="single"/> is the pre-list field, read only when <paramref name="ids"/> is
+    /// absent — see <see cref="CreateFieldServiceRequest.ServiceChargeIds"/>.</summary>
+    private static async Task<(List<ServiceCharge> charges, string? error)> ResolveServiceChargesAsync(
+        AppDbContext db, List<long>? ids, long? single, CancellationToken ct)
     {
-        if (chargeId is not { } id) return (null, null);
-        var sc = await db.ServiceCharges.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, ct);
-        if (sc is null) return (null, $"Service charge {id} was not found.");
+        var wanted = (ids ?? (single is { } one ? [one] : new List<long>()))
+            .Distinct().ToList();
+        if (wanted.Count == 0) return ([], null);
+
+        var found = await db.ServiceCharges.AsNoTracking()
+            .Where(c => wanted.Contains(c.Id)).ToListAsync(ct);
+        var missing = wanted.Where(id => found.All(c => c.Id != id)).ToList();
+        if (missing.Count > 0)
+            return ([], $"Service charge{(missing.Count > 1 ? "s" : "")} "
+                        + $"{string.Join(", ", missing)} {(missing.Count > 1 ? "were" : "was")} not found.");
+
         // An inactive charge is still honoured if somehow asked for: it was on the list when the
         // technician opened the form, and refusing the save over a catalogue change made between the
         // quote and the drive home would be a strange way to find out.
-        return (sc, null);
+        return (wanted.Select(id => found.First(c => c.Id == id)).ToList(), null);
     }
 
     /// <summary>Why the state/district pair cannot be accepted, or null when it can.
@@ -567,7 +617,18 @@ public static class FieldOpsEndpoints
             // HSN comes off the live part rather than a snapshot: a part's HSN is a tax
             // classification that does not change with a price, and carrying a column for it would
             // be a column that never differs from the master.
-            pricing ? p?.HsnCode : null)).ToList();
+            pricing ? p?.HsnCode : null,
+            l.Billable)).ToList();
+        // Ordered, because an Include does not promise one and these are printed: the receipt lists
+        // the charges down the page and the roll-up joins their descriptions, so a visit read twice
+        // must not name its charges in two different orders. Insertion order is the order the
+        // technician picked them in, which is the order they were quoted in.
+        var ordered = f.Charges.OrderBy(c => c.Id).ToList();
+        var charges = ordered.Select(c => new FieldServiceChargeDto(
+            c.ServiceChargeId, c.Description,
+            pricing ? c.Amount : null, pricing ? c.TaxPercent : null,
+            pricing ? c.TaxAmount : null)).ToList();
+        var rollUp = ChargeRollUp(ordered);
         return new FieldServiceDto(
             f.Id, f.ServiceNo, f.TechnicianId, techName, f.CustomerName, f.Phone, f.Place,
             f.MachineSerial, f.Complaint, f.WorkDone, f.Remarks, f.CreatedAt,
@@ -575,16 +636,35 @@ public static class FieldOpsEndpoints
             f.TicketId, f.TicketNumber,
             f.Cause,
             f.RateType.ToString(),
-            f.ServiceChargeId, f.ServiceChargeDescription,
-            pricing ? f.ServiceChargeAmount : null,
-            pricing ? f.ServiceChargeTaxPercent : null,
+            rollUp.Id, rollUp.Description,
+            pricing ? rollUp.Amount : null,
+            pricing ? rollUp.TaxPercent : null,
             f.PaymentMethod?.ToString(), f.WarrantyStatus?.ToString(),
             pricing ? f.TaxableAmount : null, pricing ? f.TaxAmount : null,
             pricing ? f.AmountPayable : null,
             f.LocationLabel, f.Latitude, f.Longitude,
             f.StateId, stateName, f.DistrictId, districtName,
-            f.FieldCallId, call?.CallNo, call?.CallStatus.ToString());
+            f.FieldCallId, call?.CallNo, call?.CallStatus.ToString(),
+            charges,
+            f.VisitChargeApplied, pricing ? f.VisitChargeAmount : null);
     }
+
+    /// <summary>The visit's charges in the single-charge shape older clients read.
+    ///
+    /// The amount sums, because a client showing one figure must show the one the customer paid. The
+    /// id and the tax percent do NOT: an id is a specific catalogue row and a percent is a rate, and
+    /// neither has an honest value across two charges — so both go null the moment there is more than
+    /// one, and the client prints the joined description beside the summed figure. Nothing is lost by
+    /// that: the full breakdown is in <see cref="FieldServiceDto.Charges"/>, and the tax a customer
+    /// actually paid is in the visit's own tax figure.</summary>
+    internal static (long? Id, string? Description, decimal Amount, decimal? TaxPercent) ChargeRollUp(
+        List<FieldServiceCharge> charges) => charges.Count switch
+        {
+            0 => (null, null, 0m, null),
+            1 => (charges[0].ServiceChargeId, charges[0].Description, charges[0].Amount, charges[0].TaxPercent),
+            _ => (null, string.Join(" + ", charges.Select(c => c.Description)),
+                  charges.Sum(c => c.Amount), null),
+        };
 
     /// <summary>State and district names for a record, in one round trip each. Resolved on read rather
     /// than snapshotted onto the record: unlike a rate, a district is not renamed to mean something

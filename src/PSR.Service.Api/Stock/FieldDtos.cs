@@ -98,7 +98,15 @@ public record FieldServiceLineRequest(
     [Required] long PartId,
     [Range(1, 1_000_000)] int Qty = 1,
     [StringLength(128)] string? SerialNo = null,
-    bool Defective = false);
+    bool Defective = false,
+    /// <summary>Whether to put this part's money on what the customer owes. The last word is
+    /// <see cref="FieldLineRules.Billable"/>'s, not this field's: a collected unit and a serial-tracked
+    /// one are never billed whatever is sent here.
+    ///
+    /// True when absent, which is what a client written before this field existed meant — every fitted
+    /// part went on the bill. A build that knows about the checkbox always says, and says false for a
+    /// part nobody ticked.</summary>
+    bool Billable = true);
 
 /// <summary>Everything about a visit except what it cost. There is deliberately no field on this
 /// request for a rate, a tax or a total: the caller names the parts, the quantity, which rate column to
@@ -127,7 +135,10 @@ public record CreateFieldServiceRequest(
     /// <summary>Customer | Dealer. Absent means Customer.</summary>
     [StringLength(16)] string? RateType = null,
     /// <summary>The agreed service charge, by id. Its description and figure are read from the
-    /// catalogue and snapshotted onto the record - the request does not get to say what it cost.</summary>
+    /// catalogue and snapshotted onto the record - the request does not get to say what it cost.
+    ///
+    /// Superseded by <paramref name="ServiceChargeIds"/> and kept for builds that only ever sent one.
+    /// Read only when that list is absent; a client that sends both means the list.</summary>
     long? ServiceChargeId = null,
     /// <summary>Cash | Upi | BankTransfer. Absent for a visit nobody paid for on the spot.</summary>
     [StringLength(20)] string? PaymentMethod = null,
@@ -152,7 +163,25 @@ public record CreateFieldServiceRequest(
     ///
     /// Only ever completes a call, never reopens one; see
     /// <see cref="PSR.Service.Api.Data.Entities.FieldCallStatus"/>.</summary>
-    [StringLength(16)] string? CallStatus = null);
+    [StringLength(16)] string? CallStatus = null,
+    /// <summary>Every service charge agreed for this visit, by id. One visit routinely does several
+    /// priced jobs, and billing one of them meant the rest were given away or buried in the parts.
+    ///
+    /// Each is priced and snapshotted from the catalogue, exactly as the single charge was. A repeated
+    /// id is collapsed rather than billed twice: the form offers each charge once, so a duplicate is a
+    /// double-tap or a replayed request, never an instruction to charge for it again.
+    ///
+    /// Absent (not empty) falls back to <paramref name="ServiceChargeId"/>, which is what an older
+    /// build sends. Empty means what it says — no charge on this visit.</summary>
+    List<long>? ServiceChargeIds = null,
+    /// <summary>Whether to add the office's standing field visit charge to this visit. The figure is
+    /// the one in settings; the request does not get to say what it is.
+    ///
+    /// False when absent, because that is what a client written before the charge existed meant. The
+    /// phone defaults the box to ticked, so the technician has to take it off rather than put it on —
+    /// but a build that has never heard of it must not start charging for attendance on its own, with
+    /// a quote on screen that says otherwise.</summary>
+    bool ApplyVisitCharge = false);
 
 /// <summary>Money is nullable throughout and that is the role projection, not missing data - see
 /// <see cref="PSR.Service.Api.Auth.PricingVisibility"/>. <c>Amount</c> is tax-exclusive;
@@ -161,7 +190,17 @@ public record FieldServiceLineDto(
     long Id, string Kind, long PartId, string ItemCode, string PartName, int Qty,
     string? SerialNo, bool Defective, decimal? UnitPrice, decimal? Amount,
     decimal? GstPercent = null, decimal? TaxAmount = null, decimal? LineTotal = null,
-    string? HsnCode = null);
+    string? HsnCode = null,
+    /// <summary>Whether this line's money is in the visit's totals. A line that is priced and NOT
+    /// billable is a part the shop handed over without charging for; the figures say what it was
+    /// worth, and this says the customer was not asked for it.</summary>
+    bool Billable = false);
+
+/// <summary>One service charge as it was billed on a visit — the snapshot, not the catalogue row, so
+/// it still reads as what the customer was told after the charge is repriced or retired.</summary>
+public record FieldServiceChargeDto(
+    long ServiceChargeId, string? Description,
+    decimal? Amount, decimal? TaxPercent, decimal? TaxAmount);
 
 /// <summary><c>Total</c> is the stored visit total, not a sum taken on read, so it still says what the
 /// customer was told after the parts master moves on. <c>AmountPayable</c> is what they owed for it -
@@ -174,6 +213,10 @@ public record FieldServiceDto(
     string? TicketId = null, string? TicketNumber = null,
     string? Cause = null,
     string RateType = "Customer",
+    /// <summary>The visit's charges rolled up into the single-charge shape older clients read: the id
+    /// and tax percent only where there is exactly one charge, the description joined, the amount
+    /// summed. Derived from <c>Charges</c>, which is where the charges actually live — a client that
+    /// knows about the list should read that instead.</summary>
     long? ServiceChargeId = null, string? ServiceChargeDescription = null,
     decimal? ServiceChargeAmount = null, decimal? ServiceChargeTaxPercent = null,
     string? PaymentMethod = null, string? WarrantyStatus = null,
@@ -185,7 +228,16 @@ public record FieldServiceDto(
     /// save. Echoed back rather than left for the client to assume: the status is the server's to
     /// decide (an already-complete call is not reopened), so the only honest way for the app to tell
     /// the technician what became of their call is to be told.</summary>
-    long? FieldCallId = null, string? CallNo = null, string? CallStatus = null);
+    long? FieldCallId = null, string? CallNo = null, string? CallStatus = null,
+    /// <summary>Every service charge this visit billed. The authoritative list — the four
+    /// <c>ServiceCharge*</c> fields above are a roll-up of it for clients that only know about one
+    /// charge, and a visit with two charges rolls up to their sum under a joined description.</summary>
+    List<FieldServiceChargeDto>? Charges = null,
+    /// <summary>The standing visit charge, as applied to this visit. <c>Applied</c> rather than a
+    /// non-zero amount is what says the technician charged for attendance: the office may have the
+    /// figure set to nil, and a visit charged at nil is a different fact from one where the box was
+    /// taken off.</summary>
+    bool VisitChargeApplied = false, decimal? VisitChargeAmount = null);
 
 /// <summary>Whether a ticket already has a service recorded against it. The app's OTP step is gated on
 /// this, and asking the server rather than trusting its own memory is what makes the gate survive a

@@ -844,25 +844,6 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(500)")
                         .HasColumnName("remarks");
 
-                    b.Property<decimal>("ServiceChargeAmount")
-                        .HasPrecision(12, 2)
-                        .HasColumnType("decimal(12,2)")
-                        .HasColumnName("service_charge_amount");
-
-                    b.Property<string>("ServiceChargeDescription")
-                        .HasMaxLength(200)
-                        .HasColumnType("varchar(200)")
-                        .HasColumnName("service_charge_description");
-
-                    b.Property<long?>("ServiceChargeId")
-                        .HasColumnType("bigint")
-                        .HasColumnName("service_charge_id");
-
-                    b.Property<decimal>("ServiceChargeTaxPercent")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("decimal(5,2)")
-                        .HasColumnName("service_charge_tax_percent");
-
                     b.Property<string>("ServiceNo")
                         .IsRequired()
                         .HasMaxLength(40)
@@ -902,6 +883,17 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("decimal(12,2)")
                         .HasColumnName("total_amount");
 
+                    b.Property<decimal>("VisitChargeAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("visit_charge_amount");
+
+                    b.Property<bool>("VisitChargeApplied")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false)
+                        .HasColumnName("visit_charge_applied");
+
                     b.Property<string>("WarrantyStatus")
                         .HasMaxLength(10)
                         .HasColumnType("varchar(10)")
@@ -920,8 +912,6 @@ namespace PSR.Service.Api.Migrations
 
                     b.HasIndex("FieldCallId");
 
-                    b.HasIndex("ServiceChargeId");
-
                     b.HasIndex("ServiceNo")
                         .IsUnique();
 
@@ -932,6 +922,53 @@ namespace PSR.Service.Api.Migrations
                     b.HasIndex("TicketId");
 
                     b.ToTable("field_services", (string)null);
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldServiceCharge", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("amount");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .HasColumnName("description");
+
+                    b.Property<long>("FieldServiceId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("field_service_id");
+
+                    b.Property<long>("ServiceChargeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("service_charge_id");
+
+                    b.Property<decimal>("TaxAmount")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("decimal(12,2)")
+                        .HasColumnName("tax_amount");
+
+                    b.Property<decimal>("TaxPercent")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("decimal(5,2)")
+                        .HasColumnName("tax_percent");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ServiceChargeId");
+
+                    b.HasIndex("FieldServiceId", "ServiceChargeId")
+                        .IsUnique();
+
+                    b.ToTable("field_service_charges", (string)null);
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldServiceLine", b =>
@@ -947,6 +984,10 @@ namespace PSR.Service.Api.Migrations
                         .HasPrecision(12, 2)
                         .HasColumnType("decimal(12,2)")
                         .HasColumnName("amount");
+
+                    b.Property<bool>("Billable")
+                        .HasColumnType("tinyint(1)")
+                        .HasColumnName("billable");
 
                     b.Property<bool>("Defective")
                         .HasColumnType("tinyint(1)")
@@ -3184,15 +3225,27 @@ namespace PSR.Service.Api.Migrations
                         .HasForeignKey("FieldCallId")
                         .OnDelete(DeleteBehavior.Restrict);
 
-                    b.HasOne("PSR.Service.Api.Data.Entities.ServiceCharge", null)
-                        .WithMany()
-                        .HasForeignKey("ServiceChargeId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("PSR.Service.Api.Data.Entities.IndianState", null)
                         .WithMany()
                         .HasForeignKey("StateId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldServiceCharge", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.FieldService", "FieldService")
+                        .WithMany("Charges")
+                        .HasForeignKey("FieldServiceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.ServiceCharge", null)
+                        .WithMany()
+                        .HasForeignKey("ServiceChargeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("FieldService");
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldServiceLine", b =>
@@ -3463,6 +3516,8 @@ namespace PSR.Service.Api.Migrations
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.FieldService", b =>
                 {
+                    b.Navigation("Charges");
+
                     b.Navigation("Lines");
                 });
 

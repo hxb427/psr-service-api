@@ -61,12 +61,25 @@ public class FieldVisitRuleTests
 
     // ---------------------------------------------------------------- totals
 
+    /// <summary>A part line the technician ticked to bill.</summary>
+    private static (decimal Amount, decimal TaxAmount, bool Billable) Billed(decimal amount, decimal tax) =>
+        (amount, tax, true);
+
+    /// <summary>A part line nobody is charging for — fitted, priced, and not on the bill.</summary>
+    private static (decimal Amount, decimal TaxAmount, bool Billable) Unbilled(decimal amount, decimal tax) =>
+        (amount, tax, false);
+
+    /// <summary>A service charge as the endpoint hands one over: the figure, and the tax on it rounded
+    /// per charge.</summary>
+    private static (decimal Amount, decimal TaxAmount) Charge(decimal amount, decimal taxPercent) =>
+        (amount, FieldVisitRules.Tax(amount, taxPercent));
+
     [Fact]
     public void A_visit_adds_its_lines_and_its_service_charge_together()
     {
         var totals = FieldVisitRules.Totals(
-            [(Amount: 1000m, TaxAmount: 180m), (Amount: 250m, TaxAmount: 45m)],
-            chargeAmount: 300m, chargeTaxPercent: 18m, warranty: FieldWarrantyStatus.Out);
+            [Billed(1000m, 180m), Billed(250m, 45m)],
+            [Charge(300m, 18m)], visitChargeAmount: 0m, warranty: FieldWarrantyStatus.Out);
 
         totals.Taxable.Should().Be(1550m);           // 1000 + 250 + 300
         totals.Tax.Should().Be(279m);                // 180 + 45 + 54
@@ -80,7 +93,7 @@ public class FieldVisitRuleTests
     public void The_total_is_rounded_up_to_the_rupee()
     {
         var totals = FieldVisitRules.Totals(
-            [(Amount: 100.40m, TaxAmount: 18.07m)], 0m, 0m, FieldWarrantyStatus.Out);
+            [Billed(100.40m, 18.07m)], [], 0m, FieldWarrantyStatus.Out);
 
         totals.Taxable.Should().Be(100.40m);
         totals.Tax.Should().Be(18.07m);
@@ -90,13 +103,13 @@ public class FieldVisitRuleTests
     [Fact]
     public void A_whole_total_is_not_pushed_up_a_rupee()
     {
-        FieldVisitRules.Totals([(Amount: 100m, TaxAmount: 18m)], 0m, 0m, null).Total.Should().Be(118m);
+        FieldVisitRules.Totals([Billed(100m, 18m)], [], 0m, null).Total.Should().Be(118m);
     }
 
     [Fact]
     public void A_visit_with_nothing_on_it_comes_to_nothing()
     {
-        var totals = FieldVisitRules.Totals([], 0m, 0m, null);
+        var totals = FieldVisitRules.Totals([], [], 0m, null);
 
         totals.Taxable.Should().Be(0m);
         totals.Tax.Should().Be(0m);
@@ -108,12 +121,94 @@ public class FieldVisitRuleTests
     [Fact]
     public void A_service_charge_alone_is_a_billable_visit()
     {
-        var totals = FieldVisitRules.Totals([], chargeAmount: 500m, chargeTaxPercent: 18m,
-            warranty: FieldWarrantyStatus.Out);
+        var totals = FieldVisitRules.Totals([], [Charge(500m, 18m)], 0m, FieldWarrantyStatus.Out);
 
         totals.Taxable.Should().Be(500m);
         totals.Tax.Should().Be(90m);
         totals.Total.Should().Be(590m);
+    }
+
+    // ---------------------------------------------------------------- what gets billed
+
+    /// <summary>The whole point of the checkbox. The part is priced either way — the shop needs to see
+    /// what it handed over — and only the totals know the difference.</summary>
+    [Fact]
+    public void A_part_nobody_ticked_is_left_off_the_bill()
+    {
+        var totals = FieldVisitRules.Totals(
+            [Billed(250m, 45m), Unbilled(4000m, 720m)], [], 0m, FieldWarrantyStatus.Out);
+
+        totals.Taxable.Should().Be(250m);
+        totals.Tax.Should().Be(45m);
+        totals.Total.Should().Be(295m, "the 4,000 part was fitted free of charge");
+    }
+
+    /// <summary>A goodwill repair: parts fitted, nothing charged for them, and the visit still bills
+    /// the attendance. A visit of this shape used to be impossible to record — the parts went on the
+    /// bill or they did not go on the record.</summary>
+    [Fact]
+    public void A_visit_can_bill_nothing_but_its_charges()
+    {
+        var totals = FieldVisitRules.Totals(
+            [Unbilled(1000m, 180m)], [Charge(400m, 18m)], visitChargeAmount: 150m,
+            warranty: FieldWarrantyStatus.Out);
+
+        totals.Taxable.Should().Be(550m);            // 400 + 150, and nothing for the part
+        totals.Tax.Should().Be(72m);                 // the charge's tax alone
+        totals.Total.Should().Be(622m);
+    }
+
+    // ---------------------------------------------------------------- several charges
+
+    /// <summary>One visit, several priced jobs. Each charge's tax is rounded on its own, which is why
+    /// they are passed in separately rather than summed first: rounding 137.50 and 137.50 to the paise
+    /// each is not the same number as rounding 275.00 once, and the receipt prints the per-charge
+    /// figures beside the total.</summary>
+    [Fact]
+    public void Several_service_charges_all_bill()
+    {
+        var totals = FieldVisitRules.Totals(
+            [], [Charge(750m, 18m), Charge(1250m, 18m), Charge(99.99m, 5m)], 0m, FieldWarrantyStatus.Out);
+
+        totals.Taxable.Should().Be(2099.99m);
+        totals.Tax.Should().Be(365m);                // 135 + 225 + 5.00
+        totals.Total.Should().Be(2465m);             // 2464.99 -> 2465
+    }
+
+    /// <summary>Charges at different rates are taxed at their own rate, not at a blended one. Two
+    /// charges at 18% and 5% must not quietly become 2,000 at one of them.</summary>
+    [Fact]
+    public void Charges_keep_their_own_tax_rates()
+    {
+        FieldVisitRules.Totals([], [Charge(1000m, 18m), Charge(1000m, 5m)], 0m, null)
+            .Tax.Should().Be(230m);
+    }
+
+    // ---------------------------------------------------------------- the visit charge
+
+    /// <summary>Flat, and that is the whole of it: the attendance fee adds to what is owed and carries
+    /// no tax of its own, unlike a service charge.</summary>
+    [Fact]
+    public void The_visit_charge_is_billed_without_tax()
+    {
+        var totals = FieldVisitRules.Totals([], [], visitChargeAmount: 250m, warranty: null);
+
+        totals.Taxable.Should().Be(250m);
+        totals.Tax.Should().Be(0m);
+        totals.Total.Should().Be(250m);
+        totals.Payable.Should().Be(250m);
+    }
+
+    /// <summary>An in-warranty visit waives the attendance fee along with everything else — the visit
+    /// is covered, and the shop still records what turning up was worth.</summary>
+    [Fact]
+    public void An_in_warranty_visit_collects_no_visit_charge_either()
+    {
+        var totals = FieldVisitRules.Totals(
+            [Billed(1000m, 180m)], [], visitChargeAmount: 250m, warranty: FieldWarrantyStatus.In);
+
+        totals.Total.Should().Be(1430m);
+        totals.Payable.Should().Be(0m);
     }
 
     // ---------------------------------------------------------------- warranty
@@ -125,8 +220,7 @@ public class FieldVisitRuleTests
     public void An_in_warranty_visit_records_its_value_and_collects_nothing()
     {
         var totals = FieldVisitRules.Totals(
-            [(Amount: 4000m, TaxAmount: 720m)],
-            chargeAmount: 500m, chargeTaxPercent: 18m, warranty: FieldWarrantyStatus.In);
+            [Billed(4000m, 720m)], [Charge(500m, 18m)], 0m, FieldWarrantyStatus.In);
 
         totals.Taxable.Should().Be(4500m);
         totals.Tax.Should().Be(810m);
@@ -143,7 +237,7 @@ public class FieldVisitRuleTests
     [InlineData(FieldWarrantyStatus.Unknown)]
     public void Anything_short_of_in_warranty_is_still_payable(FieldWarrantyStatus? warranty)
     {
-        var totals = FieldVisitRules.Totals([(Amount: 1000m, TaxAmount: 180m)], 0m, 0m, warranty);
+        var totals = FieldVisitRules.Totals([Billed(1000m, 180m)], [], 0m, warranty);
 
         totals.Payable.Should().Be(totals.Total).And.Be(1180m);
     }

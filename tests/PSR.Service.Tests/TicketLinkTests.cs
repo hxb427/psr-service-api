@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 using Xunit;
 
@@ -37,6 +38,8 @@ public class TicketLinkTests
         builder.Services.AddScoped<StockLedgerService>();
         builder.Services.AddScoped<SerialService>();
         builder.Services.AddScoped<NumberSequenceService>();
+        // Read by the service handler for the standing field visit charge.
+        builder.Services.AddScoped<AppSettingsService>();
 
         var app = builder.Build();
         app.MapFieldOpsEndpoints();

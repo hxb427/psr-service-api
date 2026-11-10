@@ -103,4 +103,40 @@ public class FieldLineRuleTests
     {
         FieldLineRules.Validate(FieldLineKind.Used, Untracked(), 5, null).Should().BeNull();
     }
+
+    // ---------------------------------------------------------------- what gets billed
+
+    /// <summary>The only line whose billing the technician actually decides. The checkbox starts off,
+    /// so a part is charged for because somebody ticked it.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_fitted_untracked_part_bills_only_when_it_was_ticked(bool ticked)
+    {
+        FieldLineRules.Billable(FieldLineKind.Used, Untracked(), requested: ticked)
+            .Should().Be(ticked);
+    }
+
+    /// <summary>Never, whatever the request says. A serial-tracked unit is invoiced by the office
+    /// against the machine it went onto; billing it on a visit receipt as well is how a customer pays
+    /// for the same board twice, months apart, on two pieces of paper that each look right.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_serial_tracked_unit_never_bills_on_a_visit(bool ticked)
+    {
+        FieldLineRules.Billable(FieldLineKind.Used, Tracked(), requested: ticked)
+            .Should().BeFalse();
+    }
+
+    /// <summary>Also never. It is the customer's own broken part coming off their machine, and it
+    /// rides the record for traceability rather than for money.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_collected_unit_never_bills(bool ticked)
+    {
+        FieldLineRules.Billable(FieldLineKind.Collected, Untracked(), requested: ticked)
+            .Should().BeFalse();
+    }
 }
