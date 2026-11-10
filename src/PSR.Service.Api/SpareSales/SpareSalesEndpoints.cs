@@ -16,9 +16,16 @@ internal static class SaleRoles
 {
     /// <summary>Who sees the money on a sale. The parts-master pricing roles PLUS accounts, because accounts
     /// raises the invoice. store_manager can see the sale and its quantities — they pick and pack it — but
-    /// the rates stay hidden, matching how parts pricing is stripped everywhere else.</summary>
+    /// the rates stay hidden, matching how parts pricing is stripped everywhere else.
+    ///
+    /// sales is here because a counter sale IS a price: strip the rates and the register lists sales with
+    /// no totals and a reopened sale comes back with empty money on every line. This list is the gate on
+    /// the sale's own figures; the rate that lands on a new line when a part is picked comes from the
+    /// parts master instead, so <see cref="Auth.PricingVisibility"/> has to admit the role as well. Both,
+    /// or the form is half-priced.</summary>
     public static readonly string[] Pricing =
-        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts };
+        { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts,
+          RoleNames.Sales };
 
     public static bool CanSeePricing(ClaimsPrincipal u) => Pricing.Any(u.IsInRole);
 }
@@ -46,17 +53,23 @@ public static class SpareSalesEndpoints
         group.MapPost("/{id:long}/cancel", CancelAsync).RequireAuthorization("SaleManage");
         group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("SaleManage");
         group.MapPost("/{id:long}/payment", PaymentAsync).RequireAuthorization("PaymentManage");
-        // The one action that moves warehouse stock on a sale. Gated on StockManage rather than
+        // The one action that moves warehouse stock on a sale. Gated on SaleMarkSold rather than
         // SaleManage: it is a warehouse movement, and the store manager who hands the goods over is
         // the person who knows they went out.
         //
-        // It now marks the sale paid as well, which means StockManage settles a counter sale's payment
+        // SaleMarkSold is the StockManage roles plus sales, and exists only for these two routes.
+        // StockManage is what they sat on until the sales desk arrived, and it was too wide to admit a
+        // counter role to — it carries direct-issue, transfers and stock adjustments — while SaleManage
+        // is the wrong gate for a stock movement. For every role that had the button before, the two
+        // policies are the same list.
+        //
+        // It now marks the sale paid as well, which means this policy settles a counter sale's payment
         // without PaymentManage. That is deliberate and not a hole: the person handing the goods across
         // the counter is the person taking the cash for them, and the register no longer offers a
         // separate payment step for anyone else to take. /payment below still needs PaymentManage, for
         // the sale that has to be corrected afterwards.
-        group.MapPost("/{id:long}/mark-sold", MarkSoldAsync).RequireAuthorization("StockManage");
-        group.MapPost("/{id:long}/unmark-sold", UnmarkSoldAsync).RequireAuthorization("StockManage");
+        group.MapPost("/{id:long}/mark-sold", MarkSoldAsync).RequireAuthorization("SaleMarkSold");
+        group.MapPost("/{id:long}/unmark-sold", UnmarkSoldAsync).RequireAuthorization("SaleMarkSold");
         group.MapPost("/{id:long}/clear-pi", ClearPiAsync).RequireAuthorization("SaleManage");
         // Gated on DocumentManage rather than SaleManage: it is the generate form's own scratch pad,
         // and accounts raises documents without being able to edit the sale behind them.

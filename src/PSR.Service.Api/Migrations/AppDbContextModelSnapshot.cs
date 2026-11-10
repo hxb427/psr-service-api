@@ -1346,6 +1346,11 @@ namespace PSR.Service.Api.Migrations
                         {
                             Id = 10,
                             Name = "inward"
+                        },
+                        new
+                        {
+                            Id = 11,
+                            Name = "sales"
                         });
                 });
 

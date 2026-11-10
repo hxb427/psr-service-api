@@ -42,16 +42,32 @@ internal enum PricingScope
 /// So a technician gets <see cref="PricingScope.Quoting"/> and nothing wider. The roles that were
 /// already trusted with the whole catalogue keep <see cref="PricingScope.Full"/>, and the roles that
 /// saw no pricing before — store_manager, accounts, inward — still see none: widening those is a
-/// separate decision nobody has asked for.</summary>
+/// separate decision nobody has asked for.
+///
+/// The sales desk falls on the same side of that split as the technician, and for the same reason. It
+/// stands in front of a customer and quotes: the selling rates, the GST and the HSN code are what a
+/// counter quote is built from, and they are printed on the invoice it hands over, so they are no
+/// secret from the person being billed. The purchase rate is the shop's margin and has no business on
+/// a sales desk — it appears on nothing the counter produces. So <c>sales</c> is
+/// <see cref="PricingScope.Quoting"/>, not <see cref="PricingScope.Full"/>.
+///
+/// Note that this governs the PARTS MASTER — the rate that lands on a sale line when a part is picked.
+/// The figures already saved on a sale are gated separately, by <c>SaleRoles.Pricing</c> in the spare
+/// sales module. A role that sells over the counter needs both; one without the other gives a form that
+/// prices new lines but a register with no totals, or the reverse.</summary>
 internal static class PricingVisibility
 {
     /// <summary>The office. Reads the purchase rate, so it reads the margin.</summary>
     private static readonly string[] FullRoles =
         { RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer };
 
+    /// <summary>Quotes to a customer's face: selling rates, tax, HSN — never the margin.</summary>
+    private static readonly string[] QuotingRoles =
+        { RoleNames.Technician, RoleNames.Sales };
+
     public static PricingScope For(ClaimsPrincipal user) =>
         FullRoles.Any(user.IsInRole) ? PricingScope.Full
-        : user.IsInRole(RoleNames.Technician) ? PricingScope.Quoting
+        : QuotingRoles.Any(user.IsInRole) ? PricingScope.Quoting
         : PricingScope.None;
 
     /// <summary>Selling rates, GST and HSN — what a quote is built from.</summary>

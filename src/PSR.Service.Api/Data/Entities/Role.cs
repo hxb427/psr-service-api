@@ -24,16 +24,26 @@ public static class RoleNames
     /// inward_manager (id 5): that one was a full workflow role, so it keeps its retired id and its gap.</summary>
     public const string Inward = "inward";
 
+    /// <summary>Sales desk. Sells spare parts over the counter and does nothing else: it enters a sale,
+    /// prices it, raises the PI and the tax invoice, and marks the sale sold when the goods go out. No
+    /// part in service jobs, stock transfers, technician inventory, user management or settings.
+    ///
+    /// Like <see cref="Inward"/> this is a narrow counter role rather than a rung in the hierarchy, so
+    /// it carries no rank in UserHierarchy — admin, manager and supervisor can all create and manage a
+    /// sales account, and a sales account can manage nobody.</summary>
+    public const string Sales = "sales";
+
     // inward_manager (was id 5) and dispatch_manager (was id 7) removed — folded into manager/supervisor.
     public static readonly string[] All =
     [
-        Admin, Manager, Viewer, Supervisor, Technician, StoreManager, Accounts, Inward
+        Admin, Manager, Viewer, Supervisor, Technician, StoreManager, Accounts, Inward, Sales
     ];
 
     // Seed ids are FIXED (never re-indexed) so existing user_roles never silently remap to a different role.
+    // 5 and 7 are the retired inward_manager / dispatch_manager gaps and stay empty, so sales is 11.
     public static readonly (int Id, string Name)[] Seed =
     [
         (1, Admin), (2, Manager), (3, Viewer), (4, Supervisor),
-        (6, Technician), (8, StoreManager), (9, Accounts), (10, Inward)
+        (6, Technician), (8, StoreManager), (9, Accounts), (10, Inward), (11, Sales)
     ];
 }

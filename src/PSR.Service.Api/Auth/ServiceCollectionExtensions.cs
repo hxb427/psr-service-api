@@ -136,17 +136,55 @@ public static class ServiceCollectionExtensions
             // Spare sales — counter sales of warehouse stock. Entering one is a commercial decision
             // (legacy restricted the page to admin/manager/supervisor); viewing adds the roles that
             // read the register: accounts bills it, store_manager picks it, viewer is read-only.
+            //
+            // sales is in both because the counter is the whole of that role's job: it enters the sale
+            // and it reads the register to find the one it entered.
             options.AddPolicy("SaleManage", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Sales));
             options.AddPolicy("SaleView", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer,
-                RoleNames.Accounts, RoleNames.StoreManager));
+                RoleNames.Accounts, RoleNames.StoreManager, RoleNames.Sales));
+            // Handing the goods across the counter — mark-sold / unmark-sold, and nothing else.
+            //
+            // Its own policy rather than StockManage, which is where those two routes used to sit: a
+            // sales login has to be able to finish the sale it just entered, and put sales in
+            // StockManage instead and it gains direct-issue, transfers, stock adjustments and the whole
+            // warehouse area along with it. Identical to StockManage for every pre-existing role, so
+            // this takes the action away from nobody who had it before.
+            //
+            // Mirrored by SaleMarkSoldRoles in the desktop app's SessionState, which sits next to its
+            // StockManageRoles for the same reason.
+            options.AddPolicy("SaleMarkSold", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.StoreManager,
+                RoleNames.Sales));
 
             // Phase 5 — documents (PI / Invoice / DC). Generating is a billing action; viewing is wider.
+            //
+            // sales is admitted to both: raising the PI and the tax invoice for a counter sale is part
+            // of making the sale, not a separate billing step somebody else performs afterwards, and
+            // the register's PDF list is how the counter hands the customer their copy.
+            //
+            // Known width, stated plainly because it is wider than the sales desk's own job: there is
+            // one pair of document policies for both counter sales and service jobs, and the document
+            // routes gate on the policy alone — none of them re-checks the caller against the job or
+            // sale behind the document. So a sales token also reaches GET /documents, which pages the
+            // whole register unfiltered, and through it any service job's paperwork and PDFs.
+            //
+            // The desktop app never shows this: a sales-only login is one page with no sidebar and no
+            // documents list. It is the API surface that is open, not the UI. ServiceManage and
+            // ServiceRegisterView still keep the role off the service jobs themselves, so what leaks is
+            // the paperwork, not the workflow.
+            //
+            // Accepted for now, as the alternative is a third pair of policies splitting sale documents
+            // from service documents. If a counter clerk reading service invoices is not acceptable,
+            // that split — SaleDocumentManage / SaleDocumentView, the way SaleMarkSold is split off
+            // StockManage above — is the fix, and it is a contained one.
             options.AddPolicy("DocumentManage", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Accounts));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Accounts,
+                RoleNames.Sales));
             options.AddPolicy("DocumentView", p => p.RequireRole(
-                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts));
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.Accounts,
+                RoleNames.Sales));
 
             // Phase 6 — reports. Full reports for every non-technician role (legacy hub rule);
             // technicians still get their own performance / parts-used via the unrestricted endpoints.
