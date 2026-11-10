@@ -85,8 +85,35 @@ public class SpareSaleLineConfiguration : IEntityTypeConfiguration<SpareSaleLine
         b.Property(x => x.LineTotal).HasColumnName("line_total").HasPrecision(14, 2);
 
         b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+        b.HasMany(x => x.Serials).WithOne(s => s.Line).HasForeignKey(s => s.SpareSaleLineId)
+            .OnDelete(DeleteBehavior.Cascade);
         b.HasIndex(x => x.SpareSaleId);
         b.HasIndex(x => x.PartId);
+    }
+}
+
+public class SpareSaleLineSerialConfiguration : IEntityTypeConfiguration<SpareSaleLineSerial>
+{
+    public void Configure(EntityTypeBuilder<SpareSaleLineSerial> b)
+    {
+        b.ToTable("spare_sale_line_serials");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).HasColumnName("id");
+        b.Property(x => x.SpareSaleLineId).HasColumnName("spare_sale_line_id");
+        b.Property(x => x.PartId).HasColumnName("part_id");
+        // Same width as component_serials.serial_number: these rows become those rows at mark-sold,
+        // and a serial that fitted here but not there would fail at the one moment it must not.
+        b.Property(x => x.SerialNumber).HasColumnName("serial_number").HasMaxLength(128).IsRequired();
+        b.Property(x => x.CreatedAt).HasColumnName("created_at");
+
+        b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+
+        // NOT unique on (part_id, serial_number), and that is the design rather than an omission. Two
+        // unsold sales are allowed to hold the same claim for as long as it takes the counter to decide
+        // which of them keeps it — a constraint here would turn that conversation into a 500. The
+        // uniqueness that matters is on component_serials, which is where a claim becomes a unit.
+        b.HasIndex(x => new { x.PartId, x.SerialNumber });
+        b.HasIndex(x => x.SpareSaleLineId);
     }
 }
 

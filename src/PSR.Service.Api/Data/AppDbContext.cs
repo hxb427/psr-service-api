@@ -41,6 +41,7 @@ public class AppDbContext : DbContext
     public DbSet<ServiceReplacement> ServiceReplacements => Set<ServiceReplacement>();
     public DbSet<SpareSale> SpareSales => Set<SpareSale>();
     public DbSet<SpareSaleLine> SpareSaleLines => Set<SpareSaleLine>();
+    public DbSet<SpareSaleLineSerial> SpareSaleLineSerials => Set<SpareSaleLineSerial>();
     public DbSet<SpareSaleReturn> SpareSaleReturns => Set<SpareSaleReturn>();
     public DbSet<SpareSaleReturnLine> SpareSaleReturnLines => Set<SpareSaleReturnLine>();
     public DbSet<ServiceDocument> ServiceDocuments => Set<ServiceDocument>();

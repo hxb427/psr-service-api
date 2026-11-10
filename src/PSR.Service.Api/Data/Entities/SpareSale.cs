@@ -114,7 +114,46 @@ public class SpareSaleLine
     public decimal TaxAmount { get; set; }
     public decimal LineTotal { get; set; }               // taxable + tax
 
+    /// <summary>The exact units this line is for, when the part is serial-tracked. Empty for a part
+    /// sold by quantity, which is most of them. See <see cref="SpareSaleLineSerial"/>.</summary>
+    public List<SpareSaleLineSerial> Serials { get; set; } = new();
+
     public SpareSale Sale { get; set; } = null!;
+}
+
+/// <summary>One serial-tracked unit named on a sale line — a CLAIM, not a tracked unit.
+///
+/// A serial-tracked part's warehouse stock is bought in as a quantity and is not named unit by unit
+/// until it leaves the building. A sale is one of the two places that naming happens (the other is an
+/// issue to a technician), and the counter names the units while the customer is still standing there
+/// — long before anybody presses Mark as sold.
+///
+/// So these rows sit between the two. They say which units this sale is written for, and nothing
+/// else: no <c>component_serials</c> row exists yet, no status, no owner, no history. Tracking starts
+/// at mark-sold, where every one of these is turned into a real unit deployed at the party
+/// (<c>SerialService.InstallToCustomerAsync</c>) inside the same transaction that debits the
+/// warehouse. A sale that is never marked sold therefore leaves the serial ledger untouched, which is
+/// what makes a mistyped serial on a draft sale a correction rather than a unit to be hunted down.
+///
+/// Being a claim is also why two sales can hold the same serial for a while. The counter writing the
+/// second one is told at once (<c>SpareSaleService.FindSerialConflictsAsync</c>) and chooses which
+/// sale keeps it, and the hard guarantee still lives where it always did: the unique index on
+/// <c>component_serials (part_id, serial_number)</c>, re-checked at mark-sold.
+///
+/// <see cref="PartId"/> is denormalised off the line on purpose: the cross-sale lookup asks "who else
+/// holds this serial for this part", and a serial is only ever unique within a part. The sale is
+/// reached through the line rather than carried here as well — a second column for it would need
+/// either a foreign key that collides with the line's own cascade, or no key at all and the chance to
+/// drift away from the line it hangs off.</summary>
+public class SpareSaleLineSerial
+{
+    public long Id { get; set; }
+    public long SpareSaleLineId { get; set; }
+    public long PartId { get; set; }
+    public string SerialNumber { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public SpareSaleLine Line { get; set; } = null!;
 }
 
 /// <summary>Goods coming back from an invoiced sale.

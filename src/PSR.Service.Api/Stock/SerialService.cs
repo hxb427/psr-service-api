@@ -1061,6 +1061,57 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
         db.ComponentSerials.Remove(c);
     }
 
+    /// <summary>What undoing a counter sale would do to a unit that sale put into tracking: the state
+    /// it is in for the message, and whether its record can go with the sale. Null when there is no
+    /// record for that serial, which is nothing to undo.
+    ///
+    /// Withdrawable means the sale is still the only thing that ever happened to this unit: USED, at
+    /// a customer, on no repair job, and its history is the single row mark-sold wrote. Anything else
+    /// and the unit has moved on since — collected back as faulty, booked in for repair, written off —
+    /// and that history is the record of where it actually is. Undoing the sale must not erase it.
+    ///
+    /// The same shape as <see cref="InwardWithdrawalStateAsync"/>, and for the same reason: a record
+    /// that exists only because of one event may be withdrawn with that event, and no other may.
+    /// Mark-sold always CREATES these records — a serial already in the ledger is refused before the
+    /// sale is handed over — so a unit with nothing after its creation row is one of this sale's.</summary>
+    public async Task<(SerialStatus Status, string? OwnerRef, bool Withdrawable)?> SaleWithdrawalStateAsync(
+        long partId, string serialNumber, CancellationToken ct)
+    {
+        var sn = serialNumber.Trim();
+        var c = await db.ComponentSerials.AsNoTracking()
+            .Where(x => x.PartId == partId && x.SerialNumber == sn)
+            .Select(x => new { x.Id, x.Status, x.OwnerType, x.OwnerRef, x.CurrentServiceJobId })
+            .FirstOrDefaultAsync(ct);
+        if (c is null) return null;
+
+        // Counted, not fetched: one row means creation and nothing since, and the second row is enough
+        // to know that is no longer true however many there are.
+        var events = await db.SerialStatusHistory.AsNoTracking()
+            .Where(h => h.ComponentSerialId == c.Id).Take(2).CountAsync(ct);
+
+        var withdrawable = c.Status == SerialStatus.Used
+            && c.OwnerType == SerialOwnerType.Customer
+            && c.CurrentServiceJobId is null
+            && events <= 1;
+        return (c.Status, c.OwnerRef, withdrawable);
+    }
+
+    /// <summary>Withdraw a unit that only ever existed because of a counter sale now being un-marked:
+    /// the row and its single history line go, leaving the serial free to be sold again.
+    ///
+    /// Only ever called behind <see cref="SaleWithdrawalStateAsync"/>, so it cannot erase a unit with
+    /// a past.</summary>
+    public async Task WithdrawSaleUnitAsync(long partId, string serialNumber, CancellationToken ct)
+    {
+        var sn = serialNumber.Trim();
+        var c = await db.ComponentSerials.FirstOrDefaultAsync(
+            x => x.PartId == partId && x.SerialNumber == sn, ct);
+        if (c is null) return;
+        var history = await db.SerialStatusHistory.Where(h => h.ComponentSerialId == c.Id).ToListAsync(ct);
+        db.SerialStatusHistory.RemoveRange(history);
+        db.ComponentSerials.Remove(c);
+    }
+
     public Task<ComponentSerial?> FindAsync(long partId, string serialNumber, CancellationToken ct)
         => db.ComponentSerials.FirstOrDefaultAsync(
             c => c.PartId == partId && c.SerialNumber == serialNumber.Trim(), ct);

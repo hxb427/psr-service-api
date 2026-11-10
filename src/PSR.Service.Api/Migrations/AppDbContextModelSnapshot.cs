@@ -2365,6 +2365,42 @@ namespace PSR.Service.Api.Migrations
                     b.ToTable("spare_sale_lines", (string)null);
                 });
 
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleLineSerial", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("created_at");
+
+                    b.Property<long>("PartId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("part_id");
+
+                    b.Property<string>("SerialNumber")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("serial_number");
+
+                    b.Property<long>("SpareSaleLineId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("spare_sale_line_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SpareSaleLineId");
+
+                    b.HasIndex("PartId", "SerialNumber");
+
+                    b.ToTable("spare_sale_line_serials", (string)null);
+                });
+
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleReturn", b =>
                 {
                     b.Property<long>("Id")
@@ -3353,6 +3389,23 @@ namespace PSR.Service.Api.Migrations
                     b.Navigation("Sale");
                 });
 
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleLineSerial", b =>
+                {
+                    b.HasOne("PSR.Service.Api.Data.Entities.Part", null)
+                        .WithMany()
+                        .HasForeignKey("PartId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PSR.Service.Api.Data.Entities.SpareSaleLine", "Line")
+                        .WithMany("Serials")
+                        .HasForeignKey("SpareSaleLineId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Line");
+                });
+
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleReturn", b =>
                 {
                     b.HasOne("PSR.Service.Api.Data.Entities.SpareSale", null)
@@ -3539,6 +3592,11 @@ namespace PSR.Service.Api.Migrations
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSale", b =>
                 {
                     b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleLine", b =>
+                {
+                    b.Navigation("Serials");
                 });
 
             modelBuilder.Entity("PSR.Service.Api.Data.Entities.SpareSaleReturn", b =>

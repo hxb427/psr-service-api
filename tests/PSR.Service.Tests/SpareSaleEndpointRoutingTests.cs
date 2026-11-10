@@ -31,6 +31,9 @@ public class SpareSaleEndpointRoutingTests
         builder.Services.AddScoped<NumberSequenceService>();
         builder.Services.AddScoped<SpareSaleService>();
         builder.Services.AddScoped<StockLedgerService>();
+        // Mark-sold and unmark-sold take it: a counter sale of a serial-tracked item is where its units
+        // enter the ledger, and where undoing the sale takes them back out again.
+        builder.Services.AddScoped<SerialService>();
 
         var app = builder.Build();
 
@@ -53,6 +56,10 @@ public class SpareSaleEndpointRoutingTests
     [InlineData("/spare-sales/{id:long}/courier")]
     [InlineData("/spare-sales/{id:long}/clear-pi")]
     [InlineData("/spare-sales/{id:long}/mark-sold")]
+    // The sale form asks what is wrong with its serials before it submits, because the two things that
+    // can be wrong need different answers and a 400 can only give one.
+    [InlineData("/spare-sales/serials/check")]
+    [InlineData("/spare-sales/serials/release")]
     public void Route_is_registered(string route)
     {
         var routes = BuildSpareSaleEndpoints().OfType<RouteEndpoint>()

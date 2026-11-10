@@ -4,13 +4,19 @@ namespace PSR.Service.Api.SpareSales;
 
 /// <summary>One item being sold. <paramref name="UnitRate"/> is tax-EXCLUSIVE and optional — left null the
 /// server prices it from the parts master using <paramref name="RateType"/> (which itself defaults to the
-/// dealer/customer column implied by the party). Supplying a rate records the line as a Manual price.</summary>
+/// dealer/customer column implied by the party). Supplying a rate records the line as a Manual price.
+///
+/// <paramref name="Serials"/> names the exact units, and is required for a serial-tracked part: one
+/// serial per unit, so a line for 5 carries 5 of them. A part sold by quantity must send none. Nothing
+/// is tracked by saving them — they are claims until the sale is marked sold, which is where they
+/// become units at the customer. See <see cref="Data.Entities.SpareSaleLineSerial"/>.</summary>
 public record SpareSaleLineRequest(
     [Required] long PartId,
     [Range(1, 1_000_000)] int Qty,
     [StringLength(300)] string? Description,
     [StringLength(20)] string? RateType,
-    [Range(0, 10_000_000)] decimal? UnitRate);
+    [Range(0, 10_000_000)] decimal? UnitRate,
+    List<string>? Serials = null);
 
 /// <summary>Create or replace a spare sale. The party is EITHER a dealer (CustomerType=Dealer + DealerId)
 /// or a direct customer (CustomerType=Direct + CustomerId or a typed CustomerName, match-or-created).
@@ -52,11 +58,17 @@ public record SaveSaleCourierRequest(
 /// <paramref name="WarehouseOnHand"/>. It used to be on-hand minus what other unsold sales had claimed;
 /// that idea is gone (see SpareSaleService.ApplyAsync), and the field is kept on the wire only so a client
 /// still on the previous build reads the right number instead of a zero.</summary>
+/// <param name="IsSerialTracked">Whether this part is sold unit by unit. Carried on the line so the
+/// register can say that the serials below it are the whole of what this line is for, rather than
+/// leaving an empty list to read as "none entered yet" on a part that never has any.</param>
+/// <param name="Serials">The units named on this line, in entry order. Claims while the sale is
+/// unsold; the units themselves once it is marked sold.</param>
 public record SpareSaleLineDto(
     long Id, long PartId, string ItemCode, string Description, string? HsnCode, string? Unit,
     int Qty, string RateType, decimal? UnitRate, decimal GstPercent,
     decimal? TaxableAmount, decimal? TaxAmount, decimal? LineTotal,
-    int WarehouseOnHand, int Available, int ReturnedQty);
+    int WarehouseOnHand, int Available, int ReturnedQty,
+    bool IsSerialTracked = false, List<string>? Serials = null);
 
 /// <summary>What the warehouse holds for one part, asked per row as the sale form is typed.
 ///
@@ -65,6 +77,49 @@ public record SpareSaleLineDto(
 /// build — which reads Available and subtracts Committed to label the row — still shows the on-hand
 /// figure rather than reading absent fields as zero and refusing every line.</summary>
 public record PartAvailabilityDto(long PartId, int OnHand, int Committed, int Available);
+
+// ----- serials on a sale -----
+
+/// <summary>One part's worth of serials, asked about before the sale is saved.</summary>
+public record SaleSerialCheckLine([Required] long PartId, [Required] List<string> Serials);
+
+/// <summary>Ask what is wrong with the serials typed on a sale form, before saving it.
+///
+/// A sale form can be refused for a serial in two quite different ways, and the counter has to be
+/// told which: a unit the shop already tracks is simply not for sale here and there is nothing to
+/// decide, while a unit another UNSOLD sale has claimed is a question — which of the two sales keeps
+/// it. Finding that out from the 400 that <c>POST /spare-sales</c> returns is too late and too thin:
+/// the form has already been submitted, and a sentence cannot say which sale to release.
+///
+/// <paramref name="SaleId"/> is the sale being edited, whose own claims are not conflicts with
+/// itself. Null when entering a new one.</summary>
+public record SaleSerialCheckRequest(
+    long? SaleId,
+    [Required, MinLength(1)] List<SaleSerialCheckLine> Lines);
+
+/// <summary>Why one serial cannot go on this sale.
+///
+/// <paramref name="Releasable"/> is the whole point of the shape. True means another unsold sale holds
+/// the claim and the counter may take it off that sale (<c>POST /spare-sales/serials/release</c>);
+/// false means the unit is already in the serial ledger — issued, deployed, on the shelf, scrapped —
+/// and there is no way through. <paramref name="HeldBySaleNo"/> is set only in the first case, because
+/// only then is there a sale to name.</summary>
+public record SaleSerialConflictDto(
+    long PartId, string ItemCode, string SerialNumber, string Reason,
+    bool Releasable, long? HeldBySaleId = null, string? HeldBySaleNo = null);
+
+public record SaleSerialCheckResult(List<SaleSerialConflictDto> Conflicts);
+
+/// <summary>Take these serials off whichever unsold sale is holding them, so the sale being written
+/// now can have them. One call however many sales are involved — the counter answered one question,
+/// not one per sale.</summary>
+public record ReleaseSaleSerialsRequest([Required, MinLength(1)] List<SaleSerialRef> Serials);
+
+public record SaleSerialRef([Required] long PartId, [Required, StringLength(128)] string SerialNumber);
+
+/// <summary>What was actually let go, and off which sales — so the counter is told that the other
+/// sale is now a unit short rather than finding out when it refuses to be marked sold.</summary>
+public record ReleaseSaleSerialsResult(int Released, List<string> AffectedSaleNos);
 
 // ----- returns -----
 public record SaleReturnLineRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty);

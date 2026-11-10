@@ -24,7 +24,7 @@ public static partial class ReportsEndpoints
         group.MapGet("/parts-used", PartsUsedAsync);
         group.MapGet("/held-items", HeldItemsAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/serials", SerialLedgerAsync).RequireAuthorization("StockManage");
-        group.MapGet("/service-register", ServiceRegisterAsync).RequireAuthorization("ReportsFull");
+        group.MapGet("/service-register", ServiceRegisterAsync).RequireAuthorization("ServiceRegisterView");
         group.MapGet("/daily-summary", DailySummaryAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/tat", TatAsync).RequireAuthorization("ReportsFull");
         group.MapGet("/stock-ledger", StockLedgerAsync).RequireAuthorization("ReportsFull");

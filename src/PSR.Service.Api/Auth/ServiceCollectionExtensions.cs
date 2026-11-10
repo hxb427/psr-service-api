@@ -153,6 +153,14 @@ public static class ServiceCollectionExtensions
             options.AddPolicy("ReportsFull", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer,
                 RoleNames.StoreManager, RoleNames.Accounts));
+
+            // The register lookup — "which job is this serial / challan / DC on?" — is one rung wider
+            // than the reports it sits with, because the receiving desk needs to answer that question
+            // about a unit someone has carried back in. Deliberately its own policy rather than adding
+            // inward to ReportsFull: the desk gets the search, not the TAT and stock reports.
+            options.AddPolicy("ServiceRegisterView", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer,
+                RoleNames.StoreManager, RoleNames.Accounts, RoleNames.Inward));
         });
         return services;
     }
