@@ -55,16 +55,28 @@ public class SpareSaleEndpointRoutingTests
     // previewed and then abandoned used to take the typed courier details with it.
     [InlineData("/spare-sales/{id:long}/courier")]
     [InlineData("/spare-sales/{id:long}/clear-pi")]
+    // Where a serial-tracked item is named: the body carries the units per line, so this handler binds
+    // a body AND a route id AND four services, which is exactly the shape that silently stops binding.
     [InlineData("/spare-sales/{id:long}/mark-sold")]
-    // The sale form asks what is wrong with its serials before it submits, because the two things that
-    // can be wrong need different answers and a 400 can only give one.
-    [InlineData("/spare-sales/serials/check")]
-    [InlineData("/spare-sales/serials/release")]
+    [InlineData("/spare-sales/{id:long}/unmark-sold")]
     public void Route_is_registered(string route)
     {
         var routes = BuildSpareSaleEndpoints().OfType<RouteEndpoint>()
             .Select(e => e.RoutePattern.RawText).ToList();
 
         routes.Should().Contain(route);
+    }
+
+    /// <summary>There are no serial routes beside mark-sold. A sale is entered as quantities and names
+    /// its units in the mark-sold body, so nothing sits on an unsold sale for a pre-submit check to
+    /// find and there is no claim on another sale to release. Asserted rather than assumed: a route
+    /// left mapped to a handler nobody calls is the kind of thing that comes back.</summary>
+    [Fact]
+    public void There_is_no_separate_serial_route()
+    {
+        var routes = BuildSpareSaleEndpoints().OfType<RouteEndpoint>()
+            .Select(e => e.RoutePattern.RawText).ToList();
+
+        routes.Should().NotContain(r => r!.Contains("serials"));
     }
 }

@@ -114,37 +114,40 @@ public class SpareSaleLine
     public decimal TaxAmount { get; set; }
     public decimal LineTotal { get; set; }               // taxable + tax
 
-    /// <summary>The exact units this line is for, when the part is serial-tracked. Empty for a part
-    /// sold by quantity, which is most of them. See <see cref="SpareSaleLineSerial"/>.</summary>
+    /// <summary>The exact units that went out on this line, when the part is serial-tracked. Empty
+    /// until the sale is marked sold, and empty for ever on a part sold by quantity — which is most of
+    /// them. See <see cref="SpareSaleLineSerial"/>.</summary>
     public List<SpareSaleLineSerial> Serials { get; set; } = new();
 
     public SpareSale Sale { get; set; } = null!;
 }
 
-/// <summary>One serial-tracked unit named on a sale line — a CLAIM, not a tracked unit.
+/// <summary>One serial-tracked unit that went out on a sale line — which box left the counter.
 ///
 /// A serial-tracked part's warehouse stock is bought in as a quantity and is not named unit by unit
-/// until it leaves the building. A sale is one of the two places that naming happens (the other is an
-/// issue to a technician), and the counter names the units while the customer is still standing there
-/// — long before anybody presses Mark as sold.
+/// until it leaves the building. A sale is one of the two places that naming happens; the other is an
+/// issue to a technician (<c>SerialService.CaptureOnIssueAsync</c>), and both name the units at the
+/// moment the goods physically go, not when the paperwork for them is written.
 ///
-/// So these rows sit between the two. They say which units this sale is written for, and nothing
-/// else: no <c>component_serials</c> row exists yet, no status, no owner, no history. Tracking starts
-/// at mark-sold, where every one of these is turned into a real unit deployed at the party
-/// (<c>SerialService.InstallToCustomerAsync</c>) inside the same transaction that debits the
-/// warehouse. A sale that is never marked sold therefore leaves the serial ledger untouched, which is
-/// what makes a mistyped serial on a draft sale a correction rather than a unit to be hunted down.
+/// So these rows are written by MARK-SOLD and at no other time, in the same transaction that debits
+/// the warehouse and creates each unit's <c>component_serials</c> record. A sale being entered carries
+/// quantities and nothing else — it reserves no stock and names no units, because until somebody hands
+/// the goods over there is nothing to name: the counter does not know which boxes it will pull, and a
+/// sale that is never completed should leave the serial ledger exactly as it found it.
 ///
-/// Being a claim is also why two sales can hold the same serial for a while. The counter writing the
-/// second one is told at once (<c>SpareSaleService.FindSerialConflictsAsync</c>) and chooses which
-/// sale keeps it, and the hard guarantee still lives where it always did: the unique index on
-/// <c>component_serials (part_id, serial_number)</c>, re-checked at mark-sold.
+/// That timing is also what makes a duplicate serial impossible rather than merely detected. There is
+/// no window in which two sales hold the same number, since a serial reaches a sale and the ledger
+/// together: the second counter to try it is refused by the unique index on
+/// <c>component_serials (part_id, serial_number)</c>, which <c>SpareSalesEndpoints.SerialRefusalAsync</c>
+/// turns into a sentence naming the unit and where it already is.
 ///
-/// <see cref="PartId"/> is denormalised off the line on purpose: the cross-sale lookup asks "who else
-/// holds this serial for this part", and a serial is only ever unique within a part. The sale is
-/// reached through the line rather than carried here as well — a second column for it would need
-/// either a foreign key that collides with the line's own cascade, or no key at all and the chance to
-/// drift away from the line it hangs off.</summary>
+/// Kept as a serial NUMBER rather than a foreign key to <c>component_serials</c>: undoing a sale
+/// withdraws the unit records it created (see <c>SerialService.WithdrawSaleUnitAsync</c>), and a key
+/// would either block that or cascade these rows away with it. <see cref="PartId"/> is denormalised
+/// off the line because a serial is only ever unique within a part, and every lookup here asks about
+/// the pair. The sale is reached through the line rather than carried here as well — a second column
+/// for it would need either a foreign key that collides with the line's own cascade, or no key at all
+/// and the chance to drift away from the line it hangs off.</summary>
 public class SpareSaleLineSerial
 {
     public long Id { get; set; }

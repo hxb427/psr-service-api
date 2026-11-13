@@ -6,17 +6,14 @@ namespace PSR.Service.Api.SpareSales;
 /// server prices it from the parts master using <paramref name="RateType"/> (which itself defaults to the
 /// dealer/customer column implied by the party). Supplying a rate records the line as a Manual price.
 ///
-/// <paramref name="Serials"/> names the exact units, and is required for a serial-tracked part: one
-/// serial per unit, so a line for 5 carries 5 of them. A part sold by quantity must send none. Nothing
-/// is tracked by saving them — they are claims until the sale is marked sold, which is where they
-/// become units at the customer. See <see cref="Data.Entities.SpareSaleLineSerial"/>.</summary>
+/// A quantity, and no serial numbers — including for a serial-tracked part. The units are named at
+/// mark-sold, which is when they physically leave; see <see cref="MarkSaleSoldRequest"/>.</summary>
 public record SpareSaleLineRequest(
     [Required] long PartId,
     [Range(1, 1_000_000)] int Qty,
     [StringLength(300)] string? Description,
     [StringLength(20)] string? RateType,
-    [Range(0, 10_000_000)] decimal? UnitRate,
-    List<string>? Serials = null);
+    [Range(0, 10_000_000)] decimal? UnitRate);
 
 /// <summary>Create or replace a spare sale. The party is EITHER a dealer (CustomerType=Dealer + DealerId)
 /// or a direct customer (CustomerType=Direct + CustomerId or a typed CustomerName, match-or-created).
@@ -80,46 +77,24 @@ public record PartAvailabilityDto(long PartId, int OnHand, int Committed, int Av
 
 // ----- serials on a sale -----
 
-/// <summary>One part's worth of serials, asked about before the sale is saved.</summary>
-public record SaleSerialCheckLine([Required] long PartId, [Required] List<string> Serials);
+/// <summary>The units going out on one line of the sale being handed over. <paramref name="LineId"/>
+/// is the sale line's own id, so a part sitting on two lines is answered for twice and each line's
+/// quantity is matched against its own serials.</summary>
+public record MarkSaleSoldLine(
+    [Required] long LineId,
+    [Required] List<string> Serials);
 
-/// <summary>Ask what is wrong with the serials typed on a sale form, before saving it.
+/// <summary>Hand the goods over, naming the units for every serial-tracked line.
 ///
-/// A sale form can be refused for a serial in two quite different ways, and the counter has to be
-/// told which: a unit the shop already tracks is simply not for sale here and there is nothing to
-/// decide, while a unit another UNSOLD sale has claimed is a question — which of the two sales keeps
-/// it. Finding that out from the 400 that <c>POST /spare-sales</c> returns is too late and too thin:
-/// the form has already been submitted, and a sentence cannot say which sale to release.
+/// This is where a serial-tracked part's warehouse stock is named, because this is when it leaves. A
+/// sale is entered as quantities — the counter does not yet know which boxes it will pull, and a sale
+/// that is never completed should name nothing — so the serials are asked for here, against the
+/// quantities already agreed, and the sale, the warehouse and the serial ledger all move together.
 ///
-/// <paramref name="SaleId"/> is the sale being edited, whose own claims are not conflicts with
-/// itself. Null when entering a new one.</summary>
-public record SaleSerialCheckRequest(
-    long? SaleId,
-    [Required, MinLength(1)] List<SaleSerialCheckLine> Lines);
-
-/// <summary>Why one serial cannot go on this sale.
-///
-/// <paramref name="Releasable"/> is the whole point of the shape. True means another unsold sale holds
-/// the claim and the counter may take it off that sale (<c>POST /spare-sales/serials/release</c>);
-/// false means the unit is already in the serial ledger — issued, deployed, on the shelf, scrapped —
-/// and there is no way through. <paramref name="HeldBySaleNo"/> is set only in the first case, because
-/// only then is there a sale to name.</summary>
-public record SaleSerialConflictDto(
-    long PartId, string ItemCode, string SerialNumber, string Reason,
-    bool Releasable, long? HeldBySaleId = null, string? HeldBySaleNo = null);
-
-public record SaleSerialCheckResult(List<SaleSerialConflictDto> Conflicts);
-
-/// <summary>Take these serials off whichever unsold sale is holding them, so the sale being written
-/// now can have them. One call however many sales are involved — the counter answered one question,
-/// not one per sale.</summary>
-public record ReleaseSaleSerialsRequest([Required, MinLength(1)] List<SaleSerialRef> Serials);
-
-public record SaleSerialRef([Required] long PartId, [Required, StringLength(128)] string SerialNumber);
-
-/// <summary>What was actually let go, and off which sales — so the counter is told that the other
-/// sale is now a unit short rather than finding out when it refuses to be marked sold.</summary>
-public record ReleaseSaleSerialsResult(int Released, List<string> AffectedSaleNos);
+/// Every tracked line must be answered with exactly its quantity of serials. A sale with nothing
+/// tracked on it sends no lines at all, which is why the body is optional: marking such a sale sold is
+/// the same single action it always was.</summary>
+public record MarkSaleSoldRequest(List<MarkSaleSoldLine>? Lines = null);
 
 // ----- returns -----
 public record SaleReturnLineRequest([Required] long PartId, [Range(1, 1_000_000)] int Qty);

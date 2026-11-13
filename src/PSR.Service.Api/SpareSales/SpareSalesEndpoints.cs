@@ -1,6 +1,9 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
+// EmptyBodyBehavior, for mark-sold: a sale with nothing serial-tracked on it is marked sold with no
+// body at all, the way it always was.
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Audit;
 using PSR.Service.Api.Auth;
@@ -77,11 +80,10 @@ public static class SpareSalesEndpoints
         group.MapPost("/{id:long}/returns", CreateReturnAsync).RequireAuthorization("SaleManage");
         // Asked per row by the sale form as the user types, so it stays a single-part lookup.
         group.MapGet("/availability/{partId:long}", AvailabilityAsync);
-        // What is wrong with the serials typed on a form, asked before it is submitted — and the one
-        // resolution the counter is offered for them. Both gated on SaleManage: writing a sale is what
-        // they are part of, and releasing a claim edits somebody else's draft sale.
-        group.MapPost("/serials/check", CheckSerialsAsync).RequireAuthorization("SaleManage");
-        group.MapPost("/serials/release", ReleaseSerialsAsync).RequireAuthorization("SaleManage");
+        // There are no serial routes beside these. A sale is entered as quantities and names its units
+        // in the mark-sold body, so there is no window in which a serial sits on an unsold sale — and
+        // therefore nothing for a pre-submit conflict check to find, and no claim on another sale to
+        // release. The one serial rule left is "not already tracked", which mark-sold applies itself.
 
         return app;
     }
@@ -98,77 +100,6 @@ public static class SpareSalesEndpoints
     }
 
     // ---------------------------------------------------------------- serials
-
-    /// <summary>What stands between the serials typed on a sale form and this sale. Reads nothing into
-    /// the database and changes nothing — the form asks as the serials are entered, so the counter is
-    /// told while the customer is still in front of them.</summary>
-    private static async Task<Ok<SaleSerialCheckResult>> CheckSerialsAsync(
-        [FromBody] SaleSerialCheckRequest req, SpareSaleService sales, CancellationToken ct) =>
-        TypedResults.Ok(new SaleSerialCheckResult(
-            await sales.FindSerialConflictsAsync(req.SaleId, req.Lines, ct)));
-
-    /// <summary>Take a serial off whichever unsold sale is holding it, so the sale being written now can
-    /// have it.
-    ///
-    /// The ONE resolution a serial conflict has, and it is deliberately the smallest one. The other
-    /// sale is left standing — its party, its other lines, its prices and its documents are nothing to
-    /// do with this unit — and all it loses is the claim, which leaves that line a serial short and so
-    /// unable to be marked sold until somebody names a replacement. That is the honest state: the unit
-    /// has gone to the other counter, and the sale that lost it needs a different box off the shelf.
-    ///
-    /// A claim on a sale that has been marked sold is NOT released. By then the unit is in the serial
-    /// ledger and the claim is a record of where it went, so the conflict check reports it as tracked
-    /// and not releasable; reaching here for one means it was marked sold in between, and the right
-    /// answer is to say so rather than to quietly unpick a movement.</summary>
-    private static async Task<Results<Ok<ReleaseSaleSerialsResult>, BadRequest<string>>> ReleaseSerialsAsync(
-        [FromBody] ReleaseSaleSerialsRequest req, ClaimsPrincipal user, AppDbContext db,
-        IAuditService audit, HttpContext http, CancellationToken ct)
-    {
-        var wanted = req.Serials
-            .Select(s => (s.PartId, Sn: s.SerialNumber.Trim()))
-            .Where(s => s.Sn.Length > 0)
-            .Distinct()
-            .ToList();
-        if (wanted.Count == 0) return TypedResults.BadRequest("No serial numbers were given to release.");
-
-        var partIds = wanted.Select(w => w.PartId).Distinct().ToList();
-        // Narrowed on the part in the query and matched on the serial in memory, so the case of the
-        // number cannot depend on the column's collation — the same rule the conflict check follows.
-        var rows = await (from s in db.SpareSaleLineSerials
-                          join l in db.SpareSaleLines.AsNoTracking() on s.SpareSaleLineId equals l.Id
-                          join sale in db.SpareSales.AsNoTracking() on l.SpareSaleId equals sale.Id
-                          where partIds.Contains(s.PartId) && !sale.IsDeleted
-                          select new { Serial = s, sale.Id, sale.SaleNo, sale.SoldAt }).ToListAsync(ct);
-
-        var matched = rows.Where(r => wanted.Any(w =>
-            w.PartId == r.Serial.PartId
-            && string.Equals(w.Sn, r.Serial.SerialNumber, StringComparison.OrdinalIgnoreCase))).ToList();
-
-        if (matched.FirstOrDefault(r => r.SoldAt is not null) is { } sold)
-            return TypedResults.BadRequest(
-                $"{sold.Serial.SerialNumber} is on {sold.SaleNo}, which has been marked sold — the unit "
-                + "has left the warehouse and is tracked against that sale. It cannot be released.");
-
-        if (matched.Count == 0)
-            return TypedResults.BadRequest(
-                "None of those serial numbers is on an unsold sale any more — somebody has already "
-                + "changed or sold the sale that held them. Check the serials again.");
-
-        user.TryGetUserId(out var uid);
-        db.SpareSaleLineSerials.RemoveRange(matched.Select(r => r.Serial));
-
-        // One audit row per sale that lost something, on that sale: the person who comes back to a sale
-        // that will not be marked sold needs to find out there why it is a unit short.
-        foreach (var g in matched.GroupBy(r => (r.Id, r.SaleNo)))
-            audit.Log(uid, "spare-sale.release-serials", "spare_sale", g.Key.Id,
-                details: $"{g.Key.SaleNo} — released {string.Join(", ", g.Select(r => r.Serial.SerialNumber))} "
-                         + "to another sale; this sale now needs replacement serial(s) before it can be sold",
-                ip: http.GetIp());
-        await db.SaveChangesAsync(ct);
-
-        return TypedResults.Ok(new ReleaseSaleSerialsResult(
-            matched.Count, matched.Select(r => r.SaleNo).Distinct().OrderBy(n => n).ToList()));
-    }
 
     /// <summary>The serials a sale's lines carry, line id → serials in entry order.</summary>
     private static async Task<Dictionary<long, List<string>>> SerialsByLineAsync(
@@ -389,13 +320,9 @@ public static class SpareSalesEndpoints
 
         sale.Status = SpareSaleStatus.Cancelled;
         user.TryGetUserId(out var uid);
-        // A cancelled sale will never be marked sold, so its serials are nobody's any more. Dropped
-        // rather than left to sit: a claim on a sale that cannot complete is a unit the next counter is
-        // refused for no reason it can see or undo.
-        var freed = await ReleaseClaimsAsync(db, sale.Id, ct);
-        audit.Log(uid, "spare-sale.cancel", "spare_sale", sale.Id,
-            details: sale.SaleNo + (freed > 0 ? $" — {freed} serial claim(s) freed" : string.Empty),
-            ip: http.GetIp());
+        // Nothing to do about serials. A sale can only be cancelled while it is unsold, and an unsold
+        // sale holds none — they arrive with mark-sold.
+        audit.Log(uid, "spare-sale.cancel", "spare_sale", sale.Id, details: sale.SaleNo, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.Ok((await BuildDetailAsync(db, sale.Id, SaleRoles.CanSeePricing(user), ct))!);
@@ -413,28 +340,11 @@ public static class SpareSalesEndpoints
 
         sale.IsDeleted = true;
         user.TryGetUserId(out var uid);
-        // Same reason as cancel: a removed sale is never going to be marked sold, so holding its
-        // serials would refuse them to every sale after it.
-        var freed = await ReleaseClaimsAsync(db, sale.Id, ct);
-        audit.Log(uid, "spare-sale.delete", "spare_sale", sale.Id,
-            details: sale.SaleNo + (freed > 0 ? $" — {freed} serial claim(s) freed" : string.Empty),
-            ip: http.GetIp());
+        // Same as cancel: only an unsold sale can be removed, and an unsold sale names no units.
+        audit.Log(uid, "spare-sale.delete", "spare_sale", sale.Id, details: sale.SaleNo, ip: http.GetIp());
         await db.SaveChangesAsync(ct);
 
         return TypedResults.NoContent();
-    }
-
-    /// <summary>Drop every serial claim on a sale that will never complete, and say how many went.
-    /// Only ever called on a sale that is NOT marked sold — once it is, the rows are the record of
-    /// which units went to that party and the ledger agrees with them.</summary>
-    private static async Task<int> ReleaseClaimsAsync(AppDbContext db, long saleId, CancellationToken ct)
-    {
-        var rows = await (from s in db.SpareSaleLineSerials
-                          join l in db.SpareSaleLines.AsNoTracking() on s.SpareSaleLineId equals l.Id
-                          where l.SpareSaleId == saleId
-                          select s).ToListAsync(ct);
-        db.SpareSaleLineSerials.RemoveRange(rows);
-        return rows.Count;
     }
 
     private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> PaymentAsync(
@@ -480,14 +390,21 @@ public static class SpareSalesEndpoints
     /// the conditional UPDATE underneath is still what makes overselling impossible, because anything
     /// read here can be gone by the time the row is written.
     ///
-    /// <b>This is also where serial tracking starts.</b> The serials were named when the sale was
-    /// written, and until now they were claims and nothing more — no unit, no status, no owner (see
-    /// <see cref="Data.Entities.SpareSaleLineSerial"/>). Handing the goods over is what makes them real,
-    /// so each one becomes a unit deployed at the party in the same transaction that debits the
-    /// warehouse. Either both happen or neither does, which is the only way the quantity and the
-    /// ledger can agree about a sale afterwards.</summary>
+    /// <b>This is also where a serial-tracked item is named.</b> The sale itself carries quantities
+    /// only: the counter does not know which boxes it will pull when the sale is written, and a sale
+    /// that is never completed should name nothing. So the units arrive in the body of THIS request,
+    /// one serial per unit per tracked line, and in one transaction they are written onto the sale,
+    /// created in the serial ledger as deployed at the party, and debited off the warehouse. All of it
+    /// or none of it, which is the only way the quantity and the ledger can agree about a sale
+    /// afterwards. See <see cref="Data.Entities.SpareSaleLineSerial"/>.
+    ///
+    /// Naming the units here rather than at entry is also what removes the duplicate problem instead
+    /// of policing it. A serial reaches a sale and the ledger in the same instant, so there is no
+    /// window in which two unsold sales hold the same number: the second counter to try it is refused
+    /// by <see cref="SerialRefusalAsync"/>, which says where the unit already is.</summary>
     private static async Task<Results<Ok<SpareSaleDetailDto>, NotFound, BadRequest<string>>> MarkSoldAsync(
-        long id, ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
+        long id, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] MarkSaleSoldRequest? req,
+        ClaimsPrincipal user, AppDbContext db, StockLedgerService ledger,
         SerialService serials, IAuditService audit, HttpContext http, CancellationToken ct)
     {
         var sale = await db.SpareSales.Include(s => s.Lines).ThenInclude(l => l.Serials)
@@ -497,12 +414,19 @@ public static class SpareSalesEndpoints
         if (sale.Status == SpareSaleStatus.Cancelled) return TypedResults.BadRequest("This sale is cancelled.");
         if (sale.Lines.Count == 0) return TypedResults.BadRequest("This sale has no items on it.");
 
-        // Serials are checked before any stock moves, against the ledger as it stands NOW. The sale was
-        // written with these units free, and in the time since — which can be days — one of them may
-        // have been issued to a technician, fitted on a job, or sold on another counter's sale that was
-        // marked sold first. The unique index on component_serials would catch it either way, but as a
-        // database error on a half-finished transaction rather than a sentence naming the unit.
-        if (await SerialRefusalAsync(db, sale, ct) is { } serialRefusal)
+        // The units being handed over, per line, trimmed — and everything wrong with them named at
+        // once, before any stock moves. A tracked line with no serials against it is refused here
+        // rather than silently handed over untracked, which is the whole point of the change: a sale
+        // of a tracked item cannot complete without saying which boxes went.
+        //
+        // The body is optional so a sale with nothing tracked on it is still the one-click action it
+        // always was, and so an older client — which sends no body at all — keeps working for exactly
+        // those sales and is refused, by name, for the ones it cannot answer for.
+        var byLine = (req?.Lines ?? [])
+            .GroupBy(l => l.LineId)
+            .ToDictionary(g => g.Key, g => SpareSaleService.Normalize(g.SelectMany(l => l.Serials)));
+
+        if (await SerialRefusalAsync(db, sale, byLine, ct) is { } serialRefusal)
             return TypedResults.BadRequest(serialRefusal);
 
         // What this sale wants, one row per part — the same grouping the decrement below uses, so the
@@ -520,11 +444,14 @@ public static class SpareSalesEndpoints
 
         user.TryGetUserId(out var uid);
         var partyName = await PartyNameAsync(db, sale, ct);
-        // The part's own name, not the line's description: the description defaults to it but is
-        // editable per line, and a serial record labelled with one counter's wording for an item is a
-        // record the SN screen lists under a name no other screen uses.
-        var partNames = await db.Parts.AsNoTracking().Where(p => partIds.Contains(p.Id))
-            .ToDictionaryAsync(p => p.Id, p => p.Name, ct);
+        // Which parts are tracked, and their own names. The NAME is taken from the master rather than
+        // from the line's description: the description defaults to it but is editable per line, and a
+        // serial record labelled with one counter's wording for an item is a record the SN screen lists
+        // under a name no other screen uses.
+        var parts = await db.Parts.AsNoTracking().Where(p => partIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.Name, p.IsSerialTracked })
+            .ToDictionaryAsync(p => p.Id, p => p, ct);
+        var trackedParts = parts.ToDictionary(p => p.Key, p => p.Value.IsSerialTracked);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
@@ -532,18 +459,36 @@ public static class SpareSalesEndpoints
                 await ledger.SaleOutAsync(g.Key, g.First().ItemCode, g.Sum(l => l.Qty), uid, sale.Id,
                     $"Sold ({sale.SaleNo})", ct);
 
-            // The claims become units, now that the goods have actually gone. Owner CUSTOMER and status
-            // USED, which is the state the enum already describes for a unit sold across the counter —
-            // the same end state a unit fitted on a job or handed over as a replacement reaches, because
-            // where the unit is is the same fact however it got there. A dealer sale carries the dealer's
-            // name as the owner label and no customer id: there is no row in the customers table to
-            // point at, and OwnerRef is what every screen reads.
+            // The units are written onto the sale and into the ledger together, because the two
+            // statements are the same fact: this box went to this party on this sale. Owner CUSTOMER
+            // and status USED, which is the state the enum already describes for a unit sold across
+            // the counter — the same end state a unit fitted on a job or handed over as a replacement
+            // reaches, because where the unit is is the same fact however it got there. A dealer sale
+            // carries the dealer's name as the owner label and no customer id: there is no row in the
+            // customers table to point at, and OwnerRef is what every screen reads.
+            // Anything already on the lines is cleared first. A sale written on the previous build was
+            // entered WITH its serials — they were claims then — and those rows mean "went out" now, so
+            // adding this hand-over's numbers beside them would say twice as many units left as did.
+            // Ordinarily there is nothing to clear: an unsold sale names no units.
+            if (sale.Lines.Any(l => l.Serials.Count > 0))
+            {
+                db.SpareSaleLineSerials.RemoveRange(sale.Lines.SelectMany(l => l.Serials));
+                foreach (var line in sale.Lines) line.Serials.Clear();
+                await db.SaveChangesAsync(ct);
+            }
+
+            // Only a TRACKED line's numbers are written, which is what makes serials sent for an
+            // untracked one ignored rather than refused: the part may have had tracking turned off
+            // between the sale being written and the counter answering the prompt, and refusing then
+            // would leave a sale nobody could complete. Writing them instead would be worse — a unit
+            // record for a part the shop does not track by unit, on no screen that lists it.
             var tracked = 0;
-            foreach (var line in sale.Lines)
-                foreach (var claim in line.Serials.OrderBy(s => s.Id))
+            foreach (var line in sale.Lines.Where(l => trackedParts.GetValueOrDefault(l.PartId)))
+                foreach (var sn in byLine.GetValueOrDefault(line.Id) ?? [])
                 {
-                    await serials.InstallToCustomerAsync(line.PartId, claim.SerialNumber,
-                        partNames.GetValueOrDefault(line.PartId), partyName, uid, ct, sale.CustomerId);
+                    line.Serials.Add(new SpareSaleLineSerial { PartId = line.PartId, SerialNumber = sn });
+                    await serials.InstallToCustomerAsync(line.PartId, sn,
+                        parts.GetValueOrDefault(line.PartId)?.Name, partyName, uid, ct, sale.CustomerId);
                     tracked++;
                 }
 
@@ -613,42 +558,72 @@ public static class SpareSalesEndpoints
             + "in first, then mark it sold.";
     }
 
-    /// <summary>Why this sale's serials cannot be tracked, naming every one that is wrong — or null
-    /// when they can all be taken.
+    /// <summary>Why the units named on this hand-over cannot be taken, listing every one that is wrong
+    /// — or null when they can all be taken.
     ///
-    /// Two things are checked, and both are about the gap between writing a sale and handing it over:
+    /// Three rules, and between them they are the whole of what "serial-tracked" means on a sale:
     ///
     /// <list type="bullet">
-    /// <item><b>Every tracked unit is still accounted for.</b> A serial-tracked line needs one serial
-    /// per unit at the moment it goes out, not at the moment it was typed. A line can lose a serial
-    /// after the fact — another counter took the claim (<c>/serials/release</c>) — and it can have
-    /// none at all if the sale was written before serials were asked for. Either way the sale has to
-    /// be edited before the goods can go.</item>
-    /// <item><b>No unit has been claimed elsewhere since.</b> A serial free when the sale was written
-    /// can be with a technician, fitted on a job or sold on another counter by now.</item>
+    /// <item><b>One serial per unit, on every tracked line.</b> A line for 5 of a tracked part needs 5
+    /// numbers. This is what makes the sale traceable at all, so there is no completing the sale
+    /// without it — and a tracked line answered with nothing is refused by name rather than quietly
+    /// handed over untracked, which is what a sale written before this was asked for would otherwise
+    /// do.</item>
+    /// <item><b>No number twice.</b> Within a line, and across the lines of the same part — a part can
+    /// sit on two rows (list price and a discounted one) and one box named on both is one unit sold
+    /// twice. Across different parts is fine: a serial is only ever unique within its part.</item>
+    /// <item><b>Nothing already in the ledger.</b> A unit the shop knows about — with a technician, at
+    /// a customer, on the shelf, scrapped — is not warehouse stock, so it is not what is being sold
+    /// here, and this is where a serial that another counter sold a moment ago is caught. There is no
+    /// override: the ledger says where that unit is, and selling it again from the warehouse would mean
+    /// the shop had two of it. The message says where it is, so a mistyped number can be told apart
+    /// from a real one.</item>
     /// </list>
+    ///
+    /// Serials sent for a line that is NOT tracked are ignored rather than refused. The part may have
+    /// had tracking turned off between the sale being written and the counter answering the prompt, and
+    /// refusing then would leave a sale nobody could complete; the numbers simply have nowhere to go.
     ///
     /// Everything wrong is listed at once, for the same reason the shortfall message lists every short
     /// item: the point is to be told once what to fix.</summary>
-    private static async Task<string?> SerialRefusalAsync(AppDbContext db, SpareSale sale, CancellationToken ct)
+    private static async Task<string?> SerialRefusalAsync(
+        AppDbContext db, SpareSale sale, IReadOnlyDictionary<long, List<string>> byLine,
+        CancellationToken ct)
     {
         var partIds = sale.Lines.Select(l => l.PartId).Distinct().ToList();
         var tracked = await db.Parts.AsNoTracking().Where(p => partIds.Contains(p.Id))
             .Select(p => new { p.Id, p.IsSerialTracked }).ToDictionaryAsync(p => p.Id, p => p.IsSerialTracked, ct);
 
-        // Per part, not per line: the same part on two lines is one pool of units, and 2 + 3 of it
-        // needs 5 serials between them however they are split across the rows.
-        var problems = SerialCountProblems(sale.Lines
-            .GroupBy(l => l.PartId)
-            .Where(g => tracked.GetValueOrDefault(g.Key))
-            .Select(g => (g.First().ItemCode, Qty: g.Sum(l => l.Qty), Serials: g.Sum(l => l.Serials.Count))));
+        var trackedLines = sale.Lines.Where(l => tracked.GetValueOrDefault(l.PartId)).ToList();
 
-        var claims = sale.Lines.SelectMany(l => l.Serials.Select(s => (l.ItemCode, s.PartId, s.SerialNumber)))
-            .ToList();
-        if (claims.Count > 0)
+        // Counted per part, not per line: the same part on two rows is one pool of units, and 2 + 3 of
+        // it needs 5 numbers between them however they are split up. A line the prompt never answered
+        // contributes nothing, which is what makes it show up as short.
+        var problems = SerialCountProblems(trackedLines
+            .GroupBy(l => l.PartId)
+            .Select(g => (g.First().ItemCode,
+                          Qty: g.Sum(l => l.Qty),
+                          Serials: g.Sum(l => (byLine.GetValueOrDefault(l.Id) ?? []).Count))));
+
+        // Same part, every number given for it — this is the grouping a duplicate has to be found in,
+        // since two rows of one part draw on one pool.
+        foreach (var g in trackedLines.GroupBy(l => l.PartId))
         {
-            // Matched in memory for the same reason the conflict check does it: whether two spellings
-            // of a serial are the same unit must not depend on the column's collation.
+            var forPart = g.SelectMany(l => byLine.GetValueOrDefault(l.Id) ?? []).ToList();
+            foreach (var dupe in forPart.GroupBy(s => s, StringComparer.OrdinalIgnoreCase)
+                         .Where(x => x.Count() > 1).Select(x => x.Key))
+                problems.Add($"  {g.First().ItemCode} {dupe} — entered more than once. One unit cannot "
+                           + "be sold twice; check whether a box was scanned twice.");
+        }
+
+        var given = trackedLines
+            .SelectMany(l => (byLine.GetValueOrDefault(l.Id) ?? []).Select(sn => (l.ItemCode, l.PartId, Sn: sn)))
+            .ToList();
+        if (given.Count > 0)
+        {
+            // Fetched per part and matched in memory: MySQL's own collation would otherwise decide
+            // whether "psr-01" and "PSR-01" are the same unit, and that is the one thing that must not
+            // vary. They are.
             var existing = (await db.ComponentSerials.AsNoTracking()
                     .Where(c => partIds.Contains(c.PartId))
                     .Select(c => new { c.PartId, c.SerialNumber, c.Status, c.OwnerRef })
@@ -656,12 +631,12 @@ public static class SpareSalesEndpoints
                 .GroupBy(c => (c.PartId, c.SerialNumber.ToUpperInvariant()))
                 .ToDictionary(g => g.Key, g => g.First());
 
-            foreach (var (itemCode, partId, sn) in claims)
+            foreach (var (itemCode, partId, sn) in given)
                 if (existing.TryGetValue((partId, sn.ToUpperInvariant()), out var unit))
-                    problems.Add($"  {itemCode} {sn} — already tracked since this sale was written "
-                               + $"(status {unit.Status}"
-                               + (unit.OwnerRef is { Length: > 0 } who ? $", with {who}" : string.Empty)
-                               + "). Edit the sale and enter the serial off a different box.");
+                    problems.Add($"  {itemCode} {sn} — already tracked: this unit is "
+                               + (unit.OwnerRef is { Length: > 0 } who ? $"with {who}" : "at the service centre")
+                               + $" (status {unit.Status}). It is not warehouse stock, so it cannot be "
+                               + "sold here — read the serial off a different box.");
         }
 
         if (problems.Count == 0) return null;
@@ -678,15 +653,15 @@ public static class SpareSalesEndpoints
     /// <see cref="ShortfallRefusal"/> is: this is the rule that decides whether a sale of tracked stock
     /// may be handed over, and it should be exercisable without a database behind it.
     ///
-    /// Not equal, rather than fewer than. A line carrying MORE serials than units is just as wrong and
-    /// in a more interesting way — it means the quantity was lowered after the units were named, so the
-    /// extra box is one the counter still thinks it is selling.</summary>
+    /// Not equal, rather than fewer than. Answering with MORE numbers than units is just as wrong and
+    /// in a more interesting way — a prompt sized to 5 that came back with 6 means one box in the pile
+    /// is not on this sale.</summary>
     internal static List<string> SerialCountProblems(
         IEnumerable<(string ItemCode, int Qty, int Serials)> trackedParts) =>
         trackedParts
             .Where(t => t.Serials != t.Qty)
-            .Select(t => $"  {t.ItemCode} — {t.Qty} being sold, {t.Serials} serial number(s) on the sale. "
-                       + "Edit the sale and enter one serial per unit.")
+            .Select(t => $"  {t.ItemCode} — {t.Qty} being sold, {t.Serials} serial number(s) given. "
+                       + "It is serial-tracked: read one serial off each box being handed over.")
             .ToList();
 
     /// <summary>Who the sale is billed to, as a label for the units it hands over. The party master is
@@ -731,10 +706,10 @@ public static class SpareSalesEndpoints
 
         // Every tracked unit is checked before anything is written, so a sale with one unit that has
         // moved on is refused whole rather than half-undone.
-        var claims = sale.Lines.SelectMany(l => l.Serials.Select(s => (l.ItemCode, s.PartId, s.SerialNumber)))
+        var sold = sale.Lines.SelectMany(l => l.Serials.Select(s => (l.ItemCode, s.PartId, s.SerialNumber)))
             .ToList();
         var blocked = new List<string>();
-        foreach (var (itemCode, partId, sn) in claims)
+        foreach (var (itemCode, partId, sn) in sold)
         {
             var state = await serials.SaleWithdrawalStateAsync(partId, sn, ct);
             if (state is null || state.Value.Withdrawable) continue;
@@ -754,11 +729,14 @@ public static class SpareSalesEndpoints
         foreach (var g in sale.Lines.GroupBy(l => l.PartId))
             await ledger.SaleUnsoldInAsync(g.Key, g.Sum(l => l.Qty), uid, sale.Id, $"Un-marked ({sale.SaleNo})", ct);
 
-        // The units go back to being claims on an unsold sale: the record this sale created goes, and
-        // the serial numbers stay on the lines. Re-marking the sale sold tracks them again, which is
-        // what makes this a correction rather than a re-entry.
-        foreach (var (_, partId, sn) in claims)
+        // The sale goes back to being a sale of quantities. Both halves of what mark-sold wrote are
+        // undone — the unit's record in the serial ledger, and the row saying it went out on this line
+        // — because an unsold sale names no units, and leaving the numbers behind would make this the
+        // one sale on the register that disagreed. Marking it sold again asks for them afresh, which is
+        // right: the boxes are back on the shelf and the next hand-over may well pull different ones.
+        foreach (var (_, partId, sn) in sold)
             await serials.WithdrawSaleUnitAsync(partId, sn, ct);
+        db.SpareSaleLineSerials.RemoveRange(sale.Lines.SelectMany(l => l.Serials));
 
         sale.SoldAt = null;
         sale.SoldByUserId = null;
@@ -769,7 +747,10 @@ public static class SpareSalesEndpoints
         if (string.IsNullOrWhiteSpace(sale.InvNo)) sale.PaymentStatus = PaymentStatus.Pending;
         audit.Log(uid, "spare-sale.unmark-sold", "spare_sale", sale.Id,
             details: $"{sale.SaleNo} — {sale.Lines.Sum(l => l.Qty)} unit(s) back in the warehouse"
-                     + (claims.Count > 0 ? $", {claims.Count} serial(s) taken back out of tracking" : string.Empty),
+                     + (sold.Count > 0
+                         ? $", {sold.Count} serial(s) taken back out of tracking: "
+                           + string.Join(", ", sold.Select(s => s.SerialNumber))
+                         : string.Empty),
             ip: http.GetIp());
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);

@@ -1,23 +1,23 @@
 using FluentAssertions;
-using Microsoft.EntityFrameworkCore;
-using PSR.Service.Api.Data;
 using PSR.Service.Api.SpareSales;
 using Xunit;
 
 namespace PSR.Service.Tests;
 
-/// <summary>Serial numbers on a counter sale: the rules that decide whether a sale of serial-tracked
-/// stock may be written, and whether it may be handed over.
+/// <summary>Serial numbers on a counter sale, which are asked for at ONE moment: mark-sold.
 ///
-/// A sale names its units when it is written and tracks them when it is marked sold, so there are two
-/// separate moments at which the numbers can be wrong, and the pair of them is what is pinned here.</summary>
+/// A sale is written as quantities — when it is entered nobody knows which boxes will be pulled — so
+/// the numbers arrive with the hand-over, against the quantities already agreed. That timing is what
+/// these tests are really about: there is no second moment at which the numbers can be wrong, and no
+/// window in which two unsold sales hold the same number, so the cross-sale conflict machinery that
+/// used to be here is gone rather than merely unused.</summary>
 public class SpareSaleSerialTests
 {
     // ---------------------------------------------------------------- normalising what was typed
 
-    /// <summary>A barcode scanner sends a trailing newline and the form keeps an empty row at the
-    /// bottom, so blank entries arrive on every other sale. Dropping them is what makes "5 typed" mean
-    /// five units.</summary>
+    /// <summary>A barcode scanner sends a trailing newline and the capture box keeps an empty last
+    /// line, so blank entries arrive on every other hand-over. Dropping them is what makes "5 typed"
+    /// mean five units.</summary>
     [Fact]
     public void Blank_and_padded_entries_are_dropped_and_trimmed()
     {
@@ -40,17 +40,22 @@ public class SpareSaleSerialTests
     // ---------------------------------------------------------------- one serial per unit
 
     [Fact]
-    public void A_part_with_one_serial_per_unit_is_not_a_problem()
+    public void A_part_answered_with_one_serial_per_unit_is_not_a_problem()
         => SpareSalesEndpoints.SerialCountProblems([("950000220", 5, 5)]).Should().BeEmpty();
 
-    /// <summary>The boundary is exactness, in both directions. Short means a box was never named; OVER
-    /// means the quantity was lowered after the units were named, so the counter still thinks it is
-    /// selling one it is not — which is the more interesting of the two and used to pass.</summary>
+    /// <summary>The boundary is exactness, in both directions. Short means a box was never read; OVER
+    /// means a prompt sized to 5 came back with 6, so one box in the pile is not on this sale.
+    ///
+    /// Zero is the case that matters most and the one that decides the whole feature: a tracked line
+    /// answered with nothing must be refused, or a sale of tracked stock could be handed over
+    /// untracked — which is what used to happen to every sale written before serials were asked
+    /// for.</summary>
     [Theory]
     [InlineData(5, 5, false)]
     [InlineData(5, 4, true)]
     [InlineData(5, 0, true)]
     [InlineData(5, 6, true)]
+    [InlineData(1, 0, true)]
     public void The_count_has_to_match_the_quantity_exactly(int qty, int serials, bool expectProblem)
     {
         var problems = SpareSalesEndpoints.SerialCountProblems([("950000220", qty, serials)]);
@@ -61,7 +66,7 @@ public class SpareSaleSerialTests
     }
 
     /// <summary>Every short part at once, not the first — the point of the message is to be told once
-    /// what to go and fix.</summary>
+    /// what to go and read off the boxes.</summary>
     [Fact]
     public void Every_short_part_is_named()
     {
@@ -74,48 +79,9 @@ public class SpareSaleSerialTests
         problems.Should().NotContain(p => p.Contains("950000221"));
     }
 
-    // ---------------------------------------------------------------- the cross-sale lookup
-
-    /// <summary>The claim lookup is a three-way join (serial → line → sale) and it runs as the sale form
-    /// is typed. An untranslatable one would only blow up on the real database, with a counter waiting
-    /// on it, so ToQueryString forces the provider to translate it here instead.</summary>
+    /// <summary>Nothing tracked on the sale, nothing to answer for. Marking such a sale sold stays the
+    /// single click it always was, which is most sales.</summary>
     [Fact]
-    public void The_cross_sale_claim_lookup_translates_to_sql()
-    {
-        using var db = new DesignTimeDbContextFactory().CreateDbContext([]);
-
-        var sql = SpareSaleService.ClaimQuery(db, [7L]).ToQueryString();
-
-        sql.Should().Contain("spare_sale_line_serials");
-        sql.Should().Contain("spare_sale_lines");
-        sql.Should().Contain("spare_sales");
-    }
-
-    /// <summary>What makes a claim one that is in the way, pinned as SQL. Each of these three is a
-    /// different sale that must NOT hold a serial against the next one: deleted and cancelled sales
-    /// will never be marked sold, and a sold one's units are in the serial ledger by now and are
-    /// reported from there instead — with the state the unit is actually in.</summary>
-    [Theory]
-    [InlineData("is_deleted")]
-    [InlineData("sold_at")]
-    [InlineData("Cancelled")]
-    public void Only_a_live_unsold_sale_holds_a_claim(string expected)
-    {
-        using var db = new DesignTimeDbContextFactory().CreateDbContext([]);
-
-        SpareSaleService.ClaimQuery(db, [7L]).ToQueryString().Should().Contain(expected);
-    }
-
-    /// <summary>Asking about nothing asks the database nothing. The form calls this on its way to
-    /// saving, including for a sale with no tracked item on it at all.</summary>
-    [Fact]
-    public async Task No_lines_means_no_conflicts_and_no_query()
-    {
-        await using var db = new DesignTimeDbContextFactory().CreateDbContext([]);
-
-        var conflicts = await new SpareSaleService(db)
-            .FindSerialConflictsAsync(null, [], CancellationToken.None);
-
-        conflicts.Should().BeEmpty();
-    }
+    public void A_sale_with_no_tracked_part_has_nothing_to_answer_for()
+        => SpareSalesEndpoints.SerialCountProblems([]).Should().BeEmpty();
 }
