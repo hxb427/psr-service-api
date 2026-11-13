@@ -46,12 +46,12 @@ public static class FieldOpsEndpoints
         DateTime? from, DateTime? to, int? limit, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
-        var manage = StockRoles.CanManage(user);
+        var seeAll = StockRoles.CanViewFieldActivity(user);
         var take = limit is null or < 1 or > 500 ? 100 : limit.Value;
 
         // Decided here rather than inside the query builder, because it is the one filter that is
         // not the caller's to ask for — the same split as FieldCallsEndpoints.ListAsync.
-        var ownerOnly = manage ? technicianId : uid;
+        var ownerOnly = seeAll ? technicianId : uid;
 
         var rows = await VisitQuery(db, ownerOnly, from, to, take).ToListAsync(ct);
         var pricing = CanSeePricing(user);
@@ -363,10 +363,10 @@ public static class FieldOpsEndpoints
         DateTime? from, DateTime? to, int? limit, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
-        var manage = StockRoles.CanManage(user);
+        var seeAll = StockRoles.CanViewFieldActivity(user);
         var take = limit is null or < 1 or > 500 ? 100 : limit.Value;
 
-        var ownerOnly = manage ? technicianId : uid;
+        var ownerOnly = seeAll ? technicianId : uid;
 
         var rows = await SaleQuery(db, ownerOnly, from, to, take).ToListAsync(ct);
         var pricing = CanSeePricing(user);

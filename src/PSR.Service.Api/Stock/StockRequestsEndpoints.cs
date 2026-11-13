@@ -23,7 +23,10 @@ public static class StockRequestsEndpoints
         // Hand stock over without a request having been raised first. Writes the request itself, so the
         // register and every report over it keep working off one shape.
         group.MapPost("/direct-issue", DirectIssueAsync).RequireAuthorization("StockManage");
-        group.MapGet("/technicians", TechniciansAsync).RequireAuthorization("StockManage");
+        // FieldActivityView, not StockManage: this is a picker of technician names, and the field
+        // register's engineer filter is built from it — including on a sales login, which reads that
+        // register but issues no stock. Everything else on this group stays where it was.
+        group.MapGet("/technicians", TechniciansAsync).RequireAuthorization("FieldActivityView");
         group.MapPost("/{id:long}/cancel", CancelAsync);
         group.MapDelete("/{id:long}", DeleteAsync).RequireAuthorization("StockManage");
         group.MapGet("/inventory/me", MyInventoryAsync);

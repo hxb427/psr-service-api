@@ -95,6 +95,18 @@ public static class ServiceCollectionExtensions
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.Viewer, RoleNames.StoreManager));
             options.AddPolicy("StockManage", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.StoreManager));
+            // Reading the field register — what happened out at customer sites. The listing endpoints
+            // themselves are open to any authenticated caller and narrow their own rows by role, so
+            // this policy guards only the technician picker those pages filter by, which otherwise sat
+            // on StockManage and would have made the sales desk's filter come back 403.
+            //
+            // The role list is StockManage plus sales, and is mirrored by StockRoles.FieldActivityView,
+            // which decides the row scope. Kept apart from StockManage because that one also carries
+            // authority — issuing stock, cancelling someone else's transfer — and the sales desk reads
+            // this register without gaining any of it.
+            options.AddPolicy("FieldActivityView", p => p.RequireRole(
+                RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor, RoleNames.StoreManager,
+                RoleNames.Sales));
             options.AddPolicy("ReturnAck", p => p.RequireRole(
                 RoleNames.Admin, RoleNames.Manager, RoleNames.Supervisor));
             // Raising a request is asking for stock to be issued to YOURSELF: the row is attributed to

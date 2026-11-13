@@ -51,8 +51,8 @@ public static partial class FieldCallsEndpoints
         long? engineerId, DateTime? from, DateTime? to, int? criticalDays, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
-        var manage = StockRoles.CanManage(user);
-        var ownerOnly = manage ? engineerId : uid;
+        var seeAll = StockRoles.CanViewFieldActivity(user);
+        var ownerOnly = seeAll ? engineerId : uid;
 
         var days = FieldCallTat.CriticalDays(criticalDays);
         // One reading of the clock for the whole answer. The cutoff that selects the alert rows and

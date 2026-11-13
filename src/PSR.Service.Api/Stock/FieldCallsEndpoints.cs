@@ -84,12 +84,12 @@ public static partial class FieldCallsEndpoints
         DateTime? from, DateTime? to, int? limit, CancellationToken ct)
     {
         user.TryGetUserId(out var uid);
-        var manage = StockRoles.CanManage(user);
+        var seeAll = StockRoles.CanViewFieldActivity(user);
         var take = limit is null or < 1 or > 500 ? 100 : limit.Value;
 
         // Scope is decided here rather than inside the query builder, because it is the one filter
         // that is not the caller's to ask for.
-        var ownerOnly = manage ? engineerId : uid;
+        var ownerOnly = seeAll ? engineerId : uid;
 
         var rows = await RegisterQuery(db, ownerOnly, callType, callStatus, from, to, take).ToListAsync(ct);
 
