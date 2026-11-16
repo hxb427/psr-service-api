@@ -11,7 +11,16 @@ using PSR.Service.Api.Data.Entities;
 namespace PSR.Service.Api.Stock;
 
 /// <summary>Admin/service-center control surface for the serial ledger: browse deployed serials,
-/// inspect a unit's full audit trail, and apply a manual status change (mark missing/found/…).</summary>
+/// inspect a unit's full audit trail, and apply a manual status change (mark missing/found/…).
+///
+/// ONE WRITE ROUTE, deliberately. There was a second - <c>POST /{id}/receive</c>, "receive a return
+/// at the counter" - and it is gone rather than merely guarded. It derived the new status from a
+/// boolean instead of taking one, so it could only ever land a unit on SHELFED or DEFECTIVE, and it
+/// ignored whatever status the caller had chosen. On the screen that was a button beside this one,
+/// sharing its reason box and reading none of its status picker: units were repeatedly dragged back
+/// to DEFECTIVE by people who had picked something else and pressed the nearer button. Both of its
+/// outcomes are statuses this route can set, and since a blank technician on DEFECTIVE now means the
+/// counter holds it, there is nothing left that only the boolean could say.</summary>
 public static class SerialsEndpoints
 {
     private const int MaxPageSize = 200;
@@ -23,7 +32,6 @@ public static class SerialsEndpoints
         group.MapGet("/", ListAsync);
         group.MapGet("/{id:long}", GetAsync);
         group.MapPost("/{id:long}/status", ChangeStatusAsync);
-        group.MapPost("/{id:long}/receive", ReceiveAsync);
 
         return app;
     }
@@ -120,6 +128,9 @@ public static class SerialsEndpoints
         if (before is null) return TypedResults.NotFound();
         if (SerialService.ManualChangeBlocked(newStatus, req.TechnicianId, before.SerialNumber) is { } blocked)
             return TypedResults.BadRequest(blocked);
+        if (SerialService.NoOpChangeBlocked(before.Status, newStatus, before.TechnicianId,
+                req.TechnicianId, before.SerialNumber) is { } noop)
+            return TypedResults.BadRequest(noop);
 
         // Checked by name before anything is written. Balances are keyed by user id, so crediting a
         // non-technician would create a holding on a page that only lists technicians - stock that
@@ -172,48 +183,6 @@ public static class SerialsEndpoints
             audit.Log(uid, "serial.status", "component_serial", id,
                 details: heldAfter is { } t ? $"{newStatus} (technician #{t})" : newStatus.ToString(),
                 ip: http.GetIp());
-            await db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
-        }
-        catch (StockException ex) { await tx.RollbackAsync(ct); return TypedResults.BadRequest(ex.Message); }
-
-        var row = await SingleRowAsync(db, id, ct);
-        return TypedResults.Ok(ToDto(row!.c, row.ItemCode, row.Name, row.TechName, row.ServiceNo));
-    }
-
-    /// <summary>Receive a unit back at the counter by hand. Unused stock goes onto the shelf, which
-    /// the status alone says; received as defective it is at the service centre but is not stock
-    /// anyone can issue, so it goes no further than DEFECTIVE and lands on no shelf.
-    ///
-    /// No quantity moves either way, for the same reason a manual status change moves none: the shelf
-    /// is counted by unit.</summary>
-    private static async Task<Results<Ok<ComponentSerialDto>, NotFound, BadRequest<string>>> ReceiveAsync(
-        long id, [FromBody] ReceiveSerialReturnRequest req, ClaimsPrincipal user, AppDbContext db,
-        SerialService serial, StockLedgerService ledger, IAuditService audit, HttpContext http,
-        CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(req.Remarks))
-            return TypedResults.BadRequest("Remarks are required to receive a return.");
-
-        var before = await db.ComponentSerials.AsNoTracking()
-            .Where(c => c.Id == id)
-            .Select(c => new { c.Status, c.PartId, c.SerialNumber })
-            .FirstOrDefaultAsync(ct);
-        if (before is null) return TypedResults.NotFound();
-
-        user.TryGetUserId(out var uid);
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        try
-        {
-            var updated = await serial.ReceiveReturnAsync(id, req.Defective, uid, req.Remarks.Trim(), ct);
-            if (updated is null) { await tx.RollbackAsync(ct); return TypedResults.NotFound(); }
-
-            if (!SerialService.IsOnShelf(before.Status) && SerialService.IsOnShelf(updated.Status))
-                ledger.ShelveUnit(before.PartId, uid, "SERIAL_STATUS", id, before.SerialNumber,
-                    $"{before.SerialNumber}: {before.Status} -> {updated.Status} (received at counter)");
-
-            audit.Log(uid, "serial.receive", "component_serial", id,
-                details: updated.Status.ToString().ToUpperInvariant(), ip: http.GetIp());
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }

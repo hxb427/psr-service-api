@@ -751,9 +751,30 @@ public static partial class ServicesEndpoints
     private static async Task ApplyCompletionEffectsAsync(AppDbContext db, StockLedgerService ledger,
         SerialService serial, ServiceJob job, long techId, long uid, CancellationToken ct)
     {
+        var partLines = job.Lines.Where(l => l.PartId.HasValue
+            && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement).ToList();
+
+        // EVERY serial-tracked line must name its unit before any of this runs. The two steps below
+        // are a matched pair - the quantity comes off the technician, and the unit it was is recorded
+        // against the customer - and they used to be able to come apart: the consume ran for every
+        // part-bearing line while the install ran only for lines that carried a serial. So fitting a
+        // serial-tracked part and leaving the serial box empty took the quantity off the technician
+        // and left the unit on their balance in the serial ledger for ever, at RECEIVED, against a
+        // job that had already closed. On nobody's shelf, on nobody's worklist, and impossible to
+        // tell from a unit they really were holding.
+        //
+        // Refused rather than guessed at, because there is nothing to guess from: the quantity says
+        // one unit went in and the ledger holds several the technician could have used. The person
+        // who can answer it is the technician, who has the machine in front of them, which is why
+        // this is checked at completion rather than cleaned up afterwards.
+        if (await UnnamedSerialLinesAsync(db, partLines, ct) is { Count: > 0 } unnamed)
+            throw new StockException(
+                $"{(unnamed.Count == 1 ? "This part is" : "These parts are")} serial-tracked, so the "
+                + "job cannot be completed until the serial fitted is recorded against "
+                + $"{(unnamed.Count == 1 ? "it" : "each of them")}: {string.Join(", ", unnamed)}.");
+
         // Consume the technician's issued stock for each part-bearing line.
-        foreach (var line in job.Lines.Where(l => l.PartId.HasValue
-            && l.LineType is ServiceLineType.Component or ServiceLineType.Replacement))
+        foreach (var line in partLines)
             await ledger.ConsumeAsync(line.PartId!.Value, techId, line.Qty, uid, "SERVICE", job.Id, ct);
 
         // Move any serial-tracked parts fitted/handed to the customer into the serial ledger.
@@ -1024,11 +1045,40 @@ public static partial class ServicesEndpoints
         return TypedResults.Ok(await BuildDetailAsync(db, job, ServiceRoles.CanSeePricing(user), ct));
     }
 
+    /// <summary>The PS codes of this job's serial-tracked part lines that carry no serial number.
+    /// Empty when every one of them names its unit, which is the only state completion allows.
+    ///
+    /// Reads the parts rather than trusting the line: whether a part is serial-tracked is a fact
+    /// about the catalogue, and a line added before a part was marked tracked is exactly the case
+    /// that needs catching.</summary>
+    private static async Task<List<string>> UnnamedSerialLinesAsync(
+        AppDbContext db, List<ServiceLine> partLines, CancellationToken ct)
+    {
+        var blank = partLines.Where(l => string.IsNullOrWhiteSpace(l.ReplacementSerialNo)).ToList();
+        if (blank.Count == 0) return [];
+
+        var unnamed = new List<string>();
+        var partCache = new Dictionary<long, Part?>();
+        foreach (var line in blank)
+        {
+            var pid = line.PartId!.Value;
+            if (!partCache.TryGetValue(pid, out var part))
+                partCache[pid] = part = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
+            if (part is { IsSerialTracked: true }) unnamed.Add(part.ItemCode);
+        }
+        return unnamed;
+    }
+
     /// <summary>On completion, transition every serial-tracked part fitted/handed to the customer to
     /// USED with owner CUSTOMER — a fitted component and a replacement unit alike, since both left
     /// the shop with the customer and the line type already records which was which. The per-line
     /// serial lives in <see cref="ServiceLine.ReplacementSerialNo"/> (captured when the line was
-    /// added).</summary>
+    /// added).
+    ///
+    /// Still skips a line with no serial on it, but no longer silently: completion now refuses a
+    /// serial-tracked line that names no unit (<see cref="UnnamedSerialLinesAsync"/>), so by the time
+    /// this runs the only blank lines left are ones whose part is not tracked. The pair coming apart
+    /// is what left units stranded at RECEIVED against closed jobs.</summary>
     private static async Task InstallJobSerialsAsync(
         AppDbContext db, SerialService serial, ServiceJob job, long uid, CancellationToken ct)
     {

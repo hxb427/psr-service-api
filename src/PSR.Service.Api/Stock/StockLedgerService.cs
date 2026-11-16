@@ -75,26 +75,44 @@ public class StockLedgerService(AppDbContext db)
     /// touches one holder and is invisible to every warehouse-shaped report.
     ///
     /// <paramref name="delta"/> is signed: +1 when the unit joins their holding, -1 when it leaves.
-    /// A decrement is guarded, so a correction cannot drive a technician negative - it fails and says
-    /// so, which is the right outcome for a holding that was already wrong.</summary>
-    public async Task CustodyCorrectionAsync(long partId, long technicianId, int delta, long byUser,
+    ///
+    /// A DECREMENT THAT CANNOT BE TAKEN NO LONGER REFUSES, and that reversal is the point. It used to
+    /// throw, on the reasoning that a holding already lower than the units recorded against it is
+    /// wrong and should be corrected first. The trouble is what that meant in practice: a unit at
+    /// RECEIVED whose holder's balance had drifted to nought could not be moved to ANY status - not
+    /// shelved, not scrapped, not even marked missing - because every route off RECEIVED comes
+    /// through here. The refusal told the desk to correct the count first, and nothing in the API can
+    /// correct a technician's count: <see cref="AdjustAsync"/> is warehouse-only. So the one screen
+    /// built to resolve a unit by hand was the one screen that could not, and the unit stayed stuck.
+    ///
+    /// The serial move IS the correction, so it goes through and the shortfall is recorded rather
+    /// than hidden: the movement carries the quantity that actually moved (nought when the balance
+    /// had nothing to give) and says so in its remarks. The balance cannot go negative either way,
+    /// which is the guarantee that mattered - what is gone is a refusal that left no way forward.
+    ///
+    /// Returns whether the quantity moved, for a caller that wants to say so.</summary>
+    public async Task<bool> CustodyCorrectionAsync(long partId, long technicianId, int delta, long byUser,
         long serialId, string remarks, CancellationToken ct)
     {
-        if (delta == 0) return;
+        if (delta == 0) return true;
+
+        var moved = true;
         if (delta > 0)
             await IncrementAsync(partId, technicianId, delta, ct);
         else if (!await GuardedDecrementAsync(partId, technicianId, -delta, ct))
-            throw new StockException(
-                "That technician does not hold enough of this part for the change to come off their "
-                + "balance. Their holding is already lower than the units recorded against them, so "
-                + "correct the count first.");
+            moved = false;
 
         db.StockMovements.Add(new StockMovement
         {
-            PartId = partId, MovementType = MovementType.CustodyCorrection, Quantity = delta,
+            PartId = partId, MovementType = MovementType.CustodyCorrection,
+            Quantity = moved ? delta : 0,
             TechnicianId = technicianId, PerformedByUserId = byUser,
-            ReferenceType = "SERIAL_STATUS", ReferenceId = serialId, Remarks = remarks,
+            ReferenceType = "SERIAL_STATUS", ReferenceId = serialId,
+            Remarks = moved
+                ? remarks
+                : $"{remarks} — holder's balance was already short, so no quantity moved",
         });
+        return moved;
     }
 
     /// <summary>Dispatch stock to a technician.

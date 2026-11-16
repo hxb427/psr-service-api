@@ -25,12 +25,10 @@ public record ComponentSerialDetailDto(ComponentSerialDto Serial, IReadOnlyList<
 /// enforces it rather than trusting the screen. A status like RECEIVED cannot be applied without it:
 /// the unit would say it is with a technician while its owner still said the service centre, and
 /// nobody's balance would carry it.</summary>
+/// <param name="TechnicianId">Blank on DEFECTIVE means the counter is holding the faulty unit, and
+/// clears whichever technician the row carried. That is a real instruction rather than an omission,
+/// which is why it is not treated as "leave the holder alone".</param>
 public record ChangeSerialStatusRequest(
     [Required, StringLength(20)] string Status,
     [Required, StringLength(500, MinimumLength = 1)] string Remarks,
     long? TechnicianId = null);
-
-// Receive a field-returned serial back at the service center (good → RETURNED_TO_SC, faulty → DEFECTIVE).
-public record ReceiveSerialReturnRequest(
-    bool Defective,
-    [Required, StringLength(500, MinimumLength = 1)] string Remarks);

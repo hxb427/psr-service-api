@@ -162,9 +162,51 @@ public class SerialStatusStockTests
         SerialService.ManualChangeBlocked(to, null, "SN-1").Should().BeNull();
     }
 
+    /// <summary>An Apply that nobody re-picked records nothing and is refused.
+    ///
+    /// The SN screen opens with the picker already on the unit's current status, so the easiest thing
+    /// to do with it was submit the status it already had. That wrote a history row whose old and new
+    /// status were the same - harmless to every balance and quietly corrosive to the one trail a desk
+    /// uses to reconstruct where a machine has been. Serial 120092514052 collected four such lines in
+    /// twelve minutes while somebody tried to work out why the screen would not move.</summary>
+    [Theory]
+    [InlineData(SerialStatus.Defective)]
+    [InlineData(SerialStatus.Shelfed)]
+    [InlineData(SerialStatus.Missing)]
+    [InlineData(SerialStatus.Scrapped)]
+    public void A_change_to_the_status_it_already_has_is_refused(SerialStatus status)
+    {
+        SerialService.NoOpChangeBlocked(status, status, null, null, "SN-1")
+            .Should().Contain("already");
+        SerialService.NoOpChangeBlocked(status, SerialStatus.UnderRepair, null, null, "SN-1")
+            .Should().BeNull();
+    }
+
+    /// <summary>But the SAME status with a different holder is a real change, because correcting
+    /// which technician holds a RECEIVED unit moves two balances. The status alone is not the
+    /// test.</summary>
+    [Fact]
+    public void The_same_status_with_a_different_holder_still_moves_the_unit()
+    {
+        SerialService.NoOpChangeBlocked(SerialStatus.Received, SerialStatus.Received, 7, 9, "SN-1")
+            .Should().BeNull();
+        SerialService.NoOpChangeBlocked(SerialStatus.Received, SerialStatus.Received, 7, 7, "SN-1")
+            .Should().NotBeNull();
+
+        // Blanking the holder on DEFECTIVE hands the unit to the counter, which is a move of custody
+        // and so is not a no-op - it is the whole of what the receive-return button used to say.
+        SerialService.NoOpChangeBlocked(SerialStatus.Defective, SerialStatus.Defective, 7, null, "SN-1")
+            .Should().BeNull();
+
+        // A status that names no technician cannot differ by holder: the request carries none and
+        // custody already follows the status, so the status alone settles it.
+        SerialService.NoOpChangeBlocked(SerialStatus.Missing, SerialStatus.Missing, 7, null, "SN-1")
+            .Should().NotBeNull();
+    }
+
     /// <summary>DEFECTIVE takes one either way, and it is the only status that does: a faulty unit
     /// genuinely sits on both sides - a technician holding it to send in, or one the counter found
-    /// broken on arrival, which ReceiveReturnAsync writes with no technician at all.</summary>
+    /// broken on arrival, which a blank technician on this status now says.</summary>
     [Fact]
     public void Defective_is_the_one_status_a_technician_is_optional_on()
     {

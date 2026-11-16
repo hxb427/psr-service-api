@@ -129,6 +129,32 @@ public class SerialService(AppDbContext db)
             _ => null,
         };
 
+    /// <summary>Why this change would record nothing, or null when it genuinely moves the unit.
+    ///
+    /// The SN screen opens with the picker already on the unit's current status, so an Apply that
+    /// nobody re-picked wrote a row whose old and new status were the same. Harmless to the balances
+    /// and quietly corrosive to the trail: a unit's history is the one place a desk can reconstruct
+    /// where a machine has been, and four identical lines in it say only that somebody was fighting
+    /// the screen. Refused by name instead, so the person finds out they have not moved the picker.
+    ///
+    /// The TECHNICIAN is half of the test, because the same status with a different holder is a real
+    /// change - correcting which technician holds a RECEIVED unit is exactly that, and it moves two
+    /// balances. For a status that forbids a technician the request carries none and custody is
+    /// already whatever the last sync decided, so the holder cannot differ and the status alone
+    /// settles it.</summary>
+    internal static string? NoOpChangeBlocked(SerialStatus from, SerialStatus to, long? currentTechnicianId,
+        long? requestedTechnicianId, string serialNumber)
+    {
+        if (from != to) return null;
+        var effective = TechnicianNeededFor(to) != TechnicianNeed.Forbidden
+            ? requestedTechnicianId
+            : currentTechnicianId;
+        return effective == currentTechnicianId
+            ? $"{serialNumber} is already {to} and nothing about this would move it. Pick the status "
+              + "you want it to end on."
+            : null;
+    }
+
     /// <summary>Why the unit a job was booked for cannot be re-identified, or null when it may be.
     ///
     /// Correcting a mis-typed serial or PS code on a job has to move the ledger row with it, or the
@@ -456,8 +482,15 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
         //
         // Only where the status takes one. A status that forbids a technician keeps whatever custody
         // the sync decides for it, which for MISSING means keeping what it had.
-        if (TechnicianNeededFor(newStatus) != TechnicianNeed.Forbidden && technicianId is { } tid)
-            c.TechnicianId = tid;
+        //
+        // ASSIGNED, NOT MERELY SET WHEN GIVEN. The old form only wrote a technician that was supplied,
+        // so a blank one meant "keep the last holder" - and the only status that can be blank here is
+        // DEFECTIVE, the one status that genuinely sits on either side. That made "the counter has a
+        // faulty unit and nobody is holding it" inexpressible: blanking the picker left the previous
+        // technician on the row and the sync below then flipped the owner back to them. It was the
+        // whole reason a second button existed to say it, which is now gone. Blank means nobody.
+        if (TechnicianNeededFor(newStatus) != TechnicianNeed.Forbidden)
+            c.TechnicianId = technicianId;
 
         await SyncOwnerToStatusAsync(c, ct);
         c.LastUpdatedAt = now;
@@ -618,14 +651,22 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
         return null;
     }
 
-    /// <summary>Return flow: receive a unit back at the service centre. Unused stock goes straight
-    /// onto the shelf (SHELFED); a unit found faulty goes to DEFECTIVE and no further, because the
-    /// bench has to see it before anyone can issue it again. Owner → SERVICE_CENTER either way.
-    /// Returns the updated serial, or null if not found.
+    /// <summary>Return flow: receive a unit back at the service centre as part of a return shipment
+    /// being acknowledged. Unused stock goes straight onto the shelf (SHELFED); a unit found faulty
+    /// goes to DEFECTIVE and no further, because the bench has to see it before anyone can issue it
+    /// again. Owner → SERVICE_CENTER either way. Returns the updated serial, or null if not found.
     ///
     /// Straight to the shelf is the whole point: unused stock coming back from a technician needed
     /// nothing done to it. It used to land on RETURNED_TO_SC, which read as a waypoint and left the
-    /// desk looking for a second step that did not exist.</summary>
+    /// desk looking for a second step that did not exist.
+    ///
+    /// REACHED ONLY FROM A SHIPMENT BEING BOOKED IN (<c>StockReturnsEndpoints.ApplyVerdictAsync</c>),
+    /// where <paramref name="defective"/> carries the receiver's verdict on a box that physically
+    /// arrived. It used to back a button on the SN screen as well, which is where it did harm: there
+    /// the boolean was a checkbox beside a status picker it ignored, so a desk choosing one status
+    /// and pressing the nearer button silently got DEFECTIVE instead. That button and its route are
+    /// gone - a unit corrected by hand goes through <see cref="ChangeStatusAsync"/>, which takes the
+    /// status it is told. Do not wire this to a caller that has a status to honour.</summary>
     public async Task<ComponentSerial?> ReceiveReturnAsync(
         long serialId, bool defective, long byUser, string remarks, CancellationToken ct)
     {
@@ -1135,6 +1176,14 @@ WHERE `part_id` = {partId} AND `serial_number` = {serialNo}
                     .Where(u => u.Id == tid)
                     .Select(u => u.FullName ?? u.Username)
                     .FirstOrDefaultAsync(ct) ?? c.OwnerRef;
+                break;
+
+            // DEFECTIVE with nobody named: the counter is holding a faulty unit. Below the guarded
+            // arm above, so a named technician still wins; this is what a blanked picker now means,
+            // and it is the state the receive-return button used to be needed for.
+            case SerialStatus.Defective:
+                c.OwnerType = SerialOwnerType.ServiceCenter;
+                c.OwnerRef = "Service center";
                 break;
             case SerialStatus.Used:
                 c.OwnerType = SerialOwnerType.Customer;
