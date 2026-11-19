@@ -60,6 +60,9 @@ public static class TopUsedEndpoints
         join p in db.Parts on l.PartId equals (long?)p.Id
         where s.TechnicianId == technicianId && !s.IsDeleted && p.IsActive
               && l.LineType == ServiceLineType.Component
+              // A line added on a PI or invoice was the office's choice, not something the technician
+              // reached for on the bench, so it is no evidence of what they use.
+              && l.AddedOnDocNo == null
         group l by new { p.Id, p.ItemCode, p.Name } into g
         orderby g.Count() descending, g.Max(x => x.CreatedAt) descending
         select new TopUsedPartRow(g.Key.Id, g.Key.ItemCode, g.Key.Name, g.Count(), g.Max(x => x.CreatedAt));
@@ -70,6 +73,7 @@ public static class TopUsedEndpoints
         join c in db.ServiceCharges on l.ServiceChargeId equals (long?)c.Id
         where s.TechnicianId == technicianId && !s.IsDeleted && c.IsActive
               && l.LineType == ServiceLineType.ServiceCharge
+              && l.AddedOnDocNo == null
         group l by new { c.Id, c.Name } into g
         orderby g.Count() descending, g.Max(x => x.CreatedAt) descending
         select new TopUsedChargeRow(g.Key.Id, g.Key.Name, g.Count(), g.Max(x => x.CreatedAt));

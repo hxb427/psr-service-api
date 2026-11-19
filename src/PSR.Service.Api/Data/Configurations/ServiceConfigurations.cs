@@ -46,6 +46,7 @@ public class ServiceConfiguration : IEntityTypeConfiguration<ServiceJob>
         b.Property(x => x.PaymentStatus).HasColumnName("payment_status").HasConversion<string>().HasMaxLength(20);
         b.Property(x => x.TechnicianRemarks).HasColumnName("technician_remarks").HasMaxLength(1000);
         b.Property(x => x.IsTotalLoss).HasColumnName("is_total_loss").HasDefaultValue(false);
+        b.Property(x => x.IncludeComponentPrices).HasColumnName("include_component_prices").HasDefaultValue(false);
         b.Property(x => x.IsDeleted).HasColumnName("is_deleted").HasDefaultValue(false);
         b.HasIndex(x => x.IsDeleted);
 
@@ -133,6 +134,8 @@ public class ServiceLineConfiguration : IEntityTypeConfiguration<ServiceLine>
         b.Property(x => x.UnitPrice).HasColumnName("unit_price").HasPrecision(12, 2);
         b.Property(x => x.Amount).HasColumnName("amount").HasPrecision(12, 2);
         b.Property(x => x.ReplacementSerialNo).HasColumnName("replacement_serial_no").HasMaxLength(100);
+        // Same width as service_documents.doc_no, which is where the value comes from.
+        b.Property(x => x.AddedOnDocNo).HasColumnName("added_on_doc_no").HasMaxLength(40);
         b.Property(x => x.CreatedAt).HasColumnName("created_at");
 
         b.HasOne<Part>().WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);

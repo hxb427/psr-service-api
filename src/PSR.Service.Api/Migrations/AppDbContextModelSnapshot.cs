@@ -1743,6 +1743,12 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnType("varchar(500)")
                         .HasColumnName("description");
 
+                    b.Property<bool>("IncludeComponentPrices")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false)
+                        .HasColumnName("include_component_prices");
+
                     b.Property<DateTime?>("InvDate")
                         .HasColumnType("datetime(6)")
                         .HasColumnName("inv_date");
@@ -1924,6 +1930,11 @@ namespace PSR.Service.Api.Migrations
                         .HasColumnName("id");
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AddedOnDocNo")
+                        .HasMaxLength(40)
+                        .HasColumnType("varchar(40)")
+                        .HasColumnName("added_on_doc_no");
 
                     b.Property<decimal>("Amount")
                         .HasPrecision(12, 2)

@@ -186,11 +186,12 @@ public record ServiceListItemDto(
     // because it cannot be dispatched or billed and the desk should not have to open it to find out.
     string JobKind = "Customer", long? ParentServiceJobId = null);
 
-// UnitPrice/Amount are null for non-pricing roles (technician/store/etc).
+// UnitPrice/Amount are null for non-pricing roles (technician/store/etc). AddedOnDocNo names the PI or
+// invoice a line was added on from the generate form, and is null on every line added on the bench.
 public record ServiceLineDto(
     long Id, string LineType, long? PartId, string? PartCode, string? PartName,
     long? ServiceChargeId, string? ServiceChargeName, string? Description, int Qty,
-    decimal? UnitPrice, decimal? Amount, string? ReplacementSerialNo);
+    decimal? UnitPrice, decimal? Amount, string? ReplacementSerialNo, string? AddedOnDocNo = null);
 
 public record ServiceHistoryDto(
     long Id, string? FromStatus, string ToStatus, long ChangedByUserId, string? ChangedByUsername,
@@ -213,7 +214,14 @@ public record ServiceDetailDto(
     long? RetainedServiceJobId = null, string? RetainedServiceNo = null,
     // Whether the swap on THIS job can still be undone. Server-decided: the desktop must not have to
     // re-derive a rule that depends on documents and on the other half's progress.
-    bool CanCancelSwap = false);
+    bool CanCancelSwap = false,
+    // Whether a PI / invoice bills this job's component prices (off unless somebody ticked it), what the
+    // lines a document would bill add up to tax-exclusive (null for non-pricing roles, like Total; zero
+    // in warranty), and the PI or invoice that fixed the setting — null while it can still be changed.
+    bool IncludeComponentPrices = false, decimal? BillableTotal = null, string? ComponentPricingFixedBy = null);
+
+/// <summary>Turn the job's "add component prices" setting on or off.</summary>
+public record ComponentPricingRequest(bool IncludeComponentPrices);
 
 /// <summary>One replacement in the trail, for the counter's "was this one of ours?" lookup.</summary>
 public record ServiceReplacementDto(

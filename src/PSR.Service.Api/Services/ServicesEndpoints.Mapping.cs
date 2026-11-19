@@ -40,10 +40,13 @@ public static partial class ServicesEndpoints
     ///
     /// In warranty there is nothing to charge, and a null keeps the caller from writing a zero line
     /// that would read on the document as a unit priced at nothing rather than one given under cover.
-    /// Priced at the customer rate, like every other service line.</summary>
+    /// Priced like every other part on the job: the dealer rate when the job is a dealer's, the customer
+    /// rate when it is a direct customer's (<see cref="PartyRate"/>). It used to be the customer rate for
+    /// everybody, so a dealer's replacement was billed at the retail price.</summary>
     internal static ServiceLine? ReplacementBillingLine(ServiceJob job, Part outgoing, string? outgoingSerialNo)
     {
         if (job.WarrantyStatus == WarrantyStatus.InWarranty) return null;
+        var rate = PartyRate.For(outgoing, job);
         return new ServiceLine
         {
             ServiceId = job.Id,
@@ -51,8 +54,8 @@ public static partial class ServicesEndpoints
             PartId = outgoing.Id,
             Description = $"Replacement unit — {outgoing.Name}",
             Qty = 1,
-            UnitPrice = outgoing.CustomerRate,
-            Amount = outgoing.CustomerRate,
+            UnitPrice = rate,
+            Amount = rate,
             ReplacementSerialNo = string.IsNullOrWhiteSpace(outgoingSerialNo) ? null : outgoingSerialNo.Trim(),
         };
     }
@@ -159,9 +162,18 @@ public static partial class ServicesEndpoints
         var lineDtos = lines.Select(x => new ServiceLineDto(
             x.l.Id, x.l.LineType.ToString(), x.l.PartId, x.PartCode, x.PartName,
             x.l.ServiceChargeId, x.ScName, x.l.Description, x.l.Qty,
-            pricing ? x.l.UnitPrice : null, pricing ? x.l.Amount : null, x.l.ReplacementSerialNo)).ToList();
+            pricing ? x.l.UnitPrice : null, pricing ? x.l.Amount : null, x.l.ReplacementSerialNo,
+            x.l.AddedOnDocNo)).ToList();
 
         decimal? total = pricing ? lines.Sum(x => x.l.Amount) : null;
+        // What a document would bill out of those lines: every line but the technician's components unless
+        // the job says to add them, and nothing in warranty. A line added on a PI or invoice is billed
+        // either way — somebody chose to add it. Tax-exclusive, like Total, so the two can be read together.
+        decimal? billable = !pricing ? null
+            : job.WarrantyStatus == WarrantyStatus.InWarranty ? 0m
+            : lines.Where(x => job.IncludeComponentPrices || x.l.LineType != ServiceLineType.Component
+                               || x.l.AddedOnDocNo != null)
+                .Sum(x => x.l.Amount);
 
         var history = await (from h in db.ServiceStatusHistory.AsNoTracking()
                              where h.ServiceId == job.Id
@@ -181,7 +193,8 @@ public static partial class ServicesEndpoints
             job.ServiceStatus.ToString(), job.PaymentStatus.ToString(), job.TechnicianRemarks, job.IsTotalLoss,
             job.ReplacementSerialNo, job.ReplacementPartId, replPartName,
             total, job.RowVersion, lineDtos, history,
-            job.JobKind.ToString(), job.ParentServiceJobId, parentNo, retainedId, retainedNo, canCancelSwap);
+            job.JobKind.ToString(), job.ParentServiceJobId, parentNo, retainedId, retainedNo, canCancelSwap,
+            job.IncludeComponentPrices, billable, Documents.BillingService.ComponentPricingFixedBy(job));
     }
 
     private static async Task<ServiceLineDto> LineToDtoAsync(AppDbContext db, long lineId, bool pricing, CancellationToken ct)
@@ -197,6 +210,7 @@ public static partial class ServicesEndpoints
             .FirstAsync(ct);
         return new ServiceLineDto(x.l.Id, x.l.LineType.ToString(), x.l.PartId, x.PartCode, x.PartName,
             x.l.ServiceChargeId, x.ScName, x.l.Description, x.l.Qty,
-            pricing ? x.l.UnitPrice : null, pricing ? x.l.Amount : null, x.l.ReplacementSerialNo);
+            pricing ? x.l.UnitPrice : null, pricing ? x.l.Amount : null, x.l.ReplacementSerialNo,
+            x.l.AddedOnDocNo);
     }
 }

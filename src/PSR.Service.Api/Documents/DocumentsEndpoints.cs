@@ -43,10 +43,15 @@ public static class DocumentsEndpoints
     }
 
     /// <summary>What the selected jobs price to. No document, no number, nothing written — the generate
-    /// form calls this to fill in its rate column, so the figures on screen are the server's own.</summary>
-    private static async Task<Ok<List<DocumentQuoteLineDto>>> QuoteAsync(
+    /// form calls this to fill in its rate column, and again whenever it adds or removes a charge, so the
+    /// figures on screen are the server's own. A charge the server will not accept is refused here, with
+    /// the reason, the moment it is added.</summary>
+    private static async Task<Results<Ok<List<DocumentQuoteLineDto>>, BadRequest<string>>> QuoteAsync(
         [FromBody] DocumentQuoteRequest req, BillingService billing, CancellationToken ct)
-        => TypedResults.Ok(await billing.QuoteAsync(req.ServiceIds, ct));
+    {
+        try { return TypedResults.Ok(await billing.QuoteAsync(req.ServiceIds, req.AddedLines, ct)); }
+        catch (BillingException ex) { return TypedResults.BadRequest(ex.Message); }
+    }
 
     private static async Task<Results<FileContentHttpResult, BadRequest<string>>> PreviewAsync(
         [FromBody] GenerateDocumentRequest req, ClaimsPrincipal user,

@@ -116,7 +116,9 @@ public static partial class ServicesEndpoints
             var part = await db.Parts.FirstOrDefaultAsync(p => p.Id == pid, ct);
             if (part is null) return (null, "Part not found.");
             line.PartId = part.Id;
-            line.UnitPrice = part.CustomerRate;                 // server-set; technicians never send price
+            // Server-set; technicians never send a price. The dealer column on a dealer's job, the
+            // customer column otherwise — see PartyRate.
+            line.UnitPrice = PartyRate.For(part, job);
             // Replacement lines carry the new unit's serial; serial-tracked component lines carry the fitted serial.
             if (lineType is ServiceLineType.Replacement || part.IsSerialTracked)
                 line.ReplacementSerialNo = req.ReplacementSerialNo?.Trim();

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
 using PSR.Service.Api.Data.Entities;
+using PSR.Service.Api.Services;
 using PSR.Service.Api.Settings;
 using PSR.Service.Api.Stock;
 
@@ -8,8 +9,17 @@ using PSR.Service.Api.Common;
 
 namespace PSR.Service.Api.Documents;
 
-/// <summary>A computed-but-unsaved document plus the jobs it covers (used by the preview path).</summary>
-public sealed record BuiltDocument(ServiceDocument Doc, List<ServiceJob> Jobs);
+/// <summary>A computed-but-unsaved document plus the jobs it covers (used by the preview path); per job,
+/// whether its component prices went into the figure; and the charges added on the form. Generation
+/// writes the last two back onto the jobs, so the invoice after a PI bills on the same basis, and bills
+/// the added charges again, without anybody re-entering either.</summary>
+public sealed record BuiltDocument(ServiceDocument Doc, List<ServiceJob> Jobs,
+    IReadOnlyDictionary<long, bool> ComponentPricing, IReadOnlyList<PendingAddedLine> AddedLines);
+
+/// <summary>A charge added on the generate form, built and priced but not yet written: the service line it
+/// becomes, the GST its charge or part carries, its name, and which rate it was taken at. <see cref="Index"/>
+/// is its position in the request, so the quote can hand each figure back against the row it came from.</summary>
+public sealed record PendingAddedLine(int Index, ServiceLine Line, decimal GstPercent, string Name, string RateBasis);
 
 /// <summary>A computed-but-unsaved spare-sale document plus the sale it bills.</summary>
 public sealed record BuiltSaleDocument(ServiceDocument Doc, SpareSale Sale);
@@ -22,6 +32,22 @@ internal sealed record PartySnapshot(string Name, string? Address, string? Gstin
 /// computes it, so the figure the generate form shows is the figure the server would have used.</summary>
 internal readonly record struct JobPrice(decimal BlendedGst, decimal UnitInclusive);
 
+/// <summary>One service line as pricing sees it: what kind it is, what it adds up to tax-exclusive, the
+/// GST rate its part or charge carries, and whether it was added on a PI or invoice rather than on the
+/// bench (<see cref="ServiceLine.AddedOnDocNo"/>).</summary>
+internal readonly record struct PricedLine(ServiceLineType Type, decimal Amount, decimal GstPercent,
+    bool AddedAtBilling = false);
+
+/// <summary>Both ways a job can be priced — on its service charges alone, and with its component prices
+/// added — so the generate form can flip a unit between the two without asking again. Replacement lines
+/// are in both: they bill the unit the customer leaves with, which is not a component. So is anything
+/// added on the generate form, components included: the switch is about what the technician fitted, and
+/// a charge somebody added at billing was added to be billed.</summary>
+internal readonly record struct JobPricing(JobPrice ChargesOnly, JobPrice WithComponents, bool HasComponents)
+{
+    public JobPrice For(bool includeComponents) => includeComponents ? WithComponents : ChargesOnly;
+}
+
 /// <summary>Builds a PI / Invoice / DC over one or more completed jobs of a single customer (old-app workflow):
 /// snapshots the party, prices each unit (warranty-in → free), computes GST (CGST+SGST intra, IGST inter) on
 /// the two documents that bill — a delivery challan carries none, see <see cref="ServiceDocument.CarriesTax"/>.
@@ -32,6 +58,11 @@ internal readonly record struct JobPrice(decimal BlendedGst, decimal UnitInclusi
 public class BillingService(AppDbContext db, NumberSequenceService seq, AppSettingsService settings,
     CompanyInfo company)
 {
+    /// <summary>Caps on what the generate form may add, so a malformed request cannot write a thousand
+    /// lines onto a job. Far above anything a real document needs.</summary>
+    internal const int MaxAddedLines = 50;
+    internal const int MaxAddedQty = 1000;
+
     /// <summary>Validate + compute the document in memory. No number allocated, nothing persisted, jobs unchanged.</summary>
     public async Task<BuiltDocument> BuildAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
     {
@@ -108,20 +139,40 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         var doc = NewDocument(docType, party, req.DocDate, req.ConsigneeAddress,
             req.CourierMode, req.CourierCharges, req.Remarks, userId);
 
+        // Charges added on the form, validated and priced now so they are inside every figure below —
+        // including the check against hand-pricing, which compares the typed rate with the job's own
+        // lines PLUS these. Written onto the jobs only by GenerateAsync.
+        var added = await BuildAddedLinesAsync(jobs, req.AddedLines, docType, ct);
+
         // The HSN/SAC of each unit, read off the catalogue row its PS code names. Cached per code because
         // one document commonly covers several units of the same model.
         var catalogueHsn = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
         decimal taxable = 0, tax = 0;
+        var componentPricing = new Dictionary<long, bool>();
         foreach (var job in jobs.OrderBy(j => j.Id))
         {
-            var price = await PriceJobAsync(job, ct);
+            overrides.TryGetValue(job.Id, out var ov);
+
+            // Whether this unit bills its components: what the form ticked, else what the job carries.
+            // A request that says nothing (an older client) gets the job's own setting, which is off
+            // unless somebody turned it on.
+            var includeComponents = ov?.IncludeComponentPrices ?? job.IncludeComponentPrices;
+            // Once a PI or an invoice has priced the job the setting is fixed, so the invoice bills on the
+            // basis the PI quoted. The form shows it greyed out there; this is the same rule for a request
+            // that did not come from the form.
+            if (includeComponents != job.IncludeComponentPrices && ComponentPricingFixedBy(job) is { } fixedBy)
+                throw new BillingException(
+                    $"{job.ServiceNo}: {fixedBy} was raised {(job.IncludeComponentPrices ? "with" : "without")} "
+                    + "the component prices, so this document has to bill on the same basis.");
+            componentPricing[job.Id] = includeComponents;
+
+            var price = (await PriceJobAsync(job, added.GetValueOrDefault(job.Id), ct)).For(includeComponents);
             // Zero on a delivery challan, which carries no GST — see ServiceDocument.CarriesTax. The rate
             // typed on a challan is the declared value of the unit, so nothing is split off it: the line
             // goes out with no GST rate, no tax amount and no head, and what was declared is what prints.
             var blendedGst = ServiceDocument.CarriesTax(docType) ? price.BlendedGst : 0m;
 
-            overrides.TryGetValue(job.Id, out var ov);
             var hsn = RequireLineHsn(ov?.HsnCode, await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct),
                 job.ServiceNo, job.PsCode);
             var qty = ov?.Qty is { } q && q > 0 ? q : 1;
@@ -170,8 +221,102 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         }
 
         ApplyTotals(doc, taxable, tax);
-        return new BuiltDocument(doc, jobs);
+        return new BuiltDocument(doc, jobs, componentPricing,
+            added.Values.SelectMany(x => x).OrderBy(x => x.Index).ToList());
     }
+
+    /// <summary>Validate and price the charges added on the generate form, grouped by the job each one is
+    /// for. Nothing is attached to the context — <see cref="GenerateAsync"/> writes them, a preview or a
+    /// quote never does.
+    ///
+    /// A service charge is billed at its own rate, as on the bench. A component is billed at the rate
+    /// <see cref="PartyRate"/> picks for whose job it is, the same rule the technician's lines and the
+    /// replacement unit follow — the three end up on one bill, so they cannot be priced three ways.
+    ///
+    /// Refused, with the reason, rather than quietly dropped: on a delivery challan and on an in-warranty
+    /// unit, which bill nothing either way, so a charge added there would never reach the paper; on a
+    /// charge or part that is no longer offered; and on a part with no rate in either column, which would
+    /// otherwise go out as a line billing nothing.</summary>
+    private async Task<Dictionary<long, List<PendingAddedLine>>> BuildAddedLinesAsync(
+        IReadOnlyCollection<ServiceJob> jobs, IReadOnlyList<DocAddedLine>? requested, DocumentType? docType,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<long, List<PendingAddedLine>>();
+        if (requested is not { Count: > 0 }) return result;
+
+        if (docType == DocumentType.DC)
+            throw new BillingException("A delivery challan bills nothing, so no charge can be added to it. "
+                + "Add it on the PI or the invoice.");
+        if (requested.Count > MaxAddedLines)
+            throw new BillingException($"At most {MaxAddedLines} charges can be added to one document.");
+
+        var byId = jobs.ToDictionary(j => j.Id);
+        for (var i = 0; i < requested.Count; i++)
+        {
+            var r = requested[i];
+            if (!byId.TryGetValue(r.ServiceId, out var job))
+                throw new BillingException("A charge was added to a unit that is not on this document.");
+            if (job.WarrantyStatus == WarrantyStatus.InWarranty)
+                throw new BillingException($"{job.ServiceNo} is in warranty, so it is billed nothing and a charge "
+                    + "added to it would not reach the document.");
+            if (r.Qty is < 1 or > MaxAddedQty)
+                throw new BillingException($"{job.ServiceNo}: the quantity of an added charge must be between 1 "
+                    + $"and {MaxAddedQty}.");
+            if (!Enum.TryParse<ServiceLineType>(r.LineType, true, out var type) || type == ServiceLineType.Replacement)
+                throw new BillingException($"Unknown charge type '{r.LineType}'. Add a ServiceCharge or a Component.");
+
+            var line = new ServiceLine { ServiceId = job.Id, LineType = type, Qty = r.Qty };
+            decimal gst;
+            string name, basis;
+            if (type == ServiceLineType.ServiceCharge)
+            {
+                if (r.ServiceChargeId is not { } scId)
+                    throw new BillingException($"{job.ServiceNo}: pick the service charge to add.");
+                var sc = await db.ServiceCharges.AsNoTracking().FirstOrDefaultAsync(s => s.Id == scId, ct)
+                         ?? throw new BillingException("That service charge was not found.");
+                if (!sc.IsActive)
+                    throw new BillingException($"'{sc.Name}' is no longer offered — pick a current service charge.");
+                line.ServiceChargeId = sc.Id;
+                line.UnitPrice = sc.Charge;
+                line.Description = sc.Name;
+                gst = sc.TaxPercent;
+                name = sc.Name;
+                basis = "Service charge";
+            }
+            else
+            {
+                if (r.PartId is not { } pid)
+                    throw new BillingException($"{job.ServiceNo}: pick the component to add.");
+                var part = await db.Parts.AsNoTracking().FirstOrDefaultAsync(p => p.Id == pid, ct)
+                           ?? throw new BillingException("That part was not found.");
+                if (!part.IsActive)
+                    throw new BillingException($"{part.ItemCode} is no longer active in the price list.");
+                var isDealer = PartyRate.IsDealer(job);
+                line.PartId = part.Id;
+                line.UnitPrice = PartyRate.For(part, isDealer);
+                if (line.UnitPrice <= 0)
+                    throw new BillingException($"{part.ItemCode} has no dealer or customer rate in the price list, "
+                        + "so it would be billed at nothing. Set a rate under Parts first.");
+                gst = part.GstPercent;
+                name = $"{part.Name} ({part.ItemCode})";
+                basis = PartyRate.Describe(part, isDealer);
+            }
+            line.Amount = line.UnitPrice * line.Qty;
+
+            if (!result.TryGetValue(job.Id, out var forJob)) result[job.Id] = forJob = new List<PendingAddedLine>();
+            forJob.Add(new PendingAddedLine(i, line, gst, name, basis));
+        }
+        return result;
+    }
+
+    /// <summary>The document that fixed whether this job bills its component prices — its invoice, else its
+    /// PI — or null while the setting is still open. A PI quotes the customer a figure and the invoice has to
+    /// bill on the same basis, so once either exists the setting is no longer anybody's to change. A
+    /// delivery challan does not fix it: it covers in-warranty units, which price at nothing either way.</summary>
+    public static string? ComponentPricingFixedBy(ServiceJob job) =>
+        !string.IsNullOrWhiteSpace(job.InvNo) ? job.InvNo.Trim()
+        : !string.IsNullOrWhiteSpace(job.PiNo) ? job.PiNo.Trim()
+        : null;
 
     /// <summary>The HSN/SAC one serviced unit is billed under: what somebody typed on the generate form,
     /// else the code on the catalogue row the unit's PS code names, else a refusal naming the job.
@@ -226,7 +371,7 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
     /// event to each job's status history. Returns the new document id.</summary>
     public async Task<long> GenerateAsync(GenerateDocumentRequest req, long userId, CancellationToken ct)
     {
-        var (doc, jobs) = await BuildAsync(req, userId, ct);
+        var (doc, jobs, componentPricing, added) = await BuildAsync(req, userId, ct);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var key = doc.DocType switch
@@ -238,6 +383,16 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
         doc.DocNo = await seq.NextAsync(key, ct);
         db.ServiceDocuments.Add(doc);
 
+        // The charges added on the form become lines on their jobs, stamped with this document's number.
+        // That is what carries them forward: the invoice after a PI prices the job off its own lines, so
+        // it bills them again without anybody re-adding them, and the job pane lists them with the rest.
+        // Billing-only — no stock moves for any of them (see ServiceLine.AddedOnDocNo).
+        foreach (var a in added)
+        {
+            a.Line.AddedOnDocNo = doc.DocNo;
+            db.ServiceLines.Add(a.Line);
+        }
+
         foreach (var job in jobs)
         {
             // Stamp the document number onto the job (the gated chain reads these back).
@@ -247,16 +402,28 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 case DocumentType.Invoice: job.InvNo = doc.DocNo; job.InvDate = doc.DocDate; break;
                 case DocumentType.DC: job.OutwardDcNo = doc.DocNo; job.DcDate = doc.DocDate; break;
             }
+            // What this document billed, kept on the job: the pane shows it, and the invoice that follows
+            // a PI is held to it (see ComponentPricingFixedBy).
+            var billedComponents = componentPricing[job.Id];
+            job.IncludeComponentPrices = billedComponents;
             job.RowVersion++;
 
-            // Log the generation to the job's item history (shows in the detail pane).
+            // Log the generation to the job's item history (shows in the detail pane). A document that
+            // bills names which way the components went, and anything added to the job on the form, since
+            // the figure alone says neither.
+            var note = doc.DocType == DocumentType.DC
+                ? $"{doc.DocNo} generated"
+                : $"{doc.DocNo} generated — component prices {(billedComponents ? "billed" : "not billed")}";
+            var addedHere = added.Where(a => a.Line.ServiceId == job.Id).Select(a => $"{a.Name} ×{a.Line.Qty}").ToList();
+            if (addedHere.Count > 0) note += "; added " + string.Join(", ", addedHere);
             db.ServiceStatusHistory.Add(new ServiceStatusHistory
             {
                 ServiceId = job.Id,
                 FromStatus = job.ServiceStatus.ToString(),
                 ToStatus = doc.DocType.ToString(),          // "PI" / "Invoice" / "DC" — not a workflow status, ignored by metrics
                 ChangedByUserId = userId,
-                Note = $"{doc.DocNo} generated",
+                // The history column is 500 wide; a long list of added charges is cut rather than refused.
+                Note = note.Length > 500 ? note[..497] + "..." : note,
             });
         }
 
@@ -489,14 +656,14 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
 
     // ================================================================ quoting
 
-    /// <summary>What one job's own service lines price it at, before any manager edit: the tax-inclusive
-    /// per-unit figure and the blended GST rate behind it. In-warranty units come back at zero — the
-    /// customer is not billed for work under cover.
+    /// <summary>What one job's own service lines price it at, before any manager edit, both ways: on its
+    /// service charges alone and with its component prices added. Which one a document bills is the job's
+    /// <see cref="ServiceJob.IncludeComponentPrices"/>, or what the generate form ticked.
     ///
-    /// The blended rate exists because a job mixes parts and service charges that can carry different GST
-    /// percentages while the document bills the unit as one item. It is the rate that reproduces the
-    /// line's own tax, not a rate read off any master.</summary>
-    private async Task<JobPrice> PriceJobAsync(ServiceJob job, CancellationToken ct)
+    /// <paramref name="pending"/> are the charges the generate form has added and not yet written; they are
+    /// priced in exactly as the lines already on the job are.</summary>
+    private async Task<JobPricing> PriceJobAsync(ServiceJob job, IReadOnlyCollection<PendingAddedLine>? pending,
+        CancellationToken ct)
     {
         var lines = await (from l in db.ServiceLines.AsNoTracking()
                            where l.ServiceId == job.Id
@@ -504,13 +671,45 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                            from p in pg.DefaultIfEmpty()
                            join sc in db.ServiceCharges on l.ServiceChargeId equals sc.Id into scg
                            from sc in scg.DefaultIfEmpty()
-                           select new { l.Amount, Gst = p != null ? p.GstPercent : (sc != null ? sc.TaxPercent : 0m) })
+                           select new
+                           {
+                               l.LineType, l.Amount, AddedAtBilling = l.AddedOnDocNo != null,
+                               Gst = p != null ? p.GstPercent : (sc != null ? sc.TaxPercent : 0m),
+                           })
             .ToListAsync(ct);
 
-        var naturalTaxable = lines.Sum(x => x.Amount);
-        var naturalTax = lines.Sum(x => Math.Round(x.Amount * x.Gst / 100m, 2));
+        var priced = lines.Select(x => new PricedLine(x.LineType, x.Amount, x.Gst, x.AddedAtBilling)).ToList();
+        if (pending is not null)
+            priced.AddRange(pending.Select(a =>
+                new PricedLine(a.Line.LineType, a.Line.Amount, a.GstPercent, AddedAtBilling: true)));
+
+        return PriceLines(priced, job.WarrantyStatus == WarrantyStatus.InWarranty);
+    }
+
+    /// <summary>Price a job's lines both ways. The technician's Component lines are the only ones the switch
+    /// takes out: service charges are what the job bills by default; a Replacement line is the unit the
+    /// customer leaves with — it is in both figures, or an out-of-warranty replacement goes back to billing
+    /// nothing; and anything added on a PI or invoice, a component included, was added to be billed.
+    /// In-warranty units come back at zero either way — the customer is not billed for work under cover.
+    ///
+    /// HasComponents counts only what the switch acts on, so a job whose only components were added at
+    /// billing has nothing for the tick box to add.</summary>
+    internal static JobPricing PriceLines(IReadOnlyCollection<PricedLine> lines, bool inWarranty) => new(
+        Blend(lines.Where(l => l.Type != ServiceLineType.Component || l.AddedAtBilling), inWarranty),
+        Blend(lines, inWarranty),
+        lines.Any(l => l.Type == ServiceLineType.Component && !l.AddedAtBilling));
+
+    /// <summary>The tax-inclusive per-unit figure a set of lines adds up to, and the blended GST rate behind
+    /// it. The blended rate exists because a job mixes parts and service charges that can carry different
+    /// GST percentages while the document bills the unit as one item. It is the rate that reproduces the
+    /// lines' own tax, not a rate read off any master.</summary>
+    private static JobPrice Blend(IEnumerable<PricedLine> lines, bool inWarranty)
+    {
+        var list = lines.ToList();
+        var naturalTaxable = list.Sum(x => x.Amount);
+        var naturalTax = list.Sum(x => Math.Round(x.Amount * x.GstPercent / 100m, 2));
         var blendedGst = naturalTaxable > 0 ? Math.Round(naturalTax / naturalTaxable * 100m, 2) : 18m;
-        var unitInclusive = job.WarrantyStatus == WarrantyStatus.InWarranty ? 0m : naturalTaxable + naturalTax;
+        var unitInclusive = inWarranty ? 0m : naturalTaxable + naturalTax;
         return new JobPrice(blendedGst, unitInclusive);
     }
 
@@ -523,17 +722,33 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
     /// but per id, not by pulling the table, since this runs on every visit to the form.
     ///
     /// It also hands back each unit's HSN/SAC from the catalogue, which is not pricing but is the other
-    /// thing the form would otherwise have to ask a human for.</summary>
-    public async Task<List<DocumentQuoteLineDto>> QuoteAsync(IReadOnlyCollection<long> serviceIds, CancellationToken ct)
+    /// thing the form would otherwise have to ask a human for.
+    ///
+    /// <paramref name="addedLines"/> are the charges the form has added so far. They are validated the
+    /// way generation will validate them — a refusal comes back as a <see cref="BillingException"/> the
+    /// moment the charge is added, rather than at the preview — and priced into every figure. The type of
+    /// document is not known here, so the one rule this cannot apply is the delivery-challan refusal;
+    /// generation applies it, and the form offers no adding on a challan.</summary>
+    public async Task<List<DocumentQuoteLineDto>> QuoteAsync(IReadOnlyCollection<long> serviceIds,
+        IReadOnlyList<DocAddedLine>? addedLines, CancellationToken ct)
     {
-        var rows = new List<DocumentQuoteLineDto>();
-        var catalogueHsn = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var jobs = new List<ServiceJob>();
         foreach (var id in serviceIds.Distinct().OrderBy(x => x))
         {
             var job = await db.Services.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id && !s.IsDeleted, ct);
-            if (job is null) continue;      // generation re-checks and refuses the whole document
+            if (job is not null) jobs.Add(job);     // a missing one: generation re-checks and refuses the whole document
+        }
+        var added = await BuildAddedLinesAsync(jobs, addedLines, docType: null, ct);
 
-            var price = await PriceJobAsync(job, ct);
+        var rows = new List<DocumentQuoteLineDto>();
+        var catalogueHsn = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var job in jobs)
+        {
+            var addedHere = added.GetValueOrDefault(job.Id);
+            var pricing = await PriceJobAsync(job, addedHere, ct);
+            // The headline figure is the one the job's own setting gives, which is what a document would
+            // bill if nobody touched the tick box; both alternatives ride along below it.
+            var price = pricing.For(job.IncludeComponentPrices);
             var taxable = price.BlendedGst > 0
                 ? Math.Round(price.UnitInclusive / (1 + price.BlendedGst / 100m), 2)
                 : price.UnitInclusive;
@@ -545,7 +760,16 @@ public class BillingService(AppDbContext db, NumberSequenceService seq, AppSetti
                 price.UnitInclusive, taxable, price.UnitInclusive - taxable,
                 // So the form opens with the tax code already in the column, read off the same catalogue
                 // row the document itself will fall back to.
-                await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct)));
+                await CatalogueHsnAsync(job.PsCode, catalogueHsn, ct),
+                job.IncludeComponentPrices,
+                ComponentPricingFixedBy(job),
+                pricing.HasComponents,
+                pricing.ChargesOnly.UnitInclusive, pricing.ChargesOnly.BlendedGst,
+                pricing.WithComponents.UnitInclusive, pricing.WithComponents.BlendedGst,
+                addedHere?.Select(a => new QuotedAddedLineDto(
+                    a.Index, job.Id, a.Line.LineType.ToString(), a.Line.ServiceChargeId, a.Line.PartId, a.Name,
+                    a.Line.Qty, a.Line.UnitPrice, a.Line.Amount, a.GstPercent, a.RateBasis)).ToList(),
+                PartyRate.IsDealer(job)));
         }
         return rows;
     }

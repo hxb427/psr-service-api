@@ -8,6 +8,7 @@ namespace PSR.Service.Api.Services;
 //   ServicesEndpoints.Units.cs     — registering an inward item in the serial ledger + its history
 //   ServicesEndpoints.Lines.cs     — add / delete service lines
 //   ServicesEndpoints.Edit.cs      — correct a booked job's descriptive fields (admin-switched)
+//   ServicesEndpoints.ComponentPricing.cs — whether a PI / invoice bills the job's component prices
 //   ServicesEndpoints.Mapping.cs   — shared helpers (detail/line mapping, transition write)
 public static partial class ServicesEndpoints
 {
@@ -59,6 +60,9 @@ public static partial class ServicesEndpoints
         // Manual stamps that do NOT move the workflow (legacy "Set Outward Reference" / "Set Invoice No").
         group.MapPost("/{id:long}/outward-reference", SetOutwardReferenceAsync).RequireAuthorization("DispatchManage");
         group.MapPost("/{id:long}/invoice-no", SetInvoiceNoAsync).RequireAuthorization("DocumentManage");
+        // Whether a PI / invoice bills the job's component prices or only its service charges. A billing
+        // decision, so it belongs to the people who raise the documents (ServicesEndpoints.ComponentPricing.cs).
+        group.MapPost("/{id:long}/component-pricing", SetComponentPricingAsync).RequireAuthorization("DocumentManage");
         // Legacy Global Search "Edit Service Record" — descriptive fields only, and only while the
         // admin switch is on (checked in the handler, since the answer is a message not a 403).
         group.MapPut("/{id:long}/record", UpdateRecordAsync).RequireAuthorization("ServiceRecordEdit");

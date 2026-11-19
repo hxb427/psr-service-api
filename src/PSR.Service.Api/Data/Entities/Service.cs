@@ -46,6 +46,16 @@ public class ServiceJob : ITimestamps
     public string? TechnicianRemarks { get; set; }
 
     public bool IsTotalLoss { get; set; }                   // marked during in-service; routes complete → ReplacementApprovalPending
+
+    /// <summary>Whether a PI / invoice for this job bills its Component lines. Off by default: the job
+    /// bills its service charges (and any replacement unit) and the parts fitted are listed, priced,
+    /// but not charged — somebody ticks this to charge for them. Replacement lines are not components
+    /// and are billed either way: they are the unit the customer leaves with, and leaving them out is
+    /// how a replacement went out priced at nothing.
+    ///
+    /// Fixed once a PI or an invoice has priced the job (<see cref="Documents.BillingService.ComponentPricingFixedBy"/>),
+    /// so the invoice bills on the same basis the PI quoted.</summary>
+    public bool IncludeComponentPrices { get; set; }
     public bool IsDeleted { get; set; }                     // soft delete — hidden from lists, never hard-deleted
 
     // Whole-unit replacement (set when ServiceStatus == Replaced). The incoming/defective unit's serial

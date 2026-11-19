@@ -21,13 +21,39 @@ public record GenerateDocumentRequest(
     [StringLength(80)] string? CourierMode,
     [Range(0, 10_000_000)] decimal? CourierCharges,
     [StringLength(500)] string? Remarks,
-    List<DocLineOverride>? Lines);
+    List<DocLineOverride>? Lines,
+    List<DocAddedLine>? AddedLines = null);
+
+/// <summary>A service charge or a component added to one unit on the generate form — the charge a job
+/// could not carry any other way. A total-loss job refuses lines once it is marked, and a swap moves the
+/// work booked so far onto the retained job, so in both cases the customer's job reaches billing holding
+/// the replacement unit and nothing for the work.
+///
+/// The server prices it — the charge at its own rate, a component at the dealer or customer rate by whose
+/// job it is (see Services.PartyRate) — and it is billed whatever the job's component-pricing setting says,
+/// because somebody chose to add it. Generating the document writes it onto the job as a service line
+/// stamped with the document number, so the invoice after a PI bills it again without anybody re-adding
+/// it. A preview writes nothing. It never moves stock.
+///
+/// <paramref name="LineType"/> is "ServiceCharge" (with <paramref name="ServiceChargeId"/>) or "Component"
+/// (with <paramref name="PartId"/>). Refused on a delivery challan and on an in-warranty unit, which bill
+/// nothing either way.</summary>
+public record DocAddedLine(
+    long ServiceId,
+    [Required] string LineType,
+    long? ServiceChargeId,
+    long? PartId,
+    [Range(1, 1000)] int Qty);
 
 // Per-unit override (manager edit). Rate is tax-INCLUSIVE (matches the old "Rate (incl. tax)" field).
 // HsnCode and Unit are typed on the form rather than derived: a serviced unit is not a catalogue row, so
 // there is nothing on the job to read a unit off. HsnCode is the one the FORM shows, which is the
 // catalogue's code for the unit unless somebody typed over it; the server falls back to the catalogue
 // itself, and refuses the line when neither has one (see BillingService.RequireLineHsn).
+//
+// IncludeComponentPrices is the form's "add component prices" tick for this unit. Null — and absent, from a
+// client built before it existed — means the job's own setting, which is off unless somebody turned it on.
+// It cannot be changed once the job carries a PI or an invoice (see BillingService.ComponentPricingFixedBy).
 public record DocLineOverride(
     long ServiceId,
     [StringLength(300)] string? Description,
@@ -36,7 +62,8 @@ public record DocLineOverride(
     [StringLength(20)] string? Unit,
     decimal? Rate,
     int? Qty,
-    [StringLength(300)] string? Remarks);
+    [StringLength(300)] string? Remarks,
+    bool? IncludeComponentPrices = null);
 
 // Generate the PI or the tax invoice for a direct spare sale. The lines come from the sale itself (they were
 // priced when it was entered), so only the party/courier/remarks block is filled in here.
@@ -108,15 +135,39 @@ public record DocumentLineDto(
 
 // What the selected jobs will be billed if nobody edits anything — asked for by the generate form so the
 // rates are on screen before the document exists. UnitRate is tax-inclusive per unit, at quantity 1.
-public record DocumentQuoteRequest([Required, MinLength(1)] List<long> ServiceIds);
+// AddedLines are the charges the form has added so far; asked again each time one is added or removed,
+// so the figures on screen stay the server's own. Optional, so a client that adds nothing sends nothing.
+public record DocumentQuoteRequest([Required, MinLength(1)] List<long> ServiceIds,
+    List<DocAddedLine>? AddedLines = null);
+
+/// <summary>One charge added on the form, as the server priced it. <paramref name="Index"/> is its position
+/// in the request's AddedLines, so the form can put each figure against the row it came from.
+/// <paramref name="UnitPrice"/> and <paramref name="Amount"/> are tax-exclusive, like every service line;
+/// <paramref name="RateBasis"/> says which rate a component was taken at (dealer or customer, and whether
+/// that column was empty and the other one was used).</summary>
+public record QuotedAddedLineDto(
+    int Index, long ServiceId, string LineType, long? ServiceChargeId, long? PartId, string Name, int Qty,
+    decimal UnitPrice, decimal Amount, decimal GstPercent, string RateBasis);
 
 // HsnCode is the catalogue's code for the unit, looked up on its PS code, so the form opens with the
 // column filled instead of asking for something the price list already knows. Null when the job has no PS
 // code or the item it names carries no HSN — the one case somebody has to type it. Last and optional, so a
 // client built before it existed still reads this payload.
+//
+// UnitRate / GstPercent are the job priced on its own IncludeComponentPrices setting. The two pairs after
+// them are the same unit priced both ways — service charges only, and with the component prices added — so
+// the form can follow its tick box without asking again. ComponentPricingFixedBy names the PI or invoice
+// that fixed the setting (the box is then read-only); HasComponents is false when the technician fitted
+// nothing for the box to add. Every figure includes the charges added on the form (AddedLines), which are
+// billed either way. IsDealer says the job is priced at the dealer rate. All optional and last, so an older
+// client still reads the payload.
 public record DocumentQuoteLineDto(
     long ServiceId, string ServiceNo, string SerialNo, string Description, string Warranty,
-    decimal GstPercent, decimal UnitRate, decimal TaxableAmount, decimal TaxAmount, string? HsnCode = null);
+    decimal GstPercent, decimal UnitRate, decimal TaxableAmount, decimal TaxAmount, string? HsnCode = null,
+    bool IncludeComponentPrices = false, string? ComponentPricingFixedBy = null, bool HasComponents = false,
+    decimal ChargesOnlyRate = 0m, decimal ChargesOnlyGstPercent = 0m,
+    decimal WithComponentsRate = 0m, decimal WithComponentsGstPercent = 0m,
+    List<QuotedAddedLineDto>? AddedLines = null, bool IsDealer = false);
 
 public record DocumentDto(
     long Id, string DocType, string DocNo, DateTime DocDate, List<long> ServiceIds, List<string> ServiceNos,

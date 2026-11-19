@@ -16,7 +16,7 @@ namespace PSR.Service.Tests;
 /// the same helper, which is what these pin.</summary>
 public class ReplacementBillingLineTests
 {
-    private static ServiceJob Job(WarrantyStatus warranty) => new()
+    private static ServiceJob Job(WarrantyStatus warranty, long? dealerId = null) => new()
     {
         Id = 7,
         ServiceNo = "SVC0007",
@@ -24,12 +24,40 @@ public class ReplacementBillingLineTests
         WarrantyStatus = warranty,
         ServiceStatus = ServiceStatus.ReplacementApprovalPending,
         IsTotalLoss = true,
+        DealerId = dealerId,
+        CustomerType = dealerId is null ? "Direct" : "Dealer",
     };
 
-    private static Part Outgoing(decimal rate = 4000m) => new()
+    private static Part Outgoing(decimal rate = 4000m, decimal dealerRate = 0m) => new()
     {
-        Id = 31, ItemCode = "PS-100", Name = "Controller board", CustomerRate = rate,
+        Id = 31, ItemCode = "PS-100", Name = "Controller board", CustomerRate = rate, DealerRate = dealerRate,
     };
+
+    /// <summary>A dealer's replacement is billed at the dealer rate, as the old app's PI page billed it —
+    /// it used to go out at the customer rate for everybody.</summary>
+    [Fact]
+    public void A_dealers_replacement_is_billed_at_the_dealer_rate()
+    {
+        var line = ServicesEndpoints.ReplacementBillingLine(
+            Job(WarrantyStatus.OutOfWarranty, dealerId: 5), Outgoing(rate: 4000m, dealerRate: 3200m), "SN-OUT");
+
+        line!.UnitPrice.Should().Be(3200m);
+        line.Amount.Should().Be(3200m);
+    }
+
+    /// <summary>A direct customer's swap or total loss on the same item is billed at the customer rate.</summary>
+    [Fact]
+    public void A_customers_replacement_is_billed_at_the_customer_rate()
+        => ServicesEndpoints.ReplacementBillingLine(
+                Job(WarrantyStatus.OutOfWarranty), Outgoing(rate: 4000m, dealerRate: 3200m), "SN-OUT")!
+            .UnitPrice.Should().Be(4000m);
+
+    /// <summary>A part nobody gave a dealer rate is billed to a dealer at the customer rate, not at nothing.</summary>
+    [Fact]
+    public void A_dealer_with_no_dealer_rate_set_falls_back_to_the_customer_rate()
+        => ServicesEndpoints.ReplacementBillingLine(
+                Job(WarrantyStatus.OutOfWarranty, dealerId: 5), Outgoing(rate: 4000m, dealerRate: 0m), "SN-OUT")!
+            .UnitPrice.Should().Be(4000m);
 
     /// <summary>The case that was broken: the customer pays for the unit, so the job has to carry a
     /// line that says what it cost.</summary>
