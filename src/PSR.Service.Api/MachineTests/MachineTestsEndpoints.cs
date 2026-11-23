@@ -1,13 +1,16 @@
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 using PSR.Service.Api.Data;
-using PSR.Service.Api.Settings;
 
 namespace PSR.Service.Api.MachineTests;
 
 /// <summary>Machine factory-test lookups (legacy passtestdata), proxied from Hostinger. JWT-protected;
 /// clients call these, never Hostinger directly. Used by inward autofill + warranty check + field
-/// service entry. When passtestdata migrates to RDS this contract stays; only the client swaps.</summary>
+/// service entry. When passtestdata migrates to RDS this contract stays; only the client swaps.
+///
+/// Warranty is InvDate + the dealer's term. The dealer is found by matching the record's Customer to
+/// the dealer master (<see cref="DealerWarrantyMatcher"/>); when that finds none or several, the
+/// verdict is UNKNOWN and the client asks the operator to pick one, then calls /warranty with it.</summary>
 public static class MachineTestsEndpoints
 {
     public static IEndpointRouteBuilder MapMachineTestEndpoints(this IEndpointRouteBuilder app)
@@ -18,6 +21,7 @@ public static class MachineTestsEndpoints
         group.MapGet("/matches/{serial}", MatchesBySerialAsync);
         group.MapGet("/customers", CustomersAsync);
         group.MapGet("/search", SearchAsync);
+        group.MapGet("/warranty", WarrantyAsync);
 
         return app;
     }
@@ -26,7 +30,7 @@ public static class MachineTestsEndpoints
     /// customer or the model, and returns the whole row for each hit so the page can show every field
     /// without a second round trip. 503 when the passtest source is unreachable.</summary>
     private static async Task<Results<Ok<MachineSearchDto>, BadRequest<string>, StatusCodeHttpResult>> SearchAsync(
-        string? q, int? limit, PasstestRepository passtest, CancellationToken ct)
+        string? q, int? limit, AppDbContext db, PasstestRepository passtest, CancellationToken ct)
     {
         if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
@@ -39,22 +43,22 @@ public static class MachineTestsEndpoints
         var rows = await passtest.SearchAsync(term, take + 1, ct);
         if (rows is null) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
+        var dealers = await DealerWarrantyMatcher.LoadAsync(db, null, ct);
         var truncated = rows.Count > take;
-        var records = rows.Take(take).Select(r => MachineRecordMapper.Map(r, term)).ToList();
+        var records = rows.Take(take).Select(r => MachineRecordMapper.Map(r, term, dealers)).ToList();
         return TypedResults.Ok(new MachineSearchDto(records, take, truncated));
     }
 
-    /// <summary>Resolve a unit by any of its serials. Warranty is InvDate + warranty months; the months
-    /// come from the machine's own passtestdata row when it has one, and only otherwise from what
-    /// ResolveWarrantyMonthsAsync works out. 404 when not found; 503 when passtest is unreachable.</summary>
+    /// <summary>Resolve a unit by any of its serials. <paramref name="dealerId"/> is a dealer the
+    /// operator picked; it overrides the match on the record's customer. 404 when not found; 503 when
+    /// passtest is unreachable.</summary>
     private static async Task<Results<Ok<MachineTestDto>, NotFound, StatusCodeHttpResult>> BySerialAsync(
-        string serial, long? dealerId, AppDbContext db, PasstestRepository passtest,
-        AppSettingsService settings, CancellationToken ct)
+        string serial, long? dealerId, AppDbContext db, PasstestRepository passtest, CancellationToken ct)
     {
         if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
-        var months = await ResolveWarrantyMonthsAsync(serial, dealerId, db, settings, ct);
-        var dto = await passtest.FindBySerialAsync(serial, months, ct);
+        var dealers = await DealerWarrantyMatcher.LoadAsync(db, dealerId, ct);
+        var dto = await passtest.FindBySerialAsync(serial, dealers, ct);
         return dto is null ? TypedResults.NotFound() : TypedResults.Ok(dto);
     }
 
@@ -65,61 +69,39 @@ public static class MachineTestsEndpoints
     /// its own. 503 when passtest is unreachable.</summary>
     private static async Task<Results<Ok<MachineTestMatchesDto>, StatusCodeHttpResult>> MatchesBySerialAsync(
         string serial, long? dealerId, int? limit, AppDbContext db, PasstestRepository passtest,
-        AppSettingsService settings, CancellationToken ct)
+        CancellationToken ct)
     {
         if (!passtest.Configured) return TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
         // Capped below the repository's own limit of 50, so the extra row fetched to detect
         // truncation is never the one the clamp swallows.
         var take = Math.Clamp(limit ?? 20, 1, 40);
-        var months = await ResolveWarrantyMonthsAsync(serial, dealerId, db, settings, ct);
+        var dealers = await DealerWarrantyMatcher.LoadAsync(db, dealerId, ct);
         // One extra row is fetched purely to know whether the cap hid anything.
-        var matches = await passtest.FindMatchesBySerialAsync(serial, months, take + 1, ct);
+        var matches = await passtest.FindMatchesBySerialAsync(serial, dealers, take + 1, ct);
 
         var truncated = matches.Count > take;
         return TypedResults.Ok(new MachineTestMatchesDto(matches.Take(take).ToList(), truncated));
     }
 
-    /// <summary>Warranty months when the machine's own passtestdata row carries none. Best source first.
-    ///
-    /// Callers that know the dealer (the inward form in dealer mode) pass it. The ones that cannot —
-    /// the dashboard's quick check, the global-search serial filter, and a direct-customer inward —
-    /// used to pass nothing, and a null months figure makes PasstestRepository return UNKNOWN every
-    /// time. So fall back: a serial that has been through here before carries its dealer on the
-    /// service job, and failing that the configured house default answers for the rest.
-    ///
-    /// 0 is "not known" throughout (Dealer.WarrantyMonths defaults to it), so a zero at any step
-    /// falls through to the next rather than being taken as an answer. All three failing returns
-    /// null, which is the original UNKNOWN behaviour.</summary>
-    private static async Task<int?> ResolveWarrantyMonthsAsync(
-        string serial, long? dealerId, AppDbContext db, AppSettingsService settings, CancellationToken ct)
+    /// <summary>The verdict for a purchase date under a dealer the operator picked — what a lookup that
+    /// could not match the record's customer is settled with. Takes the invoice date the client already
+    /// holds rather than re-reading the factory record, so the answer is for the exact row on screen
+    /// (a serial can carry several). No passtest round trip, so it works while Hostinger is down.
+    /// 404 when the dealer does not exist.</summary>
+    private static async Task<Results<Ok<WarrantyVerdictDto>, NotFound>> WarrantyAsync(
+        long dealerId, DateTime? invoiceDate, AppDbContext db, CancellationToken ct)
     {
-        if (dealerId is { } did)
-        {
-            var m = await db.Dealers.AsNoTracking()
-                .Where(d => d.Id == did).Select(d => d.WarrantyMonths).FirstOrDefaultAsync(ct);
-            if (m > 0) return m;
-        }
+        var dealer = await db.Dealers.AsNoTracking()
+            .Where(d => d.Id == dealerId)
+            .Select(d => new { d.Id, d.Name, d.WarrantyMonths })
+            .FirstOrDefaultAsync(ct);
+        if (dealer is null) return TypedResults.NotFound();
 
-        var jobMonths = await DealerMonthsForSerialQuery(db, serial).FirstOrDefaultAsync(ct);
-        if (jobMonths > 0) return jobMonths;
-
-        var fallback = await settings.DefaultWarrantyMonthsAsync(ct);
-        return fallback > 0 ? fallback : null;
+        int? months = dealer.WarrantyMonths > 0 ? dealer.WarrantyMonths : null;
+        var (status, expiry) = WarrantyVerdict.Compute(invoiceDate?.Date, months);
+        return TypedResults.Ok(new WarrantyVerdictDto(status, expiry, months, dealer.Id, dealer.Name));
     }
-
-    /// <summary>Warranty months of the dealer on the most recent live job for a serial.
-    ///
-    /// The ordering is applied to the joined rows rather than to the jobs before the join: ordering a
-    /// source and then joining it leaves which row surfaces up to the provider, and picking the wrong
-    /// job here means quoting the wrong dealer's warranty term. Exposed so a test can assert the SQL
-    /// still carries the ORDER BY.</summary>
-    public static IQueryable<int> DealerMonthsForSerialQuery(AppDbContext db, string serial) =>
-        from j in db.Services.AsNoTracking()
-        join d in db.Dealers.AsNoTracking() on j.DealerId equals d.Id
-        where !j.IsDeleted && j.SerialNo == serial
-        orderby j.Id descending
-        select d.WarrantyMonths;
 
     private static async Task<Ok<MachineCustomersDto>> CustomersAsync(
         PasstestRepository passtest, CancellationToken ct)

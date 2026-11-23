@@ -38,11 +38,10 @@ public class PasstestRepository(
     /// every match instead, because picking the wrong one there fills a form with another unit's
     /// details.
     ///
-    /// <paramref name="fallbackMonths"/> is only used when the machine's own row carries no warranty
-    /// term. passtestdata.Warranty is per-machine — what was actually sold — so it outranks the
-    /// dealer's blanket term and the house default.</summary>
-    public async Task<MachineTestDto?> FindBySerialAsync(string serial, int? fallbackMonths, CancellationToken ct)
-        => (await FindMatchesBySerialAsync(serial, fallbackMonths, 1, ct)).FirstOrDefault();
+    /// The warranty term is the dealer's, found by matching the row's Customer through
+    /// <paramref name="dealers"/>. The row's own Warranty column is no longer read for the verdict.</summary>
+    public async Task<MachineTestDto?> FindBySerialAsync(string serial, DealerWarrantyMatcher dealers, CancellationToken ct)
+        => (await FindMatchesBySerialAsync(serial, dealers, 1, ct)).FirstOrDefault();
 
     /// <summary>Every passtestdata row carrying this serial in any of its serial columns, newest
     /// invoice first.
@@ -52,7 +51,7 @@ public class PasstestRepository(
     /// was fitted to. The old lookup took whichever row the server happened to return first, so an
     /// inward form could be autofilled from a five-year-old test of the same unit.</summary>
     public async Task<List<MachineTestDto>> FindMatchesBySerialAsync(
-        string serial, int? fallbackMonths, int limit, CancellationToken ct)
+        string serial, DealerWarrantyMatcher dealers, int limit, CancellationToken ct)
     {
         var sn = serial.Trim();
         if (sn.Length == 0 || !Configured) return [];
@@ -66,7 +65,7 @@ public class PasstestRepository(
             rows = await FetchRowsAsync(sn, take, ct);
             if (rows is not null) cache.Set(cacheKey, rows, TimeSpan.FromMinutes(_opt.SerialCacheMinutes));
         }
-        return rows is null ? [] : rows.Select(r => Map(r, fallbackMonths)).ToList();
+        return rows is null ? [] : rows.Select(r => Map(r, dealers)).ToList();
     }
 
     public async Task<List<string>> CustomersAsync(CancellationToken ct)
@@ -282,7 +281,7 @@ public class PasstestRepository(
         return conn;
     }
 
-    private static MachineTestDto Map(Dictionary<string, string> row, int? fallbackMonths)
+    private static MachineTestDto Map(Dictionary<string, string> row, DealerWarrantyMatcher dealers)
     {
         string? Get(string k) => row.TryGetValue(k, out var v) && v.Trim().Length > 0 ? v.Trim() : null;
 
@@ -297,38 +296,27 @@ public class PasstestRepository(
 
         var addr = string.Join(", ", new[] { Get("Address1"), Get("Address2") }.Where(s => s is not null));
 
-        // The machine's own term wins: it is what was sold with this unit. The dealer term (or the
-        // house default) only answers for units whose row has no warranty figure.
-        var machineMonths = ParseWarrantyMonths(Get("Warranty"));
-        var months = machineMonths ?? fallbackMonths;
-        var source = machineMonths is not null ? "machine" : months is not null ? "dealer" : null;
-
-        string status = "UNKNOWN";
-        DateTime? expiry = null;
-        if (invDate is { } inv && months is { } m && m > 0)
-        {
-            expiry = inv.AddMonths(m);
-            // Whole months elapsed, matching the legacy dialog: the anniversary of the invoice is the
-            // first day OUT, not the last day IN.
-            // The shop's today. On UtcNow the verdict flipped a day early for the five and a half
-            // hours after midnight here, which is a warranty claim answered wrongly.
-            var today = Common.ShopClock.Today;
-            var elapsed = ((today.Year - inv.Year) * 12) + (today.Month - inv.Month);
-            if (today.Day < inv.Day) elapsed--;
-            status = elapsed < m ? "IN" : "OUT";
-        }
+        // The term is the dealer's: the record's customer is matched to the dealer master. No match, or
+        // more than one, leaves the verdict UNKNOWN for the operator to settle by picking a dealer.
+        var dealer = dealers.Resolve(Get("Customer"));
+        var months = dealer.Months;
+        var source = months is null ? null
+            : dealer.Kind == DealerMatchKind.Selected ? "selected" : "dealer";
+        var (status, expiry) = WarrantyVerdict.Compute(invDate, months);
 
         return new MachineTestDto(
             Get("m_model"), Get("m_ser_no"),
             matched, matched is null ? null : ComponentMap.FirstOrDefault(c => c.Field == matched).Label ?? "Machine",
             invDate, Get("Customer"), addr.Length > 0 ? addr : null,
-            status, expiry, months, source, components);
+            status, expiry, months, source, components,
+            dealer.Dealer?.Id, dealer.Dealer?.Name, dealer.Kind, dealer.Candidates);
     }
 
     /// <summary>Warranty months out of the legacy free-text <c>Warranty</c> column. It is a VARCHAR
     /// filled in by hand, so it holds "24", "12 months" and "15/r" alike — the "/r" suffix marks a
-    /// replacement unit and the months are the part before the slash. Mirrors the old app's parse so
-    /// the same row yields the same verdict in both.</summary>
+    /// replacement unit and the months are the part before the slash. Mirrors the old app's parse.
+    /// No longer feeds the warranty verdict (that is the dealer's term now); it only suggests a term
+    /// for a name the dealer import has not seen in dealer_warranty.</summary>
     public static int? ParseWarrantyMonths(string? raw)
     {
         var s = raw?.Trim();

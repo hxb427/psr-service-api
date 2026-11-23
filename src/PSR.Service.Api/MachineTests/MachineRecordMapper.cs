@@ -2,7 +2,8 @@ namespace PSR.Service.Api.MachineTests;
 
 /// <summary>Turns a raw passtestdata row into the shape the SN Info page binds to: the whole row in
 /// column order with readable labels, plus the handful of fields a result list needs and the warranty
-/// worked out from the row's own figures.</summary>
+/// worked out from the purchase date and the dealer's term (the row's Customer matched to the dealer
+/// master — the row's own Warranty column is shown, not used).</summary>
 public static class MachineRecordMapper
 {
     /// <summary>Legacy column names are terse and inconsistent ("m_232_no", "bp_no"). Anything not
@@ -47,25 +48,13 @@ public static class MachineRecordMapper
     public static string Label(string column) =>
         Labels.TryGetValue(column, out var l) ? l : Prettify(column);
 
-    public static MachineRecordDto Map(MachineRawRow row, string? term = null)
+    /// <summary><paramref name="dealers"/> null reads every row as unmatched (UNKNOWN).</summary>
+    public static MachineRecordDto Map(MachineRawRow row, string? term = null, DealerWarrantyMatcher? dealers = null)
     {
         var invDate = PasstestRepository.ParseLegacyDate(row.Get("InvDate"));
-        var months = PasstestRepository.ParseWarrantyMonths(row.Get("Warranty"));
-
-        string status = "UNKNOWN";
-        DateTime? expiry = null;
-        if (invDate is { } inv && months is { } m && m > 0)
-        {
-            expiry = inv.AddMonths(m);
-            // Whole months elapsed, matching the legacy dialog: the invoice anniversary is the first
-            // day OUT, not the last day IN.
-            // The shop's today. On UtcNow the verdict flipped a day early for the five and a half
-            // hours after midnight here, which is a warranty claim answered wrongly.
-            var today = Common.ShopClock.Today;
-            var elapsed = ((today.Year - inv.Year) * 12) + (today.Month - inv.Month);
-            if (today.Day < inv.Day) elapsed--;
-            status = elapsed < m ? "IN" : "OUT";
-        }
+        var dealer = (dealers ?? DealerWarrantyMatcher.Empty).Resolve(row.Get("Customer"));
+        var months = dealer.Months;
+        var (status, expiry) = WarrantyVerdict.Compute(invDate, months);
 
         var (matchedField, matchedValue) = FindMatch(row, term);
 
@@ -76,7 +65,8 @@ public static class MachineRecordMapper
         return new MachineRecordDto(
             row.Get("m_ser_no"), row.Get("m_model"), row.Get("Customer"), invDate,
             matchedField, matchedField is null ? null : Label(matchedField), matchedValue,
-            months, expiry, status, fields);
+            months, expiry, status, fields,
+            dealer.Dealer?.Id, dealer.Dealer?.Name, dealer.Kind, dealer.Candidates);
     }
 
     /// <summary>Which column the search term hit. Without it a result list is a wall of identical

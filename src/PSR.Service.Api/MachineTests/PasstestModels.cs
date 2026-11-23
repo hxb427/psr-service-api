@@ -16,7 +16,12 @@ public class PasstestOptions
 }
 
 /// <summary>One serviced-unit factory-test record resolved from passtestdata, with warranty computed
-/// server-side. Shape the clients bind to — decoupled from the legacy column names.</summary>
+/// server-side. Shape the clients bind to — decoupled from the legacy column names.
+///
+/// The term is the dealer's: the record's Customer is matched to the dealer master
+/// (<see cref="DealerWarrantyMatcher"/>). DealerMatch says how — exact | selected | multiple | none —
+/// and on multiple or none the verdict is UNKNOWN until the operator picks a dealer, from
+/// DealerCandidates (the colliding dealers, or near spellings) or from the whole list.</summary>
 public record MachineTestDto(
     string? Model,
     string? MachineSerial,
@@ -28,8 +33,23 @@ public record MachineTestDto(
     string WarrantyStatus,          // IN | OUT | UNKNOWN
     DateTime? WarrantyExpiry,
     int? WarrantyMonths,
-    string? WarrantyMonthsSource,   // machine | dealer — which term produced the verdict
-    List<MachineComponentDto> Components);
+    string? WarrantyMonthsSource,   // dealer | selected — which term produced the verdict
+    List<MachineComponentDto> Components,
+    long? DealerId,
+    string? DealerName,
+    string DealerMatch,
+    List<DealerCandidateDto> DealerCandidates);
+
+/// <summary>A dealer a factory record could belong to.</summary>
+public record DealerCandidateDto(long Id, string Name, int WarrantyMonths, bool IsActive);
+
+/// <summary>The verdict for a purchase date under a dealer the operator picked by hand.</summary>
+public record WarrantyVerdictDto(
+    string WarrantyStatus,          // IN | OUT | UNKNOWN
+    DateTime? WarrantyExpiry,
+    int? WarrantyMonths,
+    long DealerId,
+    string DealerName);
 
 public record MachineComponentDto(string Field, string Label, string Serial);
 
@@ -68,7 +88,8 @@ public record MachineRawRow(List<KeyValuePair<string, string>> Cells)
 public record MachineFieldDto(string Column, string Label, string? Value);
 
 /// <summary>A passtestdata row for the SN Info page: a few fields lifted out so a result list can be
-/// rendered, the computed warranty, and then the complete row in column order.</summary>
+/// rendered, the computed warranty (dealer term, as on <see cref="MachineTestDto"/>), and then the
+/// complete row in column order.</summary>
 public record MachineRecordDto(
     string? MachineSerial,
     string? Model,
@@ -80,6 +101,10 @@ public record MachineRecordDto(
     int? WarrantyMonths,
     DateTime? WarrantyExpiry,
     string WarrantyStatus,          // IN | OUT | UNKNOWN
-    List<MachineFieldDto> Fields);
+    List<MachineFieldDto> Fields,
+    long? DealerId,
+    string? DealerName,
+    string DealerMatch,
+    List<DealerCandidateDto> DealerCandidates);
 
 public record MachineSearchDto(List<MachineRecordDto> Records, int Limit, bool Truncated);

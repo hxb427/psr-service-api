@@ -47,13 +47,19 @@ public class MachineRecordMapperTests
         fields[2].Value.Should().Be("Sri Ram");
     }
 
+    private static DealerWarrantyMatcher Dealers(params (long Id, string Name, int Months)[] dealers) =>
+        new(dealers.Select(d => new DealerCandidateDto(d.Id, d.Name, d.Months, true)), null);
+
     [Fact]
-    public void Warranty_is_computed_from_the_rows_own_figures()
+    public void Warranty_is_the_matched_dealers_term_not_the_rows_own()
     {
         var purchased = DateTime.UtcNow.Date.AddMonths(-6);
-        var row = Row(("InvDate", purchased.ToString("yyyy-MM-dd")), ("Warranty", "24"));
-        var record = MachineRecordMapper.Map(row);
+        // The row says 3 months; the dealer's term is 24. The dealer's wins — 3 would read OUT.
+        var row = Row(("InvDate", purchased.ToString("yyyy-MM-dd")), ("Warranty", "3"), ("Customer", "M/s. Sri Ram & Co."));
+        var record = MachineRecordMapper.Map(row, dealers: Dealers((7, "SRI RAM AND CO", 24)));
 
+        record.DealerMatch.Should().Be(DealerMatchKind.Exact);
+        record.DealerId.Should().Be(7);
         record.WarrantyMonths.Should().Be(24);
         record.WarrantyStatus.Should().Be("IN");
         record.WarrantyExpiry.Should().Be(purchased.AddMonths(24));
@@ -62,14 +68,23 @@ public class MachineRecordMapperTests
     [Fact]
     public void An_expired_term_reads_out()
     {
-        var row = Row(("InvDate", DateTime.UtcNow.Date.AddMonths(-30).ToString("yyyy-MM-dd")), ("Warranty", "24"));
-        MachineRecordMapper.Map(row).WarrantyStatus.Should().Be("OUT");
+        var row = Row(("InvDate", DateTime.UtcNow.Date.AddMonths(-30).ToString("yyyy-MM-dd")), ("Customer", "Sri Ram"));
+        MachineRecordMapper.Map(row, dealers: Dealers((1, "Sri Ram", 24))).WarrantyStatus.Should().Be("OUT");
     }
 
     [Fact]
-    public void Missing_figures_leave_the_verdict_unknown()
+    public void An_unmatched_customer_leaves_the_verdict_unknown_even_with_a_warranty_column()
     {
-        MachineRecordMapper.Map(Row(("Warranty", "24"))).WarrantyStatus.Should().Be("UNKNOWN");
-        MachineRecordMapper.Map(Row(("InvDate", "2024-01-15"))).WarrantyStatus.Should().Be("UNKNOWN");
+        var row = Row(("InvDate", "2024-01-15"), ("Warranty", "24"), ("Customer", "Walk-in Farmer"));
+        var record = MachineRecordMapper.Map(row, dealers: Dealers((1, "Sri Ram", 24)));
+
+        record.DealerMatch.Should().Be(DealerMatchKind.None);
+        record.WarrantyMonths.Should().BeNull();
+        record.WarrantyStatus.Should().Be("UNKNOWN");
     }
+
+    [Fact]
+    public void Missing_purchase_date_leaves_the_verdict_unknown()
+        => MachineRecordMapper.Map(Row(("Customer", "Sri Ram")), dealers: Dealers((1, "Sri Ram", 24)))
+            .WarrantyStatus.Should().Be("UNKNOWN");
 }
